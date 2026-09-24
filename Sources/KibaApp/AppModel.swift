@@ -3,7 +3,7 @@ import KibaCore
 import Observation
 
 /// Builds the backend; a failure leaves the panel unavailable until Retry.
-typealias Connect = @Sendable () throws(KibaError) -> any Backend
+typealias Connect = @Sendable () throws -> any Backend
 
 /// One row the cursor can rest on, in panel order.
 enum ActionKey: Hashable, Sendable {
@@ -159,8 +159,8 @@ final class AppModel {
         refreshing = true
         let connect = connect, known = backend
         Task {
-            let result = await Task.detached { () -> Result<(any Backend, Snapshot), KibaError> in
-                do throws(KibaError) {
+            let result = await Task.detached { () -> Result<(any Backend, Snapshot), any Error> in
+                do {
                     let b: any Backend
                     if let known {
                         b = known
@@ -176,7 +176,7 @@ final class AppModel {
         }
     }
 
-    private func finish(_ result: Result<(any Backend, Snapshot), KibaError>) {
+    private func finish(_ result: Result<(any Backend, Snapshot), any Error>) {
         refreshing = false
         switch result {
         case .success(let (b, s)):
@@ -186,8 +186,8 @@ final class AppModel {
             statusError = ""
             apply(s)
         case .failure(let e):
-            availability = .failed(e.reason)
-            statusError = e.reason
+            availability = .failed(Self.reason(e))
+            statusError = Self.reason(e)
             apply(Snapshot(providers: []))
         }
         if queued { refresh() }

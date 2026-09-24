@@ -7,20 +7,23 @@ public struct ClaudeLive {
     let paths: Paths
     let store: Store
     let secrets: SecretStore
+    let root: URL?
 
     static let comma = Data(",".utf8)
     static let member = Data("\"\(ClaudeIdentity.Key.account)\":".utf8)
     static let open = Data("{".utf8)
     static let close = Data("}".utf8)
 
-    /// `secrets` is `ClaudeSecrets.live(paths:root: nil)` in production.
-    public init(paths: Paths, store: Store, secrets: SecretStore) {
+    /// `secrets` is `ClaudeSecrets.live(paths:root:)` for the live login; `root`
+    /// reads a throwaway home instead of the live one.
+    public init(paths: Paths, store: Store, secrets: SecretStore, root: URL? = nil) {
         self.paths = paths
         self.store = store
         self.secrets = secrets
+        self.root = root
     }
 
-    var configFile: URL { paths.claudeConfigFile(root: nil) }
+    var configFile: URL { paths.claudeConfigFile(root: root) }
 
     /// Nil when the config or the credentials are missing.
     public func identity() throws -> Identity? {

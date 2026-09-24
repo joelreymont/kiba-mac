@@ -32,7 +32,7 @@ public struct FileSecret: SecretStore {
     }
 }
 
-/// A secret held in memory, for tests.
+/// A secret held in memory: a fresh login before it is saved, and tests.
 public final class MemorySecret: SecretStore {
     private let bytes: OSAllocatedUnfairLock<Data?>
 

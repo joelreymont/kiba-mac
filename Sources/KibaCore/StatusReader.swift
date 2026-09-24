@@ -3,7 +3,7 @@ import Foundation
 /// Reads what the panel shows: every provider's saved accounts and live login.
 /// Never opens a write transaction. Each provider is read on its own: a
 /// failure becomes that provider's `error` and leaves the others untouched.
-public struct StatusReader {
+public struct StatusReader: Sendable {
     let paths: Paths
     let store: Store
 

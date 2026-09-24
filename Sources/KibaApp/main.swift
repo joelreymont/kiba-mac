@@ -18,7 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-private let connect: Connect = { EmptyBackend() }
+private let connect: Connect = {
+    try CoreBackend(env: ProcessInfo.processInfo.environment, username: NSUserName())
+}
 
 let app = NSApplication.shared
 let delegate = AppDelegate(connect: connect)
