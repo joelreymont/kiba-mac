@@ -2,18 +2,19 @@ import KibaCore
 import SwiftUI
 
 /// The signature: a 4 pt bar under an account row, one segment per figure,
-/// each filled from the left to the share of its window left.
+/// each filled from the left to the share of its window left and colored
+/// by its own level. A drained bar shows every window as an empty track.
 struct ReservoirView: View {
     let figures: [Figure]
-    let tint: Color
+    let drained: Bool
 
     @Environment(\.accessibilityReduceMotion) private var still
 
     var body: some View {
         HStack(spacing: Theme.barGap) {
             ForEach(Array(figures.enumerated()), id: \.offset) { _, f in
-                Level(fraction: Self.fraction(f))
-                    .fill(tint)
+                Level(fraction: drained ? 0 : Self.fraction(f))
+                    .fill(Rows.isLow(f) ? Theme.low : Theme.room)
                     .background(RoundedRectangle(cornerRadius: Theme.barRadius).fill(Theme.track))
             }
         }

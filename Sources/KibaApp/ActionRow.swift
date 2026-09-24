@@ -26,8 +26,7 @@ struct ActionRow: View {
                     .fixedSize()
             }
         }
-        .padding(.leading, Theme.inset + Theme.textLead)
-        .padding(.trailing, Theme.inset)
+        .padding(.horizontal, Theme.inset)
         .padding(.vertical, Theme.actionPad)
         .background(
             RoundedRectangle(cornerRadius: Theme.corner)

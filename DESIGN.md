@@ -638,10 +638,10 @@ Tokens (`Theme.swift`):
 
 | token   | light      | dark       | use                                   |
 |---------|------------|------------|---------------------------------------|
-| `room`  | `#2E9E6B`  | `#4FC08A`  | ok rows, filled reservoir             |
-| `low`   | `#C98A1E`  | `#E2A93B`  | tight rows                            |
-| `out`   | `#C93B3B`  | `#E25555`  | blocked and dead rows, urgent icon    |
-| `idle`  | secondary label color   | unknown rows, meta text            |
+| `room`  | `#2E9E6B`  | `#4FC08A`  | ok figures; segments half or more full |
+| `low`   | `#C98A1E`  | `#E2A93B`  | tight figures; segments under half    |
+| `out`   | `#C93B3B`  | `#E25555`  | blocked and dead figures, urgent icon |
+| `idle`  | secondary label color   | unknown figures, meta text         |
 | `ink`   | label color             | names                                |
 | `track` | quaternary label color  | empty reservoir                      |
 | accent  | `Color.accentColor`     | the active account's name            |
@@ -659,16 +659,16 @@ Layout (width 340, vertical padding 10, row inset 10):
 │ Room to work                 Probed 2 min ago│  title (serif) · meta
 │ ──────────────────────────────────────────── │
 │ CLAUDE CODE                                  │  eyebrow
-│ ● joel@x.com (max)            72% · 40% · 9% │  name · plan · figures
-│   ████████░░  ████░░░░░░  █░░░░░░░░░         │  reservoir
-│ ● other@x.com (pro, 5d)               limit  │
-│   ░░░░░░░░░░  ██████░░░░                     │
-│   Save the current login                     │  action rows
-│   Add account…                               │
+│ joel@x.com (max)              72% · 40% · 9% │  name · plan · figures
+│ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir
+│ other@x.com (pro, 5d)                 limit  │
+│ ░░░░░░░░░░  ██████░░░░                       │
+│ Save the current login                       │  action rows
+│ Add account…                                 │
 │ CODEX                                        │
-│ ● me@y.com (plus)                  88% · 61% │
-│   █████████░  ██████░░░░                     │
-│   Add account…                               │
+│ me@y.com (plus)                    88% · 61% │
+│ █████████░  ██████░░░░                       │
+│ Add account…                                 │
 │ ──────────────────────────────────────────── │
 │ Refresh usage                    2 min ago   │
 └──────────────────────────────────────────────┘
@@ -676,8 +676,12 @@ Layout (width 340, vertical padding 10, row inset 10):
 
 Signature — the **reservoir**: under every account row a 4 pt bar split
 into one segment per window (session, week, each model window, in figure
-order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100 in
-the row's state color. A used-up segment is an empty track; the reset
+order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100,
+each segment in its own color: `room` with half or more left, `low` under
+half (`Rows.isLow`). A used-up segment is an empty track, and a dead row's
+bar is drained: every segment an empty track. The bar says how much of each
+window is left and nothing else; the row's verdict lives in the sort order,
+the figures' color and the plan text. There is no status dot. The reset
 countdown lives in the plan text `(pro, 5d)`. The menu bar icon is the same
 idea at 18 px: one thin vertical cell per provider, filled to the active
 account's headline remaining, outline only when unknown; drawn `out` when
@@ -687,8 +691,7 @@ label color.
 Rows: no boxes; a row highlights with `ink` at 10 % under the pointer or the
 keyboard cursor, 5 % when active. Name elides in the middle; plan and
 figures always fit. Blocked and dead names are `idle`; blocked figures read
-`limit`; dead plan text carries "log in again". Unknown dots are 60 %
-opacity. Motion: reservoir fills animate `easeOut(0.35)` on data change,
+`limit`; dead plan text carries "log in again". Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
 Keyboard: ↑/↓ move the cursor (scrolling it into view), ⏎ activates, ⎋
 closes; hover moves the cursor without scrolling.

@@ -11,13 +11,13 @@ enum Theme {
     static let lowNS = dynamic(light: 0xC98A1E, dark: 0xE2A93B)
     static let outNS = dynamic(light: 0xC93B3B, dark: 0xE25555)
 
-    /// Ok rows and filled reservoir.
+    /// Figures of ok rows; reservoir segments with half or more left.
     static let room = Color(nsColor: roomNS)
-    /// Tight rows.
+    /// Figures of tight rows; reservoir segments under half.
     static let low = Color(nsColor: lowNS)
-    /// Blocked and dead rows, errors.
+    /// Figures of blocked and dead rows, errors, the urgent icon.
     static let out = Color(nsColor: outNS)
-    /// Unknown rows, meta text.
+    /// Figures of unknown rows, meta text.
     static let idle = Color(nsColor: .secondaryLabelColor)
     /// Names.
     static let ink = Color(nsColor: .labelColor)
@@ -58,11 +58,8 @@ enum Theme {
     static let gutter: CGFloat = 6
     /// Row content inset inside its highlight.
     static let inset: CGFloat = 10
-    static let dot: CGFloat = 8
-    /// Between the dot, the name, the plan, and the figures.
+    /// Between the name, the plan, and the figures.
     static let gap: CGFloat = 8
-    /// Leading edge of names, reservoirs, and action labels within a row.
-    static let textLead: CGFloat = dot + gap
     static let rowPad: CGFloat = 6
     static let actionPad: CGFloat = 5
     /// Between a row's name line and its reservoir.
@@ -86,7 +83,6 @@ enum Theme {
     static let hover = 0.10
     /// Row fill of the active account.
     static let current = 0.05
-    static let unknownDot = 0.6
 
     private static func dynamic(light: UInt32, dark: UInt32) -> NSColor {
         NSColor(name: nil) { look in

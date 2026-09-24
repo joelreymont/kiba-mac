@@ -1,7 +1,7 @@
 import KibaCore
 import SwiftUI
 
-/// A saved account: state dot, name, plan, figures, and its reservoir below.
+/// A saved account: name, plan, figures, and its reservoir below.
 /// No box: the row lights under the pointer or the keyboard cursor, and
 /// faintly while it is the live login.
 struct AccountRow: View {
@@ -42,10 +42,6 @@ struct AccountRow: View {
         let plan = Rows.planText(account, now: model.now)
         return VStack(alignment: .leading, spacing: Theme.lineGap) {
             HStack(spacing: Theme.gap) {
-                Circle()
-                    .fill(Theme.color(state))
-                    .frame(width: Theme.dot, height: Theme.dot)
-                    .opacity(state == .unknown ? Theme.unknownDot : 1)
                 Text(account.name.raw)
                     .font(account.active ? Theme.nameActive : Theme.name)
                     .foregroundStyle(account.active ? Theme.accent : red ? Theme.idle : Theme.ink)
@@ -65,8 +61,7 @@ struct AccountRow: View {
                     .lineLimit(1)
                     .fixedSize()
             }
-            ReservoirView(figures: Rows.figures(account.usage), tint: Theme.color(state))
-                .padding(.leading, Theme.textLead)
+            ReservoirView(figures: Rows.figures(account.usage), drained: state == .dead)
         }
         .onTapGesture { model.trigger(key) }
         .help(Rows.tooltip(provider, account, now: model.now).joined(separator: "\n"))
@@ -95,6 +90,5 @@ struct AccountRow: View {
         }
         .font(Theme.name)
         .buttonStyle(.borderless)
-        .padding(.leading, Theme.textLead)
     }
 }

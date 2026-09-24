@@ -120,6 +120,11 @@ public enum Rows {
         return out
     }
 
+    /// Under half of the window is left: the segment draws in `low`.
+    public static func isLow(_ f: Figure) -> Bool {
+        f.left < Level.half
+    }
+
     /// `"72% · 40% · 9%"`, or `"limit"` while a window is used up.
     public static func figuresText(_ u: UsageRecord?) -> String {
         if state(u, active: false) == .blocked { return Copy.limit }
