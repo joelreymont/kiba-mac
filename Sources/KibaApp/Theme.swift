@@ -11,44 +11,32 @@ enum Theme {
     static let lowNS = dynamic(light: 0xC98A1E, dark: 0xE2A93B)
     static let outNS = dynamic(light: 0xC93B3B, dark: 0xE25555)
 
-    /// Figures of ok rows; reservoir segments with half or more left.
+    /// Reservoir segments with half or more left.
     static let room = Color(nsColor: roomNS)
-    /// Figures of tight rows; reservoir segments under half.
+    /// Reservoir segments under half.
     static let low = Color(nsColor: lowNS)
-    /// Figures of blocked and dead rows, errors, the urgent icon.
+    /// Spent reservoir segments, "limit" and "log in again", errors, the urgent icon.
     static let out = Color(nsColor: outNS)
-    /// Figures of unknown rows, meta text.
+    /// Meta text, plan text, idle controls.
     static let idle = Color(nsColor: .secondaryLabelColor)
-    /// Names.
+    /// Names and figures: text is never colored by state, the bars are.
     static let ink = Color(nsColor: .labelColor)
-    /// Empty reservoir.
+    /// Empty reservoir; `trackContrast` under Increase Contrast.
     static let track = Color(nsColor: .quaternaryLabelColor)
+    static let trackContrast = Color(nsColor: .tertiaryLabelColor)
     /// The active account's name.
     static let accent = Color.accentColor
 
-    static func color(_ s: RowState) -> Color {
-        switch s {
-        case .ok: return room
-        case .tight: return low
-        case .blocked, .dead: return out
-        case .unknown: return idle
-        }
-    }
-
     // MARK: Type
 
-    /// New York: an editorial headline over a utility list.
-    static let title = Font.system(size: 17, weight: .semibold, design: .serif)
-    static let eyebrow = Font.system(size: 11, weight: .semibold)
-    static let eyebrowTracking: CGFloat = 0.8
-    /// The plus before "ADD ACCOUNT" in the eyebrow line.
-    static let plus = Font.system(size: 9, weight: .bold)
-    static let plusGap: CGFloat = 3
-    static let name = Font.system(size: 13)
-    static let nameActive = Font.system(size: 13, weight: .bold)
-    static let meta = Font.system(size: 11)
-    static let figures = Font.system(size: 11, weight: .semibold).monospacedDigit()
-    static let action = Font.system(size: 13)
+    /// System text styles only, so Bold Text and the system's weights apply.
+    static let title = Font.title3.bold()
+    static let section = Font.headline
+    static let name = Font.body
+    static let nameActive = Font.body.bold()
+    static let meta = Font.subheadline
+    static let figures = Font.subheadline.monospacedDigit()
+    static let action = Font.body
 
     // MARK: Layout
 

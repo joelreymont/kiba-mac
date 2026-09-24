@@ -40,37 +40,42 @@ struct AccountRow: View {
         let state = Rows.state(account.usage, active: account.active)
         let red = state == .blocked || state == .dead
         let plan = Rows.planText(account, now: model.now)
-        return VStack(alignment: .leading, spacing: Theme.lineGap) {
-            HStack(spacing: Theme.gap) {
-                Text(account.name.raw)
-                    .font(account.active ? Theme.nameActive : Theme.name)
-                    .foregroundStyle(account.active ? Theme.accent : red ? Theme.idle : Theme.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !plan.isEmpty {
-                    Text(plan)
-                        .font(Theme.meta)
-                        .foregroundStyle(red ? Theme.out : Theme.idle)
+        return Button {
+            model.trigger(key)
+        } label: {
+            VStack(alignment: .leading, spacing: Theme.lineGap) {
+                HStack(spacing: Theme.gap) {
+                    Text(account.name.raw)
+                        .font(account.active ? Theme.nameActive : Theme.name)
+                        .foregroundStyle(account.active ? Theme.accent : red ? Theme.idle : Theme.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if !plan.isEmpty {
+                        Text(plan)
+                            .font(Theme.meta)
+                            .foregroundStyle(red ? Theme.out : Theme.idle)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Spacer(minLength: Theme.gap)
+                    Text(Rows.figuresText(account.usage))
+                        .font(Theme.figures)
+                        .foregroundStyle(red ? Theme.out : Theme.ink)
                         .lineLimit(1)
                         .fixedSize()
                 }
-                Spacer(minLength: Theme.gap)
-                Text(Rows.figuresText(account.usage))
-                    .font(Theme.figures)
-                    .foregroundStyle(Theme.color(state))
-                    .lineLimit(1)
-                    .fixedSize()
+                ReservoirView(figures: Rows.figures(account.usage), drained: state == .dead)
             }
-            ReservoirView(figures: Rows.figures(account.usage), drained: state == .dead)
+            .contentShape(Rectangle())
         }
-        .onTapGesture { model.trigger(key) }
+        .buttonStyle(.plain)
+        .disabled(model.busy)
         .help(Rows.tooltip(provider, account, now: model.now).joined(separator: "\n"))
         .contextMenu {
             Button("Forget…") { model.askForget(provider, account.name) }
                 .disabled(model.busy)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(account.active ? [] : .isButton)
     }
 
     private var confirm: some View {

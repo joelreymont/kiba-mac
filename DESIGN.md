@@ -686,30 +686,37 @@ Tokens (`Theme.swift`):
 | `track` | quaternary label color  | empty reservoir                      |
 | accent  | `Color.accentColor`     | the active account's name            |
 
-Type: title in **New York** (`.system(size: 17, weight: .semibold, design: .serif)`)
-— the one aesthetic risk, an editorial headline over a utility list;
-eyebrows `11pt semibold, uppercase, tracking 0.8, idle`; names `13pt`
-(`bold` when active); meta `11pt idle`; figures `11pt semibold,
-monospacedDigit`, colored by state.
+Type: system text styles only (HIG: never hard-coded sizes, so Bold Text
+and the system weights apply): title `.title3.bold()`; section headers
+`.headline` in sentence case ("Claude Code", "Codex"), `ink`; names `.body`
+(`.bold()` when active); meta and plan text `.subheadline`, `idle`; figures
+`.subheadline.monospacedDigit()` in `ink`. Text is never colored by usage
+state: the bars carry the color, and only "limit" and "log in again" (plan
+text and figures of a blocked or dead row) are `out`. Rows and actions are
+`Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
+is `Button("Add account", systemImage: "plus")`, `.iconOnly`,
+`.accessoryBar` style. Reduce Transparency swaps the popover material for
+the window background; Increase Contrast lifts the empty track to
+`tertiaryLabelColor`; Reduce Motion stops the fill animation.
 
 Layout (width 340, vertical padding 10, row inset 10). The panel is as tall
 as its content, capped at the menu bar screen's visible height less 24 pt
 (measured before each show); taller content scrolls with no scroll
-indicators. Each provider's eyebrow line carries the add action at its
-right, "+ ADD ACCOUNT" in eyebrow style, `idle`, `accent` under the cursor;
-there is no add row. Cursor order in a section: add, accounts, save.
+indicators. Each provider's header line carries the add action at its
+right, a standard plus button, `accent` under the keyboard cursor, tooltip
+"Add account"; there is no add row. Cursor order in a section: add, accounts, save.
 
 ```
 ┌──────────────────────────────────────────────┐
 │ Room to work                 Probed 2 min ago│  title (serif) · meta
 │ ──────────────────────────────────────────── │
-│ CLAUDE CODE                    + ADD ACCOUNT │  eyebrow · add action
+│ Claude Code                                + │  section header · add
 │ joel@x.com (max)              72% · 40% · 9% │  name · plan · figures
 │ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir
 │ other@x.com (pro, 5d)                 limit  │
 │ ▒▒▒▒▒▒▒▒▒▒  ██████░░░░                       │  spent window: red track
 │ Save the current login                       │  action row
-│ CODEX                          + ADD ACCOUNT │
+│ Codex                                      + │
 │ me@y.com (plus)                    88% · 61% │
 │ █████████░  ██████░░░░                       │
 │ ──────────────────────────────────────────── │

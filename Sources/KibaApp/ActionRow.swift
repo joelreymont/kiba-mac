@@ -12,35 +12,35 @@ struct ActionRow: View {
     @State private var hovered = false
 
     var body: some View {
-        HStack(spacing: Theme.gap) {
-            Text(label)
-                .font(Theme.action)
-                .foregroundStyle(model.busy ? Theme.idle : Theme.ink)
-                .lineLimit(1)
-            Spacer(minLength: Theme.gap)
-            if !detail.isEmpty {
-                Text(detail)
-                    .font(Theme.meta)
-                    .foregroundStyle(Theme.idle)
+        Button(action: perform) {
+            HStack(spacing: Theme.gap) {
+                Text(label)
+                    .font(Theme.action)
+                    .foregroundStyle(model.busy ? Theme.idle : Theme.ink)
                     .lineLimit(1)
-                    .fixedSize()
+                Spacer(minLength: Theme.gap)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(Theme.meta)
+                        .foregroundStyle(Theme.idle)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
             }
+            .padding(.horizontal, Theme.inset)
+            .padding(.vertical, Theme.actionPad)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.corner)
+                    .fill(Theme.ink.opacity(lit ? Theme.hover : 0)))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, Theme.inset)
-        .padding(.vertical, Theme.actionPad)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.corner)
-                .fill(Theme.ink.opacity(lit ? Theme.hover : 0)))
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
+        .disabled(model.busy)
         .onHover { inside in
             hovered = inside
             if inside, let key { model.point(key) }
         }
-        .onTapGesture {
-            if !model.busy { perform() }
-        }
         .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
     }
 
     private var lit: Bool {

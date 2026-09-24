@@ -92,10 +92,9 @@ struct PanelView: View {
         let p = sec.id
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: Theme.gap) {
-                Text(p.title.uppercased())
-                    .font(Theme.eyebrow)
-                    .tracking(Theme.eyebrowTracking)
-                    .foregroundStyle(Theme.idle)
+                Text(p.title)
+                    .font(Theme.section)
+                    .foregroundStyle(Theme.ink)
                 Spacer(minLength: Theme.gap)
                 AddButton(model: model, provider: p)
             }
@@ -140,8 +139,8 @@ struct PanelView: View {
 
 /// Takes its content's height up to `limit`, then hands the content exactly
 /// that height; the scroll view inside scrolls whatever is taller.
-/// "+ ADD ACCOUNT" at the right of a provider's eyebrow line: the add action,
-/// lit in `accent` under the pointer or the keyboard cursor.
+/// The plus at the right of a provider's header: the add action as a
+/// standard accessory-bar button, tinted `accent` under the keyboard cursor.
 private struct AddButton: View {
     let model: AppModel
     let provider: Provider
@@ -149,22 +148,15 @@ private struct AddButton: View {
     private var key: ActionKey { .add(provider) }
 
     var body: some View {
-        HStack(spacing: Theme.plusGap) {
-            Image(systemName: Symbol.plus)
-                .font(Theme.plus)
-            Text(Copy.add)
-                .font(Theme.eyebrow)
-                .tracking(Theme.eyebrowTracking)
-        }
-        .foregroundStyle(model.cursor == key ? Theme.accent : Theme.idle)
-        .contentShape(Rectangle())
-        .onHover { inside in
-            if inside { model.point(key) }
-        }
-        .onTapGesture { model.trigger(key) }
-        .help(Copy.addHelp)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
+        Button(Copy.add, systemImage: Symbol.plus) { model.trigger(key) }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.accessoryBar)
+            .foregroundStyle(model.cursor == key ? Theme.accent : Theme.idle)
+            .disabled(model.busy)
+            .help(Copy.add)
+            .onHover { inside in
+                if inside { model.point(key) }
+            }
     }
 
     private enum Symbol {
@@ -172,8 +164,7 @@ private struct AddButton: View {
     }
 
     private enum Copy {
-        static let add = "ADD ACCOUNT"
-        static let addHelp = "Log in to another account in Terminal and save it"
+        static let add = "Add account"
     }
 }
 
@@ -191,8 +182,21 @@ private struct CapHeight: Layout {
     }
 }
 
-/// The popover material behind the panel.
-private struct Backdrop: NSViewRepresentable {
+/// The popover material behind the panel; a solid window background under
+/// Reduce Transparency.
+private struct Backdrop: View {
+    @Environment(\.accessibilityReduceTransparency) private var solid
+
+    var body: some View {
+        if solid {
+            Color(nsColor: .windowBackgroundColor)
+        } else {
+            Material()
+        }
+    }
+}
+
+private struct Material: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
         v.material = .popover

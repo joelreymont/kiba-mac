@@ -11,22 +11,25 @@ struct ReservoirView: View {
     let drained: Bool
 
     @Environment(\.accessibilityReduceMotion) private var still
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         HStack(spacing: Theme.barGap) {
             if figures.isEmpty {
-                ForEach(0 ..< Self.unknownSegments, id: \.self) { _ in track(Theme.track) }
+                ForEach(0 ..< Self.unknownSegments, id: \.self) { _ in track(empty) }
             }
             ForEach(Array(figures.enumerated()), id: \.offset) { _, f in
                 Level(fraction: drained ? 0 : Self.fraction(f))
                     .fill(Rows.isLow(f) ? Theme.low : Theme.room)
-                    .background(track(!drained && Rows.isSpent(f) ? Theme.out : Theme.track))
+                    .background(track(!drained && Rows.isSpent(f) ? Theme.out : empty))
             }
         }
         .frame(height: Theme.barHeight)
         .animation(still ? nil : .easeOut(duration: Theme.fillTime), value: figures)
         .accessibilityHidden(true)
     }
+
+    private var empty: Color { contrast == .increased ? Theme.trackContrast : Theme.track }
 
     private func track(_ color: Color) -> some View {
         RoundedRectangle(cornerRadius: Theme.barRadius).fill(color)
