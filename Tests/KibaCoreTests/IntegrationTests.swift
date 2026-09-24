@@ -219,6 +219,31 @@ import Testing
     }
 }
 
+@Test func addClaudeOverLeftoverKeychainItem() async throws {
+    try await scratch { w in
+        // An earlier add died before removing the login home's item.
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let leftover = MemorySecret(claudeCreds("old", plan: "pro", expires: Fixed.now))
+        let keychain = FakeKeychain(items: [
+            w.paths.keychainService: MemorySecret(liveCreds), "\(w.paths.keychainService)-leftover": leftover,
+        ])
+        let newCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(claudeConfig(profile("n@y", org: "org-n"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
+        let runner = w.runner(http, keychain: keychain) { try leftover.write(newCreds) }
+
+        let added = try await runner.add(.claude, expected: "n@y")
+
+        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == newCreds)
+        #expect(try leftover.read() == nil)
+        #expect(try keychain.item(w.paths.keychainService).read() == liveCreds)
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-n"])
+    }
+}
+
 @Test func addReportsMissingCLIAndFailedLogin() async throws {
     try await scratch { w in
         let runner = w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:]))

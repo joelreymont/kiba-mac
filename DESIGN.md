@@ -555,8 +555,9 @@ only the system default PATH, which lacks the CLIs.
 1. `claude`/`codex` must be on `searchPath` (`noCLI`); the script runs the
    one found. Root = `paths.loginRoot(p)`:
    remove, create 0700, create `root/.claude` or `root/.codex`.
-2. Claude only: snapshot `before = lister.services(prefix: keychainService)`
-   and `liveBytes = KeychainItem.read()`.
+2. Claude only: snapshot `before`, the bytes of every item in
+   `lister.services(prefix: keychainService)` but the live one, and
+   `liveBytes = KeychainItem.read()`.
 3. Write `root/login.command` (0700):
    ```sh
    #!/bin/sh
@@ -574,8 +575,10 @@ only the system default PATH, which lacks the CLIs.
    poll as belt and braces). Non-zero → `loginFailed`.
 5. Locate the new credentials (Claude), in this order, first hit wins:
    a. `root/.claude/.credentials.json` exists → its bytes.
-   b. `lister.services(prefix:) − before` non-empty → read that item, keep
-      its bytes, delete the item.
+   b. a non-live prefixed item that is new or whose bytes differ from
+      `before` → keep its bytes, delete the item. Content, not name
+      novelty: the login home's fixed path always names the same item, and
+      an earlier add killed before its removal leaves that item behind.
    c. `KeychainItem.read() != liveBytes` → the login overwrote the live
       item: keep the new bytes, write `liveBytes` back (or remove when it
       was nil).

@@ -56,10 +56,10 @@ public actor LoginRunner {
         let home = p == .claude ? paths.claudeConfigDir(root: root) : paths.codexHome(root: root)
         try PrivateFS.ensurePrivateDir(home)
         let live = lister.item(paths.keychainService)
-        var before: Set<String> = []
+        var before: [String: Data] = [:]
         var liveBytes: Data?
         if p == .claude {
-            before = try lister.services(prefix: paths.keychainService)
+            before = try otherItems()
             liveBytes = try live.read()
         }
         let script = root.appending(component: Name.script, directoryHint: .notDirectory)
@@ -75,15 +75,16 @@ public actor LoginRunner {
     }
 
     /// Where a Claude login put its credentials, first hit wins: the config
-    /// dir's `.credentials.json`; a Keychain item that did not exist before
-    /// (read, then deleted); the live Keychain item, when the login overwrote
+    /// dir's `.credentials.json`; a non-live Keychain item that is new or
+    /// holds other bytes than before (read, then deleted), since the login
+    /// home's fixed path always names the same item and an earlier add may
+    /// have left it behind; the live Keychain item, when the login overwrote
     /// it (the new bytes are kept and the old ones written back).
-    func claudeCreds(root: URL, before: Set<String>, live: SecretStore, liveBytes: Data?) throws -> Data {
+    func claudeCreds(root: URL, before: [String: Data], live: SecretStore, liveBytes: Data?) throws -> Data {
         if let file = try PrivateFS.read(paths.claudeCredsFile(root: root)) { return file }
-        for service in try lister.services(prefix: paths.keychainService).subtracting(before).sorted() {
-            let item = lister.item(service)
-            guard let bytes = try item.read() else { continue }
-            try item.remove()
+        let items = try otherItems().sorted { $0.key < $1.key }
+        if let (service, bytes) = items.first(where: { before[$0.key] != $0.value }) {
+            try lister.item(service).remove()
             return bytes
         }
         if let now = try live.read(), now != liveBytes {
@@ -91,6 +92,15 @@ public actor LoginRunner {
             return now
         }
         throw KibaError.loginProducedNothing(.claude)
+    }
+
+    /// The bytes of every Keychain item under the Claude prefix but the live one.
+    func otherItems() throws -> [String: Data] {
+        var out: [String: Data] = [:]
+        for service in try lister.services(prefix: paths.keychainService) where service != paths.keychainService {
+            out[service] = try lister.item(service).read()
+        }
+        return out
     }
 
     /// The login script Terminal runs: exports the throwaway home, asks the
