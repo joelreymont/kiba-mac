@@ -62,14 +62,18 @@ struct PanelView: View {
         .padding(.bottom, Theme.blockGap)
     }
 
-    /// The action error in `out`, else the passing message in `idle`.
+    /// The action error in `out` and the passing message in `idle`, each
+    /// shown while it is set.
     @ViewBuilder private var notice: some View {
-        let error = model.error
-        let text = error.isEmpty ? model.message : error
+        noticeLine(model.error, color: Theme.out)
+        noticeLine(model.message, color: Theme.idle)
+    }
+
+    @ViewBuilder private func noticeLine(_ text: String, color: Color) -> some View {
         if !text.isEmpty {
             Text(text)
                 .font(Theme.meta)
-                .foregroundStyle(error.isEmpty ? Theme.idle : Theme.out)
+                .foregroundStyle(color)
                 .lineLimit(Theme.noticeLines)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, Theme.inset)
