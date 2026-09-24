@@ -60,50 +60,6 @@ extension Decimal {
     }
 }
 
-/// A provider answer or login document read for its values. Absent, null and
-/// mistyped members all read as nil, so an answer that lacks a window simply
-/// has no such window. Numbers read as `Decimal`, never as `Double`.
-struct ProbeJSON {
-    private let fields: [String: Any]
-
-    /// Nil unless `data` is a JSON object.
-    init?(_ data: Data) {
-        guard let any = try? JSONSerialization.jsonObject(with: data), let fields = any as? [String: Any] else {
-            return nil
-        }
-        self.fields = fields
-    }
-
-    private init(fields: [String: Any]) {
-        self.fields = fields
-    }
-
-    func obj(_ key: String) -> ProbeJSON? {
-        (fields[key] as? [String: Any]).map(ProbeJSON.init(fields:))
-    }
-
-    /// The objects in the array under `key`; other elements are skipped.
-    func objs(_ key: String) -> [ProbeJSON] {
-        (fields[key] as? [Any] ?? []).compactMap { ($0 as? [String: Any]).map(ProbeJSON.init(fields:)) }
-    }
-
-    func str(_ key: String) -> String? {
-        fields[key] as? String
-    }
-
-    /// A JSON number; `true` and `false` are not numbers.
-    func num(_ key: String) -> Decimal? {
-        guard let n = fields[key] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
-        return n.decimalValue
-    }
-
-    /// A JSON number with no fraction that fits `Int`.
-    func int(_ key: String) -> Int? {
-        guard let n = num(key), let whole = n.whole, Decimal(whole) == n else { return nil }
-        return whole
-    }
-}
-
 /// How spending a refresh grant ended.
 enum Renewal {
     /// The login document with the new tokens spliced in.
@@ -119,14 +75,14 @@ extension HTTPClient {
     /// hands its 200 answer to `splice`, which returns the refreshed document or
     /// nil when the answer carries no access token.
     func renew(
-        _ url: URL, grant: KeyValuePairs<String, String>, what: String, splice: (ProbeJSON) throws -> JSONDoc?
+        _ url: URL, grant: KeyValuePairs<String, String>, what: String, splice: (JSONFields) throws -> JSONDoc?
     ) async -> Renewal {
         guard case .response(let r) = await send(.post(url, json: jsonObject(grant))) else {
             return .failed(ProbeNote.unreachable(what))
         }
         if HTTPStatus.refusals.contains(r.status) { return .refused }
         do {
-            guard r.status == HTTPStatus.ok, let answer = ProbeJSON(r.body), let doc = try splice(answer) else {
+            guard r.status == HTTPStatus.ok, let answer = JSONFields(r.body), let doc = try splice(answer) else {
                 return .failed(ProbeNote.answered(what, r.status))
             }
             return .fresh(doc.data)

@@ -24,7 +24,7 @@ public struct CodexProbe: Sendable {
             guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
             switch r.status {
             case HTTPStatus.ok:
-                guard let body = ProbeJSON(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
+                guard let body = JSONFields(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
                 return done(.ok, "", limits(body))
             case HTTPStatus.unauthorized:
                 return done(.expired, Note.rejected)
@@ -35,13 +35,13 @@ public struct CodexProbe: Sendable {
             }
         }
 
-        let tokens = ProbeJSON(doc)?.obj(Key.tokens)
+        let tokens = JSONFields(doc)?.obj(Key.tokens)
         if CodexIdentity.isAPIKey(doc), tokens?.str(Key.idToken) == nil { return done(.unknown, Note.apiKey) }
         guard let first = await usage(doc) else { return done(.error, ProbeNote.noAccess) }
         guard case .response(let r) = first, r.status == HTTPStatus.unauthorized else { return result(first) }
         if i.live { return done(.expired, Note.liveRejected) }
 
-        let revoked = ProbeJSON(r.body)?.obj(Wire.error)?.str(Wire.code) == Wire.tokenRevoked
+        let revoked = JSONFields(r.body)?.obj(Wire.error)?.str(Wire.code) == Wire.tokenRevoked
         guard let grant = tokens?.str(Key.refreshToken) else { return done(.expired, Note.noGrant) }
         switch await refresh(doc, grant: grant, now: now) {
         case .fresh(let refreshed): doc = refreshed
@@ -54,7 +54,7 @@ public struct CodexProbe: Sendable {
 
     /// GET the usage windows with `doc`'s access token; nil when it has none.
     private func usage(_ doc: Data) async -> HTTPOutcome? {
-        let tokens = ProbeJSON(doc)?.obj(Key.tokens)
+        let tokens = JSONFields(doc)?.obj(Key.tokens)
         guard let token = tokens?.str(Key.accessToken) else { return nil }
         var extra: [String: String] = [:]
         if let account = tokens?.str(Key.accountID), !account.isEmpty { extra[Endpoint.accountHeader] = account }
@@ -86,7 +86,7 @@ public struct CodexProbe: Sendable {
 
     /// The primary and secondary windows, named from their length. A window
     /// without a reading is left out.
-    private func limits(_ body: ProbeJSON) -> [Limit] {
+    private func limits(_ body: JSONFields) -> [Limit] {
         let rate = body.obj(Usage.rateLimit)
         return Usage.windows.compactMap { key in
             guard let w = rate?.obj(key), let pct = usedPercent(w.num(Usage.used)) else { return nil }

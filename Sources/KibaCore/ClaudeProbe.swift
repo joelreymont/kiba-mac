@@ -21,7 +21,7 @@ public struct ClaudeProbe: Sendable {
             .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits), doc: doc)
         }
 
-        let oauth = ProbeJSON(doc)?.obj(Key.oauth)
+        let oauth = JSONFields(doc)?.obj(Key.oauth)
         if let ms = oauth?.int(Key.expiresAt), ms > 0, ms / Time.msPerSecond < now + Time.margin {
             if i.live { return done(.expired, Note.liveExpired) }
             guard let grant = oauth?.str(Key.refreshToken) else { return done(.expired, Note.noGrant) }
@@ -32,14 +32,14 @@ public struct ClaudeProbe: Sendable {
             }
         }
 
-        guard let token = ProbeJSON(doc)?.obj(Key.oauth)?.str(Key.accessToken) else {
+        guard let token = JSONFields(doc)?.obj(Key.oauth)?.str(Key.accessToken) else {
             return done(.error, ProbeNote.noAccess)
         }
         let got = await http.send(.get(Endpoint.usage, bearer: token, extra: [Endpoint.betaHeader: Endpoint.beta]))
         guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
         switch r.status {
         case HTTPStatus.ok:
-            guard let body = ProbeJSON(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
+            guard let body = JSONFields(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
             return done(.ok, "", limits(body))
         case HTTPStatus.unauthorized:
             return done(.expired, Note.rejected)
@@ -89,7 +89,7 @@ public struct ClaudeProbe: Sendable {
 
     /// Session, then Weekly (`seven_day_oauth_apps`, else `seven_day`), then
     /// every model-scoped window. A window without a reading is left out.
-    private func limits(_ body: ProbeJSON) -> [Limit] {
+    private func limits(_ body: JSONFields) -> [Limit] {
         var out: [Limit] = []
         if let s = bucket(body.obj(Usage.fiveHour), WindowLabel.session) { out.append(s) }
         let apps = bucket(body.obj(Usage.weekApps), WindowLabel.weekly)
@@ -105,7 +105,7 @@ public struct ClaudeProbe: Sendable {
     }
 
     /// A `{utilization, resets_at}` bucket as the window `label`.
-    private func bucket(_ b: ProbeJSON?, _ label: String) -> Limit? {
+    private func bucket(_ b: JSONFields?, _ label: String) -> Limit? {
         guard let b, let pct = usedPercent(b.num(Usage.utilization)) else { return nil }
         return Limit(label: label, percent: pct, resetsAt: b.str(Usage.resetsAt) ?? "")
     }
