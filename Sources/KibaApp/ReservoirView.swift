@@ -53,9 +53,11 @@ private struct Level: Shape {
         set { fraction = newValue }
     }
 
+    /// A remainder too thin to see still shows a sliver as wide as the bar
+    /// is tall: what is left is never drawn as nothing.
     func path(in r: CGRect) -> Path {
-        let w = r.width * fraction
-        guard w > 0 else { return Path() }
+        guard fraction > 0 else { return Path() }
+        let w = max(r.width * fraction, r.height)
         let bar = CGRect(x: r.minX, y: r.minY, width: w, height: r.height)
         return Path(roundedRect: bar, cornerRadius: min(Theme.barRadius, w / 2))
     }

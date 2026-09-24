@@ -125,11 +125,10 @@ public enum Rows {
         f.left < Level.half
     }
 
-    /// Nothing usable is left of the window (under `Level.scrap`): the
-    /// segment's track draws in `out`. A fill that small is invisible at the
-    /// bar's size, and the window cannot carry a task.
+    /// The provider refuses this window: the segment's whole track draws in
+    /// `out`. The only categorical state in the bar; everything else is length.
     public static func isSpent(_ f: Figure) -> Bool {
-        f.left < Level.scrap
+        f.left <= 0
     }
 
     /// `"72% · 40% · 9%"`, or `"limit"` while a window is used up.
@@ -249,8 +248,6 @@ public enum Rows {
     private enum Level {
         static let full = 100
         static let half = 50
-        /// Percent left under which a window counts as spent in the bar.
-        static let scrap = 5
     }
 
     private enum Rank {

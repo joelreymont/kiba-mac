@@ -728,8 +728,10 @@ Signature — the **reservoir**: under every account row a 4 pt bar split
 into one segment per window (session, week, each model window, in figure
 order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100,
 each segment in its own color: `room` with half or more left, `low` under
-half (`Rows.isLow`). A spent segment (`Rows.isSpent`: under 5% left, a
-fill too thin to see and no room for a task) is an empty track
+half (`Rows.isLow`); a remainder too thin to see still draws a sliver as
+wide as the bar is tall. One meaning per channel: length is how much is
+left, fill color is whether that window is comfortable, and red is the one
+fact, the provider refuses. A spent segment (`Rows.isSpent`, 100% used) is an empty track
 drawn in `out`, and a dead row's bar is drained: every segment an empty grey
 track. A row with no figures yet
 (unknown usage) shows two empty tracks, session and week, so the bar is
