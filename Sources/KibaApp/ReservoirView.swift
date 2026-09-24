@@ -3,7 +3,9 @@ import SwiftUI
 
 /// The signature: a 4 pt bar under an account row, one segment per figure,
 /// each filled from the left to the share of its window left and colored
-/// by its own level. A drained bar shows every window as an empty track.
+/// by its own level. A drained bar shows every window as an empty track,
+/// and a row with no figures yet shows the two windows every provider
+/// reports, session and week, as empty tracks.
 struct ReservoirView: View {
     let figures: [Figure]
     let drained: Bool
@@ -12,10 +14,13 @@ struct ReservoirView: View {
 
     var body: some View {
         HStack(spacing: Theme.barGap) {
+            if figures.isEmpty {
+                ForEach(0 ..< Self.unknownSegments, id: \.self) { _ in track }
+            }
             ForEach(Array(figures.enumerated()), id: \.offset) { _, f in
                 Level(fraction: drained ? 0 : Self.fraction(f))
                     .fill(Rows.isLow(f) ? Theme.low : Theme.room)
-                    .background(RoundedRectangle(cornerRadius: Theme.barRadius).fill(Theme.track))
+                    .background(track)
             }
         }
         .frame(height: Theme.barHeight)
@@ -23,6 +28,12 @@ struct ReservoirView: View {
         .accessibilityHidden(true)
     }
 
+    private var track: some View {
+        RoundedRectangle(cornerRadius: Theme.barRadius).fill(Theme.track)
+    }
+
+    /// Session and week: the windows every provider reports.
+    private static let unknownSegments = 2
     private static let whole = 100.0
 
     private static func fraction(_ f: Figure) -> Double {

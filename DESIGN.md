@@ -719,7 +719,9 @@ into one segment per window (session, week, each model window, in figure
 order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100,
 each segment in its own color: `room` with half or more left, `low` under
 half (`Rows.isLow`). A used-up segment is an empty track, and a dead row's
-bar is drained: every segment an empty track. The bar says how much of each
+bar is drained: every segment an empty track. A row with no figures yet
+(unknown usage) shows two empty tracks, session and week, so the bar is
+never missing. The bar says how much of each
 window is left and nothing else; the row's verdict lives in the sort order,
 the figures' color and the plan text. There is no status dot. The reset
 countdown lives in the plan text `(pro, 5d)`. The menu bar icon is the same
