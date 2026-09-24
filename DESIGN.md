@@ -25,6 +25,7 @@ scratch directory with no network and no real Keychain:
 | Effect            | Protocol / type      | Production                         | Tests                     |
 |-------------------|----------------------|------------------------------------|---------------------------|
 | paths             | `Paths(env:)`        | process env                        | scratch env               |
+| saved accounts    | `Store`              | SQLite at `paths.db`               | SQLite in the scratch store |
 | secret bytes      | `SecretStore`        | `KeychainItem`, `FileSecret`       | `MemorySecret`, `FileSecret` |
 | HTTP              | `HTTPClient`         | `URLSessionClient`                 | `StubHTTP`                |
 | subprocess        | `Subprocess.run`     | posix_spawn                        | real, on throwaway inputs |
@@ -40,8 +41,6 @@ scratch directory with no network and no real Keychain:
 public enum Provider: String, CaseIterable, Sendable, Codable {
   case claude, codex
   public var title: String        // "Claude Code" | "Codex"
-  public var loginFile: String    // slot token document: "credentials.json" | "auth.json"
-  public var identityFile: String // slot identity document: "oauth-account.json" | "auth.json"
   public var homeVar: String      // "CLAUDE_CONFIG_DIR" | "CODEX_HOME"
   public var site: String         // "claude.ai" | "chatgpt.com"
 }
@@ -53,18 +52,17 @@ public enum Provider: String, CaseIterable, Sendable, Codable {
 public enum KibaError: Error, Equatable {
   case noLive(Provider)              // nothing to save
   case noAccount(Provider, String)   // no such saved account
-  case badName(String)               // unsafe slot name
-  case locked(URL)                   // another kiba holds the store lock
+  case badName(String)               // unsafe account name
   case badJSON(String)               // a login file lacks an expected field / is not JSON
   case loginFailed(Int32)            // provider login exited non-zero
   case loginProducedNothing(Provider)// login exited 0 but no credentials were found
   case noCLI(String)                 // claude/codex not on PATH
-  case interrupted(Provider)         // .installing marker present
-  case mismatch(Provider, String)    // slot document names another account than its folder
+  case mismatch(Provider, String)    // saved row names another account than its name
   case mixed                         // live Claude config and tokens name different accounts
   case capacity(String)              // >9 logins under one email, doc over 4 MiB
   case unsafePath(URL)               // symlink chain longer than 8 hops or ends in a link
   case io(String)                    // any file error, with the path
+  case db(String)                    // SQLite refused: "<operation>: <sqlite message>"
   case tool(String, Int32, String)   // subprocess name, exit status, stderr
 }
 extension KibaError { public var reason: String }   // one-line, user-facing, no code
@@ -79,17 +77,11 @@ error becomes that provider's `error` string or that account's usage `note`.
 ```swift
 public struct Paths: Sendable {
   public init(env: [String: String], username: String) throws   // io("HOME is not set") when HOME is missing or empty
-  // store: $KIBA_STORE when non-empty, else $HOME/.config/kiba. Local to
-  // this Mac; never shared with another machine.
+  // store: $KIBA_STORE when non-empty, else
+  // $HOME/Library/Application Support/Kiba. Local to this Mac; never shared.
   public let store: URL
-  public var lock: URL              // store/lock  (directory)
+  public var db: URL                // store/kiba.db
   public var probe: URL             // store/probe
-  public func providerDir(_ p: Provider) -> URL          // store/<provider>
-  public func slotDir(_ p: Provider, _ n: SlotName) -> URL
-  public func slotFile(_ p: Provider, _ n: SlotName, _ file: String) -> URL
-  public func usageFile(_ p: Provider, _ n: SlotName) -> URL   // usage.json
-  public func installedFile(_ p: Provider) -> URL        // <providerDir>/.installed
-  public func markFile(_ p: Provider) -> URL             // <providerDir>/.installing
   public func loginRoot(_ p: Provider) -> URL            // store/probe/login-<provider>
   // HOME, KIBA_STORE, CLAUDE_CONFIG_DIR, CODEX_HOME must be absolute when set:
   // a relative or `~` value throws io("<VAR> is not an absolute path: <value>");
@@ -107,15 +99,14 @@ public struct Paths: Sendable {
 
 ### SlotName
 
-A slot name is an email, or `email #n` (n ≥ 2). Rules from kiba `NAME-OK?`:
+A saved account name (`SlotName`) is an email, or `email #n` (n ≥ 2). Rules from kiba `NAME-OK?`:
 1–127 bytes, no byte < 0x20, no 0x7F, no `/`, no leading `.`.
 The suffix is the TRAILING `" #"` + ASCII digits (value > 0), the exact
 inverse of how `liveName` builds names, so an email that itself contains
 `" #"` still parses. `belongs(to: e)` is kiba's `NAME-FOR-EMAIL?`: raw == e, or
 raw == e + `" #"` + positive digits. Equality and hashing are bytewise on the
-spelling; the file system may fold case and Unicode normalization, so a
-name returned for an existing slot is always the on-disk spelling from
-`Store.list`, never a constructed candidate (see `liveName`).
+spelling, the same as SQLite's default `BINARY` collation on the `name`
+column, so a name is one row and one row is one name.
 
 ```swift
 public struct SlotName: Hashable, Sendable, Comparable, CustomStringConvertible {
@@ -145,15 +136,15 @@ public enum PrivateFS {
 file that is a symlink stays a symlink; the file behind it is replaced), open
 a uniquely named temp (`<target>.<random>.tmp`, `O_EXCL`) in the same
 directory, mode 0600, write all bytes, `fsync`, `rename` over the target; two
-unlocked writers can never disturb each other's temp. Any failure removes the temp file and
+concurrent writers can never disturb each other's temp. Any failure removes the temp file and
 rethrows. Never `Data.write(options: .atomic)`: it does not control the mode.
 
 ### JSONDoc — byte-exact splicing
 
 Login documents are rewritten by splicing bytes so every other key keeps its
 exact bytes (kiba `SPLICE-CONFIG`, `CFG-REPLACE2`). A round-trip through
-`JSONSerialization` is only allowed for documents kiba-mac itself owns
-(`usage.json`, `.installed`, `.installing`).
+`JSONSerialization` is only allowed for the usage record, which kiba-mac
+itself owns.
 
 ```swift
 public struct JSONDoc {
@@ -171,24 +162,6 @@ Parsing must skip strings with escapes correctly and nest arbitrarily deep.
 Values are located, never decoded. Reading fields (`string(key)`,
 `string(key1,key2)`, `int(...)`) is done via `JSONSerialization` on the same
 bytes; `JSONDoc` only locates spans for writes.
-
-### StoreLock
-
-```swift
-public final class StoreLock: Sendable {
-  public init(paths: Paths, clock: Clock)
-  public func withLock<T>(_ body: () throws -> T) throws -> T
-}
-```
-
-`mkdir(store/lock, 0700)` is the mutex; on success write `lock/pid` (this
-process's pid, `writePrivate`). On `EEXIST`: the lock is stale when its pid
-file names a dead process (`kill(pid, 0)` fails with ESRCH) or when there is
-no readable pid and the directory is older than 60 s; a stale lock is removed
-(pid, pid.tmp, dir) and `mkdir` retried once; otherwise throw `locked`.
-Release removes pid then dir. Non-reentrant: `withLock` inside `withLock`
-is a programming error (`preconditionFailure`). Status reads never take it;
-probes take it only around slot writes and token refreshes.
 
 ### Identity
 
@@ -272,27 +245,72 @@ posix_spawn with pipes; drains stdout/stderr concurrently; `setsid` sets
 
 ### Store
 
+One SQLite database, `paths.db`, holds every saved account. No lock file,
+no slot directories, no markers: a write transaction is the mutex and every
+row is whole or absent.
+
+```sql
+PRAGMA user_version = 1;
+CREATE TABLE IF NOT EXISTS account (
+  provider TEXT NOT NULL,          -- "claude" | "codex"
+  name     TEXT NOT NULL,          -- SlotName.raw
+  email    TEXT NOT NULL,
+  org      TEXT NOT NULL,          -- "" when unknown
+  plan     TEXT NOT NULL,          -- "" when unknown
+  login    BLOB NOT NULL,          -- Claude: credentials.json bytes; Codex: auth.json bytes
+  profile  BLOB,                   -- Claude: the exact oauthAccount object bytes; Codex: NULL
+  usage    TEXT,                   -- UsageRecord JSON (sorted keys); NULL until probed
+  PRIMARY KEY (provider, name)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS live (
+  provider  TEXT PRIMARY KEY,      -- row absent: nothing installed yet
+  installed TEXT NOT NULL          -- name whose login is live
+) WITHOUT ROWID;
+```
+
 ```swift
-public struct Store {
-  public init(paths: Paths)
-  public func list(_ p: Provider) -> [SlotName]           // dirs under providerDir holding <loginFile>, sorted by SlotName
-  public func slotIdentity(_ p: Provider, _ n: SlotName) -> Identity?  // nil when the identity file is missing/unreadable ("damaged")
-  public func slotPlan(_ p: Provider, _ n: SlotName) -> String         // "" when unreadable
+public struct SavedLogin: Equatable, Sendable {
+  public var name: SlotName
+  public var identity: Identity      // email, org, plan (the plan column)
+  public var login: Data
+  public var profile: Data?
+  public var usage: UsageRecord?
+}
+
+public struct Store: Sendable {
+  public init(paths: Paths) throws                 // mkdir store 0700; open/create db 0600; apply schema
+  public func list(_ p: Provider) throws -> [SavedLogin]              // sorted by SlotName
+  public func fetch(_ p: Provider, _ n: SlotName) throws -> SavedLogin?
   public func liveName(_ p: Provider, live: Identity) throws -> SlotName
-  public func installed(_ p: Provider) -> SlotName?       // .installed
-  public func noteInstalled(_ p: Provider, _ n: SlotName) throws
-  public func installing(_ p: Provider) -> Bool           // .installing exists
-  public func markInstall(_ p: Provider, _ n: SlotName) throws
-  public func clearMark(_ p: Provider) throws
-  public func removeSlot(_ p: Provider, _ n: SlotName) throws
+  public func installed(_ p: Provider) throws -> SlotName?
+  public func write<T>(_ body: (Tx) throws -> T) throws -> T   // BEGIN IMMEDIATE … COMMIT; any throw rolls back and rethrows
+}
+public struct Tx {                                  // only inside `write`
+  public func put(_ p: Provider, _ s: SavedLogin) throws        // upsert; an existing row keeps its usage when s.usage is nil
+  public func setLogin(_ p: Provider, _ n: SlotName, _ doc: Data) throws   // noAccount when absent
+  public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws
+  public func remove(_ p: Provider, _ n: SlotName) throws        // no-op when absent
+  public func noteInstalled(_ p: Provider, _ n: SlotName) throws // upsert into live
 }
 ```
 
+`Store` holds only the database URL: every call opens a connection
+(`sqlite3_open_v2` with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+SQLITE_OPEN_NOFOLLOW`, `chmod 0600` after creation), sets
+`PRAGMA busy_timeout = 5000` and `PRAGMA journal_mode = WAL`, runs, and
+closes. So the value is `Sendable` without a mutex and a status read costs
+two queries. Every SQLite failure is `db("<op>: <sqlite3_errmsg>")`. Rows
+decode through `SlotName(raw)`; a raw that fails `NAME-OK?` is `badName`
+(nothing in kiba-mac can write one, so it means the file was edited by hand).
+A `usage` column that fails to decode yields
+`UsageRecord(fetchedAt: 0, state: .unknown, note: "usage record is unreadable; refresh usage", limits: [])`.
+`write` bodies may do file and Keychain work: the transaction is the
+cross-process mutex for a switch, held only for the duration of the body.
+
 `liveName` (kiba `LIVE-NAME`): candidates `email`, `email #2` … `email #9`.
-For each: no slot dir → first free candidate remembered; slot exists and its
-identity's org equals the live org (both empty counts as equal; one empty
-does not) → return the name as `list` spells it on disk; slot exists but
-damaged → counts as free. Return the first free; none → `capacity`.
+For each: no row → first free candidate remembered; row exists and its org
+equals the live org (both empty counts as equal; one empty does not) →
+return that row's name. Return the first free; none → `capacity`.
 
 ### Claude live login
 
@@ -300,27 +318,27 @@ damaged → counts as free. Return the first free; none → `capacity`.
 public struct ClaudeLive {
   public init(paths: Paths, store: Store, secrets: SecretStore)   // secrets = ClaudeSecrets.live(...)
   public func identity() throws -> Identity?     // nil when config or creds missing
-  public func save(to n: SlotName) throws        // slot/credentials.json = creds bytes; slot/oauth-account.json = exact oauthAccount object bytes from config
+  public func save(to n: SlotName, _ tx: Tx) throws   // put: login = creds bytes, profile = exact oauthAccount object bytes from config
   public func install(_ n: SlotName) throws
   public func isMixed() throws -> Bool
 }
 ```
 
-`install` (kiba `CLAUDE-INSTALL`): both slot files must exist else
-`noAccount`; the slot's oauth-account email must belong to `n` else
-`mismatch`; creds must be an object with a `claudeAiOauth` object else
+`install` (kiba `CLAUDE-INSTALL`): `store.fetch` must return a row else
+`noAccount`; its profile must be present and its email must belong to `n`
+else `mismatch`; login must be an object with a `claudeAiOauth` object else
 `badJSON`. Build the new config: existing config with the top-level
-`oauthAccount` value replaced by the slot's object bytes (any value kind,
+`oauthAccount` value replaced by the profile bytes (any value kind,
 including `null`), or inserted before the closing brace (with a comma when
 the object has members), or a new `{"oauthAccount":…}` when the file does not
-exist. Then: `markInstall(n)` → write config (a failure here clears the mark
-and rethrows: nothing was replaced yet) → `secrets.write(creds)` →
-`clearMark` → `noteInstalled(n)`.
+exist. Then, inside one `store.write`: write config → `secrets.write(login)`
+→ `tx.noteInstalled(n)`. A crash between the two live writes leaves
+`installed` naming the previous account, which `isMixed` detects.
 
-`isMixed` (kiba `CLAUDE-MIXED?`): `.installed` names slot S and S's
-credentials file exists and the live identity reads and the live config does
-NOT name S (email differs, or both orgs known and differ) and the live creds
-bytes equal S's credentials bytes → true.
+`isMixed` (kiba `CLAUDE-MIXED?`): `installed` names row S and S exists and
+the live identity reads and the live config does NOT name S (email differs,
+or both orgs known and differ) and the live creds bytes equal S's login
+bytes → true.
 
 ### Codex live login
 
@@ -328,8 +346,8 @@ bytes equal S's credentials bytes → true.
 public struct CodexLive {
   public init(paths: Paths, store: Store, root: URL? = nil)
   public func identity() throws -> Identity?     // nil when auth.json missing
-  public func save(to n: SlotName) throws        // slot/auth.json = live bytes
-  public func install(_ n: SlotName) throws      // identity must belong to n else mismatch; write live auth.json
+  public func save(to n: SlotName, _ tx: Tx) throws   // put: login = live auth.json bytes, profile nil
+  public func install(_ n: SlotName) throws      // fetch (noAccount); email must belong to n else mismatch; inside store.write: write live auth.json, noteInstalled
 }
 ```
 
@@ -350,9 +368,9 @@ public struct UsageRecord: Codable, Equatable, Sendable {
 JSON number as `Decimal` and round with `NSDecimalRound(.plain, scale 0)`.
 Labels: `Session (5-hour)`, `Weekly (7-day)`, `<Model> Weekly` /
 `<Model> Session` / `<Model>` for scoped windows. `resetsAt` is ISO 8601 or
-"". `usage.json` is written through `JSONEncoder` (sorted keys) and
-`PrivateFS.writePrivate`. A damaged usage file loads as
-`UsageRecord(fetchedAt: 0, state: .unknown, note: "usage record is unreadable; refresh usage", limits: [])`.
+"". The `usage` column is written through `JSONEncoder` (sorted keys);
+`usageEncode`/`usageDecode` in `Usage.swift` are the only codec, and a
+damaged column decodes to the unreadable record named under Store.
 
 ### HTTP
 
@@ -371,24 +389,27 @@ the ChatGPT usage call, which sends `User-Agent: codex-cli`.
 ### Probing (port of sw-usage.f)
 
 ```swift
-public struct ProbeInput { provider, name: SlotName, doc: Data /* slot loginFile bytes */, live: Bool }
+public struct ProbeInput { provider, name: SlotName, doc: Data /* the row's login bytes */, live: Bool }
 public enum ProbeOutcome: Equatable { case record(UsageRecord, doc: Data /* possibly refreshed */); case revoked(note: String) }
 
-public struct ClaudeProbe { init(http: HTTPClient, clock: Clock, lock: StoreLock, paths: Paths); func run(_ i: ProbeInput) async -> ProbeOutcome }
+public struct ClaudeProbe { init(http: HTTPClient, clock: Clock); func run(_ i: ProbeInput) async -> ProbeOutcome }
 public struct CodexProbe  { same }
 ```
+
+A probe never writes: a refreshed document comes back in `.record(_, doc:)`
+and the Switcher persists it. One app process serialises probes, so no lock
+guards a refresh.
 
 Claude:
 1. Expired = `claudeAiOauth.expiresAt/1000 < now + 60`. If expired: live →
    `expired` "access token expired; Claude Code refreshes it on its next
    run"; no `refreshToken` → `expired` "…no refresh token is saved; log in
-   again"; else refresh under the lock: POST
+   again"; else refresh: POST
    `https://platform.claude.com/v1/oauth/token` JSON
    `{grant_type:"refresh_token", refresh_token, client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`.
    200 → splice `accessToken`, `refreshToken` (if returned), `expiresAt =
    (now+expires_in)*1000`, `refreshTokenExpiresAt` (if
-   `refresh_token_expires_in`) into the doc and write the slot's
-   credentials.json (still under the lock). 400/401 → `expired` "…the refresh
+   `refresh_token_expires_in`) into the doc. 400/401 → `expired` "…the refresh
    was refused; log in again". Anything else / unreachable → `error`
    "Anthropic's token endpoint answered <code>" / "…could not be reached".
 2. GET `https://api.anthropic.com/api/oauth/usage`, `Authorization: Bearer`,
@@ -413,12 +434,12 @@ Codex:
    label Session when `limit_window_seconds ≤ 21600` else Weekly; `reset_at`
    epoch → ISO 8601 UTC. 401 on live → `expired` "access token rejected; run
    codex once to refresh it". 401 on saved → revokedFlag = body
-   `error.code == "token_revoked"`; refresh under the lock: POST
+   `error.code == "token_revoked"`; refresh: POST
    `https://auth.openai.com/oauth/token`
    `{client_id:"app_EMoamEEZ73f0CkXaXp7hrann", grant_type:"refresh_token", refresh_token}`;
    200 → splice `tokens.access_token`, `tokens.refresh_token`,
-   `tokens.id_token` (each if returned), top-level `last_refresh` = ISO now,
-   write slot auth.json; then GET again (200 → ok, else the 401/429/other
+   `tokens.id_token` (each if returned), top-level `last_refresh` = ISO now
+   into the doc; then GET again (200 → ok, else the 401/429/other
    notes below). Refresh refused (400/401): revokedFlag → `.revoked(note:
    "login revoked by a later `codex login`")`; else `expired` "access token
    rejected and the refresh was refused; log in again". Refresh other →
@@ -432,7 +453,7 @@ Codex:
 
 ```swift
 public final class Switcher: Sendable {
-  public init(paths: Paths, lock: StoreLock, http: HTTPClient, clock: Clock)
+  public init(paths: Paths, store: Store, http: HTTPClient, clock: Clock)
   public func save(_ p: Provider) throws -> SlotName?          // nil when no live login
   public func use(_ p: Provider, _ n: SlotName) async throws
   public func forget(_ p: Provider, _ n: SlotName) throws
@@ -442,20 +463,19 @@ public final class Switcher: Sendable {
 public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [(SlotName, ProbeOutcome)] }
 ```
 
-- `save`: under the lock: `installing` → `interrupted`; `isMixed` →
-  `mixed`; identity nil → nil; else `liveName` + provider save.
-- `use`: under the lock: save-back (skip silently when `installing`; skip
-  when mixed; save when a live identity exists), install `n`; then, outside
-  the lock, probe `n` as live and write its usage (under the lock).
-- `probeAll`: under the lock: save-back (an error becomes
-  `saveBackError`), scan. Then for every saved account, unlocked: read the
-  slot doc, probe (`live` = name == live name); under the lock write
-  `usage.json`, or on `.revoked` for a non-live account remove the slot.
-  The live account is never refreshed and never removed.
+- `save`: `isMixed` → `mixed`; identity nil → nil; else `liveName` and the
+  provider's `save(to:)` inside one `store.write`.
+- `use`: save-back (skip when mixed; save when a live identity exists),
+  then install `n`; then probe `n` as live and `write` its usage.
+- `probeAll`: save-back (an error becomes `saveBackError`), `list`. Then
+  for every saved account: probe (`live` = name == live name); `write`:
+  `setUsage`, `setLogin` when the doc changed, or on `.revoked` for a
+  non-live account `remove`. The live account is never refreshed and never
+  removed.
 - `importLogin`: reads the identity from the throwaway root (Claude: config
   at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
-  `root/.codex/auth.json`), `liveName`, saves under the lock. `noLive` when
-  nothing is there.
+  `root/.codex/auth.json`), `liveName`, `put`. `noLive` when nothing is
+  there.
 
 ### Status
 
@@ -465,13 +485,13 @@ public struct Account: Equatable, Sendable, Identifiable { public var name: Slot
 public struct ProviderStatus: Equatable, Sendable { public var provider: Provider; public var live: LiveLogin?; public var accounts: [Account]; public var error: String? }
 public struct Snapshot: Equatable, Sendable { public var providers: [ProviderStatus] }
 
-public struct StatusReader { public init(paths: Paths); public func read() -> Snapshot }
+public struct StatusReader { public init(paths: Paths, store: Store); public func read() -> Snapshot }
 ```
 
 Per provider, in this order so a broken live file still lists the saved
-accounts: list slots (plan, usage); live identity; `active` = name ==
+accounts: `store.list` (plan, usage); live identity; `active` = name ==
 `liveName(live)`. Any throw becomes `error` (`reason`) with `live = nil`,
-accounts kept. Never takes the lock.
+accounts kept. Never opens a write transaction.
 
 ### Rows (port of Panel.qml, pure)
 
@@ -546,8 +566,8 @@ public actor LoginRunner {
       item: keep the new bytes, write `liveBytes` back (or remove when it
       was nil).
    d. → `loginProducedNothing`.
-6. `switcher.importLogin(p, root, claudeCreds)`; probe the new slot
-   (`live: false`) and write its usage; remove root. `differs` = expected
+6. `switcher.importLogin(p, root, claudeCreds)`; probe the new account
+   (`live: false`) and `write` its usage; remove root. `differs` = expected
    email given and `saved.email != expected`.
 
 The live login is never read by the provider's login command and never
@@ -687,7 +707,7 @@ login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
 
 - `swift build` / `swift test` from the package root. Tests are
   integration tests: each one sets `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`,
-  `CODEX_HOME` to a scratch directory, seeds live files and slots, drives
+  `CODEX_HOME` to a scratch directory, seeds live files and saved rows, drives
   `Switcher`, `StatusReader`, `LoginRunner` (with fake `claude`/`codex`
   executables on a scratch PATH) or `AppModel`, and asserts the resulting
   files, Keychain item (`kiba-mac-test-<uuid>`, removed in `defer`), HTTP
@@ -703,19 +723,14 @@ login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
 ## Store layout
 
 ```
-~/.config/kiba/
-  lock/pid                  held only during writes
-  probe/                    scratch: login-claude/, login-codex/
-  claude/.installed         slot name whose files are live
-  claude/.installing        marker while a two-file install is in flight
-  claude/<name>/credentials.json
-  claude/<name>/oauth-account.json
-  claude/<name>/usage.json
-  codex/<name>/auth.json
-  codex/<name>/usage.json
+~/Library/Application Support/Kiba/     0700
+  kiba.db                               0600, plus SQLite's -wal and -shm
+  probe/                                scratch: login-claude/, login-codex/
 ```
 
-Directories 0700, files 0600, every write temp + rename.
+The live login files stay where the provider CLIs read them (`~/.claude.json`,
+the Claude Keychain item or `.credentials.json`, `~/.codex/auth.json`) and
+are written by `PrivateFS` temp + rename.
 
 ## Decisions and their reasons
 
@@ -727,11 +742,12 @@ Directories 0700, files 0600, every write temp + rename.
   undocumented and change; the throwaway home keeps the live login out of
   reach, and the three-way credential detection covers every place a Claude
   login under `CLAUDE_CONFIG_DIR` may write.
-- Store at `~/.config/kiba`, local to this Mac and never shared: kiba's
-  layout unchanged, so an existing kiba folder moves in with `cp -Rp`. Saved
-  tokens stay in 0600 files rather than Keychain items: Codex keeps its own
-  live login in a 0600 file, every slot operation stays a file operation
-  that tests can check byte for byte, and a status read costs no
-  subprocesses.
+- Saved accounts in one SQLite file under Application Support, local to
+  this Mac and never shared. A row holds what a slot directory held, a
+  transaction replaces the lock directory, the install marker and every
+  temp + rename in the store, and a status read is two queries. Saved
+  tokens stay in the 0600 database rather than Keychain items: no
+  subprocess per read, and tests check the bytes directly. Nothing moves in
+  from an old kiba folder: accounts are added through the provider login.
 - No CLI, no Habu, no Forth: the app owns the logic; tests replace the
   Forth suite.

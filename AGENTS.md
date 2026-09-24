@@ -20,16 +20,16 @@ layout, UI spec. Read it before changing anything.
   flow that uses it.
 - `Scripts/` — `icon.swift` (app icon renderer). `build.sh` builds and
   installs `~/Applications/Kiba.app`; `test.sh` runs the suite.
-- Store: `~/.config/kiba` (or `$KIBA_STORE`), kiba's layout, local to this
-  Mac and never shared.
+- Store: `~/Library/Application Support/Kiba` (or `$KIBA_STORE`): one
+  SQLite file, `kiba.db`, local to this Mac and never shared.
 
 ## Rules
 
 - Never read, write, or delete real credentials during development or
   tests: no `~/.claude.json`, `~/.claude/`, `~/.codex/`, no Keychain item
   other than `kiba-mac-test-*`, no provider endpoint with a real token, and
-  no folder holding real saved accounts (the store or any other kiba-layout
-  folder). Tests set `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
+  no folder holding real saved accounts (the store, `~/.config/kiba`, or
+  any old kiba-layout folder). Tests set `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
   to a scratch directory and use `FileSecret`/`MemorySecret`, `StubHTTP`, a
   frozen clock.
 - Never run `claude auth logout` or `codex logout` from code or tests: both
