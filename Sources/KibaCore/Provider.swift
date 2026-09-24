@@ -9,22 +9,6 @@ public enum Provider: String, CaseIterable, Sendable, Codable {
         }
     }
 
-    /// The slot document holding the tokens.
-    public var loginFile: String {
-        switch self {
-        case .claude: return "credentials.json"
-        case .codex: return "auth.json"
-        }
-    }
-
-    /// The slot document naming the account.
-    public var identityFile: String {
-        switch self {
-        case .claude: return "oauth-account.json"
-        case .codex: return "auth.json"
-        }
-    }
-
     /// The environment variable that relocates the provider's home.
     public var homeVar: String {
         switch self {

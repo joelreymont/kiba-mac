@@ -26,19 +26,11 @@ public struct Paths: Sendable {
         codexEnv = try Self.dir(env, Provider.codex.homeVar)
     }
 
-    /// Store mutex directory.
-    public var lock: URL { Self.child(store, Name.lock) }
+    /// The saved-accounts database.
+    public var db: URL { Self.child(store, Name.db) }
     /// Scratch space for probes and throwaway logins.
     public var probe: URL { Self.child(store, Name.probe) }
 
-    public func providerDir(_ p: Provider) -> URL { Self.child(store, p.rawValue) }
-    public func slotDir(_ p: Provider, _ n: SlotName) -> URL { Self.child(providerDir(p), n.raw) }
-    public func slotFile(_ p: Provider, _ n: SlotName, _ file: String) -> URL { Self.child(slotDir(p, n), file) }
-    public func usageFile(_ p: Provider, _ n: SlotName) -> URL { slotFile(p, n, Name.usage) }
-    /// Names the slot whose files are live.
-    public func installedFile(_ p: Provider) -> URL { Self.child(providerDir(p), Name.installed) }
-    /// Present while a two-file install is in flight.
-    public func markFile(_ p: Provider) -> URL { Self.child(providerDir(p), Name.installing) }
     /// Throwaway home for a provider login run by `add`.
     public func loginRoot(_ p: Provider) -> URL { Self.child(probe, Name.loginPrefix + p.rawValue) }
 
@@ -91,11 +83,8 @@ public struct Paths: Sendable {
     private enum Name {
         static let root = UInt8(ascii: "/")
         static let storeParts = ["Library", "Application Support", "Kiba"]
-        static let lock = "lock"
+        static let db = "kiba.db"
         static let probe = "probe"
-        static let usage = "usage.json"
-        static let installed = ".installed"
-        static let installing = ".installing"
         static let loginPrefix = "login-"
         static let claudeDir = ".claude"
         static let claudeConfig = ".claude.json"

@@ -1,33 +1,36 @@
 import Foundation
 
-/// Decoder for the base64url text of JWT segments (RFC 4648 section 5).
-/// Padding is optional and ends the text; the standard `+` `/` pair is read
-/// as `-` `_`. Anything else is `badJSON`.
-public enum Base64URL {
-    private static let alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-    private static let std = alnum + "+/"
-    private static let url = alnum + "-_"
+/// Decoder for the base64url text of JWT segments (RFC 4648 section 5): the url
+/// alphabet only, then at most two `=` of padding that end the text.
+enum Base64URL {
+    private static let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     private static let pad = UInt8(ascii: "=")
+    private static let maxPad = 2
     private static let sextet = 6
     private static let octet = 8
-    private static let what = "base64url text"
 
-    /// Sextet value of every byte of either alphabet; nil for all others.
+    /// Sextet value of every alphabet byte; nil for all others.
     private static let table: [UInt8?] = {
         var t = [UInt8?](repeating: nil, count: Int(UInt8.max) + 1)
-        for alphabet in [std, url] {
-            for (v, c) in alphabet.utf8.enumerated() { t[Int(c)] = UInt8(v) }
-        }
+        for (v, c) in alphabet.utf8.enumerated() { t[Int(c)] = UInt8(v) }
         return t
     }()
 
-    static func decode(_ text: some StringProtocol) throws -> Data {
+    /// The bytes `text` encodes; `badJSON(what)` for any byte outside the
+    /// alphabet, padding that is not trailing or runs past two, or a length
+    /// no byte count encodes to.
+    static func decode(_ text: some StringProtocol, what: String) throws -> Data {
+        let bytes = text.utf8
+        let body = bytes.prefix { $0 != pad }
+        let pads = bytes.count - body.count
+        guard pads <= maxPad, bytes.dropFirst(body.count).allSatisfy({ $0 == pad }) else {
+            throw KibaError.badJSON(what)
+        }
         var out = Data()
-        out.reserveCapacity(text.utf8.count * sextet / octet)
+        out.reserveCapacity(body.count * sextet / octet)
         var acc: UInt32 = 0   // the low `bits` bits are pending output
         var bits = 0
-        for c in text.utf8 {
-            if c == pad { break }
+        for c in body {
             guard let v = table[Int(c)] else { throw KibaError.badJSON(what) }
             acc = acc << sextet | UInt32(v)
             bits += sextet

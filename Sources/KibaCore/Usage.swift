@@ -1,3 +1,5 @@
+import Foundation
+
 /// One allowance window of a saved account.
 public struct Limit: Codable, Equatable, Sendable {
     /// `Session (5-hour)`, `Weekly (7-day)`, or `<Model> Weekly` / `<Model> Session` / `<Model>`.
@@ -34,4 +36,26 @@ public struct UsageRecord: Codable, Equatable, Sendable {
         self.note = note
         self.limits = limits
     }
+}
+
+extension UsageRecord {
+    /// What a stored record that no longer decodes reads as.
+    static let unreadable = UsageRecord(
+        fetchedAt: 0, state: .unknown, note: "usage record is unreadable; refresh usage", limits: [])
+}
+
+/// The stored form of `r`: JSON with sorted keys.
+func usageEncode(_ r: UsageRecord) -> Data {
+    let enc = JSONEncoder()
+    enc.outputFormatting = [.sortedKeys]
+    do {
+        return try enc.encode(r)
+    } catch {
+        preconditionFailure("a usage record holds only strings and integers, so it always encodes: \(error)")
+    }
+}
+
+/// The record stored as `data`; `UsageRecord.unreadable` when it does not decode.
+func usageDecode(_ data: Data) -> UsageRecord {
+    (try? JSONDecoder().decode(UsageRecord.self, from: data)) ?? .unreadable
 }

@@ -9,10 +9,14 @@ public enum PrivateFS {
     static let dirMode: mode_t = 0o700
     /// Longest symlink chain followed to a write target.
     static let maxHops = 8
-    /// Suffix of the temp file written beside its target.
+    /// Suffix of the temp file written beside its target, and the base its random part is spelled in.
     static let tmpSuffix = ".tmp"
+    static let tmpRadix = 16
     /// The temp file is created fresh, never through a link, never inherited by a child.
     static let tmpFlags = O_WRONLY | O_CREAT | O_TRUNC | O_EXCL | O_NOFOLLOW | O_CLOEXEC
+    /// Files are read through links, never inherited by a child, in chunks of this many bytes.
+    static let readFlags = O_RDONLY | O_CLOEXEC
+    static let readChunk = 1 << 16
     /// Directories are walked without following links.
     static let dirFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
     /// The entries every directory lists for itself and its parent.
@@ -20,14 +24,11 @@ public enum PrivateFS {
     static let dotDotName = Array("..".utf8)
 
     /// Replaces the file behind `url` (after its symlink chain) with `data`, mode 0600.
+    /// The temp beside the target has a random name, so concurrent writers never
+    /// share one.
     public static func writePrivate(_ data: Data, to url: URL) throws {
         let target = try writeTarget(url).path
-        let tmp = target + tmpSuffix
-        switch try kind(AT_FDCWD, tmp, tmp) {
-        case nil: break
-        case S_IFLNK: throw KibaError.unsafePath(URL(fileURLWithPath: tmp, isDirectory: false))
-        default: guard unlink(tmp) == 0 else { throw KibaError.io(failure("unlink", tmp)) }
-        }
+        let tmp = "\(target).\(String(UInt64.random(in: .min ... .max), radix: tmpRadix))\(tmpSuffix)"
         let fd = open(tmp, tmpFlags, fileMode)
         guard fd >= 0 else { throw KibaError.io(failure("open", tmp)) }
         var errs: [String] = []
@@ -77,6 +78,30 @@ public enum PrivateFS {
             hops += 1
         }
         return URL(fileURLWithPath: path, isDirectory: false)
+    }
+
+    /// The whole file at `url`, following links; nil when it does not exist.
+    static func read(_ url: URL) throws -> Data? {
+        let path = url.path
+        let fd = open(path, readFlags)
+        guard fd >= 0 else {
+            guard errno == ENOENT else { throw KibaError.io(failure("open", path)) }
+            return nil
+        }
+        // A read-only descriptor holds no data, so closing it cannot fail in a way that matters.
+        defer { close(fd) }
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: readChunk)
+        while true {
+            let n = buf.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
+            if n > 0 {
+                out.append(contentsOf: buf[..<n])
+            } else if n == 0 {
+                return out
+            } else if errno != EINTR {
+                throw KibaError.io(failure("read", path))
+            }
+        }
     }
 
     /// Whether `url` is a regular file, following links.

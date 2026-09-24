@@ -24,10 +24,6 @@ public struct JSONDoc: Sendable {
         guard data.count <= Self.maxSize else {
             throw KibaError.capacity("bytes in a JSON document (limit \(Self.maxMiB) MiB)")
         }
-        try self.init(scanning: data)
-    }
-
-    init(scanning data: Data) throws {
         let bytes = data.startIndex == 0 ? data : Data(data)
         layout = try bytes.withUnsafeBytes { raw in
             var scan = Scan(buf: raw)

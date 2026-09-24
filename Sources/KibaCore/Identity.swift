@@ -16,7 +16,7 @@ public struct Identity: Equatable, Sendable {
 /// Claude Code logins: the `oauthAccount` object names the account, the
 /// credentials document carries the plan.
 public enum ClaudeIdentity {
-    private enum Key {
+    enum Key {
         static let account = "oauthAccount"
         static let email = "emailAddress"
         static let org = "organizationUuid"
@@ -27,32 +27,37 @@ public enum ClaudeIdentity {
 
     /// A saved `oauthAccount` object on its own; plan is "".
     static func fromOAuthAccount(_ obj: Data) throws -> Identity {
-        try named(JSONObj(obj, what: Key.account))
+        try named(JSONFields(obj, what: Key.account))
     }
 
-    /// The live config's top-level `oauthAccount` plus the credentials' plan.
+    /// The live config's top-level `oauthAccount` object plus the credentials'
+    /// plan. Only that object's bytes are decoded: the rest of `.claude.json` is
+    /// Claude Code's and may hold values `JSONSerialization` rejects, and the
+    /// identity must come from the very bytes `ClaudeLive.save` copies.
     static func fromLive(config: Data, creds: Data) throws -> Identity {
-        guard let obj = try JSONObj(config, what: Key.account).obj(Key.account) else {
-            throw KibaError.badJSON(Key.account)
-        }
-        var id = try named(obj)
-        id.plan = try plan(JSONObj(creds, what: Key.creds))
+        var id = try fromOAuthAccount(profile(config))
+        id.plan = planFromCreds(creds)
         return id
+    }
+
+    /// The exact bytes of the config's top-level `oauthAccount` object.
+    static func profile(_ config: Data) throws -> Data {
+        let doc = try JSONDoc(config)
+        guard let span = doc.objectSpan(Key.account) else { throw KibaError.badJSON(Key.account) }
+        return doc.data.subdata(in: span)
     }
 
     /// `claudeAiOauth.subscriptionType`; "" when absent or unreadable.
     static func planFromCreds(_ creds: Data) -> String {
-        guard let obj = try? JSONObj(creds, what: Key.creds) else { return "" }
-        return plan(obj)
+        guard let obj = try? JSONFields(creds, what: Key.creds) else { return "" }
+        return obj.obj(Key.oauth)?.str(Key.plan) ?? ""
     }
 
-    private static func named(_ obj: JSONObj) throws -> Identity {
-        guard let email = obj.str(Key.email) else { throw KibaError.badJSON("\(Key.account).\(Key.email)") }
+    private static func named(_ obj: JSONFields) throws -> Identity {
+        guard let email = obj.str(Key.email), !email.isEmpty else {
+            throw KibaError.badJSON("\(Key.account).\(Key.email)")
+        }
         return Identity(email: email, plan: "", org: obj.str(Key.org) ?? "")
-    }
-
-    private static func plan(_ creds: JSONObj) -> String {
-        creds.obj(Key.oauth)?.str(Key.plan) ?? ""
     }
 }
 
@@ -75,24 +80,24 @@ public enum CodexIdentity {
     private static let jwtParts = 3   // header.payload.signature
 
     static func fromAuth(_ auth: Data) throws -> Identity {
-        let doc = try JSONObj(auth, what: tokenPath)
+        let doc = try JSONFields(auth, what: tokenPath)
         guard let jwt = doc.obj(Key.tokens)?.str(Key.idToken) else {
             guard hasKey(doc) else { throw KibaError.badJSON(tokenPath) }
             return keyLogin
         }
-        let body = try JSONObj(Base64URL.decode(payload(jwt)), what: tokenPath)
-        guard let email = body.str(Key.email) else { throw KibaError.badJSON("\(Key.idToken).\(Key.email)") }
+        let body = try JSONFields(Base64URL.decode(payload(jwt), what: tokenPath), what: tokenPath)
+        guard let email = body.str(Key.email), !email.isEmpty else { throw KibaError.badJSON("\(Key.idToken).\(Key.email)") }
         let info = body.obj(Key.claims)
         return Identity(email: email, plan: info?.str(Key.plan) ?? "", org: info?.str(Key.org) ?? "")
     }
 
     /// `OPENAI_API_KEY` is a non-empty string, whatever `tokens` holds.
     static func isAPIKey(_ auth: Data) -> Bool {
-        guard let doc = try? JSONObj(auth, what: tokenPath) else { return false }
+        guard let doc = try? JSONFields(auth, what: tokenPath) else { return false }
         return hasKey(doc)
     }
 
-    private static func hasKey(_ doc: JSONObj) -> Bool {
+    private static func hasKey(_ doc: JSONFields) -> Bool {
         !(doc.str(Key.apiKey) ?? "").isEmpty
     }
 
@@ -102,37 +107,5 @@ public enum CodexIdentity {
         let parts = jwt.utf8.split(separator: dot, maxSplits: jwtParts - 1, omittingEmptySubsequences: false)
         guard parts.count == jwtParts else { throw KibaError.badJSON(tokenPath) }
         return Substring(parts[1])
-    }
-}
-
-/// A login document read as a JSON object. These documents are only read
-/// here, never rewritten, so a `JSONSerialization` parse is safe.
-private struct JSONObj {
-    private let fields: [String: Any]
-
-    /// `badJSON(what)` unless `data` is a JSON object.
-    init(_ data: Data, what: String) throws {
-        let any: Any
-        do {
-            any = try JSONSerialization.jsonObject(with: data)
-        } catch {
-            throw KibaError.badJSON(what)
-        }
-        guard let fields = any as? [String: Any] else { throw KibaError.badJSON(what) }
-        self.fields = fields
-    }
-
-    private init(fields: [String: Any]) {
-        self.fields = fields
-    }
-
-    /// The string under `key`; nil when absent, null, or another kind.
-    func str(_ key: String) -> String? {
-        fields[key] as? String
-    }
-
-    /// The object under `key`; nil when absent, null, or another kind.
-    func obj(_ key: String) -> JSONObj? {
-        (fields[key] as? [String: Any]).map(JSONObj.init(fields:))
     }
 }
