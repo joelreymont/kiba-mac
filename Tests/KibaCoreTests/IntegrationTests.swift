@@ -30,7 +30,9 @@ import Testing
         try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"), login: authB, profile: nil)
 
         let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60)),
-                             answer(Status.ok, codexUsage(session: 20, week: 45))])
+                             answer(Status.ok, claudeUsage(session: 10, week: 20)),
+                             answer(Status.ok, codexUsage(session: 20, week: 45)),
+                             answer(Status.ok, codexUsage(session: 15, week: 25))])
         let sw = w.switcher(http)
         try await sw.use(.claude, bx)
         try await sw.use(.codex, by)
@@ -45,21 +47,57 @@ import Testing
         #expect(w.read(w.paths.codexAuthFile(root: nil)) == authB)
         #expect(try w.store.installed(.codex) == by)
 
-        #expect(http.requests.map(\.url.absoluteString) == [Endpoint.claudeUsage, Endpoint.codexUsage])
-        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-xb", "Bearer at-yb"])
-        #expect(http.requests.map { $0.headers[Header.agent] } == ["kiba", "codex-cli"])
+        #expect(http.requests.map(\.url.absoluteString) ==
+                [Endpoint.claudeUsage, Endpoint.claudeUsage, Endpoint.codexUsage, Endpoint.codexUsage])
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-xb", "Bearer at-xa2", "Bearer at-yb", "Bearer at-ya2"])
+        #expect(http.requests.map { $0.headers[Header.agent] } == ["kiba", "kiba", "codex-cli", "codex-cli"])
 
         let want = [
             ProviderStatus(provider: .claude, live: LiveLogin(email: "b@x", plan: "pro"), accounts: [
-                Account(name: ax, plan: "max", active: false, usage: nil),
+                Account(name: ax, plan: "max", active: false, usage: probed(windows(session: 10, week: 20))),
                 Account(name: bx, plan: "pro", active: true, usage: probed(windows(session: 30, week: 60))),
             ], error: nil),
             ProviderStatus(provider: .codex, live: LiveLogin(email: "b@y", plan: "pro"), accounts: [
-                Account(name: ay, plan: "plus", active: false, usage: nil),
+                Account(name: ay, plan: "plus", active: false, usage: probed(windows(session: 15, week: 25))),
                 Account(name: by, plan: "pro", active: true, usage: probed(windows(session: 20, week: 45))),
             ], error: nil),
         ]
         #expect(StatusReader(paths: w.paths, store: w.store).read().providers == want)
+    }
+}
+
+@Test func switchRefreshesTheExpiredLoginItLeaves() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now - Fixed.hour)
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let expired = UsageRecord(
+            fetchedAt: Fixed.now, state: .expired, note: "access token expired; Claude Code refreshes it on its next run",
+            limits: [])
+        try w.writeClaude(config: claudeConfig(profA), creds: credsA)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA,
+                   usage: expired)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB)
+        let http = StubHTTP([
+            answer(Status.ok, claudeUsage(session: 30, week: 60)),
+            answer(Status.ok, #"{"access_token":"at-xa2","refresh_token":"rt-xa2","expires_in":\#(Fixed.tokenLife)}"#),
+            answer(Status.ok, claudeUsage(session: 10, week: 20)),
+        ])
+
+        try await w.switcher(http).use(.claude, bx)
+
+        #expect(http.requests.map(\.url.absoluteString) == [Endpoint.claudeUsage, Endpoint.claudeToken, Endpoint.claudeUsage])
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-xb", nil, "Bearer at-xa2"])
+        #expect(try w.store.fetch(.claude, ax)?.login == claudeCreds("xa2", plan: "max", expires: Fixed.now + Fixed.tokenLife))
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsB)
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        let accounts = try #require(claude).accounts
+        #expect(accounts == [
+            Account(name: ax, plan: "max", active: false, usage: probed(windows(session: 10, week: 20))),
+            Account(name: bx, plan: "pro", active: true, usage: probed(windows(session: 30, week: 60))),
+        ])
+        #expect(accounts.map { Rows.dead($0.usage, active: $0.active) } == [false, false])
     }
 }
 
@@ -577,7 +615,8 @@ func probed(_ limits: [Limit]) -> UsageRecord {
     try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: liveAuth, profile: nil)
     try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
                login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb"), profile: nil)
-    let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45))])
+    let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45)),
+                         answer(Status.ok, codexUsage(session: 15, week: 25))])
     let backend = CoreBackend(
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
         runner: w.runner(http, keychain: FakeKeychain(items: [:])))
@@ -599,7 +638,7 @@ func probed(_ limits: [Limit]) -> UsageRecord {
     let after = model.snapshot.providers.first { $0.provider == .codex }
     #expect(after?.live == LiveLogin(email: "b@y", plan: "pro"))
     #expect(after?.accounts == [
-        Account(name: ay, plan: "plus", active: false, usage: nil),
+        Account(name: ay, plan: "plus", active: false, usage: probed(windows(session: 15, week: 25))),
         Account(name: by, plan: "pro", active: true, usage: probed(windows(session: 20, week: 45))),
     ])
 }

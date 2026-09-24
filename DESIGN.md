@@ -468,7 +468,11 @@ public struct ProbeReport { public var saveBackError: String?; public var provid
 - `save`: `isMixed` → `mixed`; identity nil → nil; else `liveName` and the
   provider's `save(to:)` inside one `store.write`.
 - `use`: save-back (skip when mixed; save when a live identity exists),
-  then install `n`; then probe `n` as live and `write` its usage.
+  then install `n`; then probe `n` as live and `write` its usage; then,
+  when the save-back named an account other than `n`, probe that one as
+  saved and `write` it like `probeAll` does. Its usage came from a live
+  probe, which never refreshes, so an expired token would otherwise leave
+  it dead ("log in again") once inactive.
 - `probeAll`: save-back (an error becomes `saveBackError`), `list`. Then
   for every saved account: probe (`live` = name == live name); `write`:
   `setUsage`, `setLogin` when the doc changed, or on `.revoked` for a

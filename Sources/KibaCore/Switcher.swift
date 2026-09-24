@@ -29,11 +29,14 @@ public final class Switcher: Sendable {
     /// when the live files are mixed: the install repairs them), installs
     /// `n`, then probes it as the live login and records its usage. A live
     /// login that cannot be read or saved stops the switch before anything
-    /// is written, so no login is overwritten unsaved.
+    /// is written, so no login is overwritten unsaved. The login saved back
+    /// is then probed as saved: its usage came from a live probe, which
+    /// never refreshes, so an expired token would leave it looking dead.
     public func use(_ p: Provider, _ n: SlotName) async throws {
-        if try !isMixed(p) { try saveLive(p) }
+        let old = try isMixed(p) ? nil : saveLive(p)
         try live(p).install(n)
         try await probe(p, n, live: true)
+        if let old, old != n { try await probe(p, old, live: false) }
     }
 
     /// `noAccount` when there is no such saved login.
