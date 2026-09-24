@@ -14,7 +14,7 @@ public struct CoreBackend: Backend {
     }
 
     /// Everything real: paths from `env`, the store under its `HOME`, the
-    /// network, the Keychain as `username`, Terminal, and `env`'s `PATH`.
+    /// network, the Keychain as `username`, Terminal, and the login shell's PATH.
     public init(env: [String: String], username: String) throws {
         let paths = try Paths(env: env, username: username)
         let store = try Store(paths: paths)
@@ -24,10 +24,33 @@ public struct CoreBackend: Backend {
             reader: StatusReader(paths: paths, store: store),
             runner: LoginRunner(
                 paths: paths, switcher: switcher, terminal: TerminalApp(), lister: KeychainTool(account: username),
-                searchPath: env[Self.pathVar] ?? ""))
+                searchPath: try Self.loginPath(env: env)))
     }
 
-    static let pathVar = "PATH"
+    /// The PATH of the user's login shell. An app started from Finder or a
+    /// login item inherits only the system default, which lacks the CLIs.
+    /// The value is printed between markers so anything the profile prints
+    /// cannot pollute it.
+    static func loginPath(env: [String: String]) throws -> String {
+        let shell = URL(fileURLWithPath: env[Shell.variable] ?? Shell.fallback, isDirectory: false)
+        let r = try Subprocess.run(shell, [Shell.loginCommand, Shell.printPath], stdin: nil, env: env, setsid: true)
+        let out = String(decoding: r.stdout, as: UTF8.self)
+        guard r.status == 0,
+            let open = out.range(of: Shell.marker),
+            let close = out.range(of: Shell.marker, range: open.upperBound..<out.endIndex)
+        else {
+            throw KibaError.tool(shell.lastPathComponent, r.status, String(decoding: r.stderr, as: UTF8.self))
+        }
+        return String(out[open.upperBound..<close.lowerBound])
+    }
+
+    private enum Shell {
+        static let variable = "SHELL"
+        static let fallback = "/bin/zsh"
+        static let loginCommand = "-lc"
+        static let marker = "<kiba-path>"
+        static let printPath = "printf '%s%s%s' '\(marker)' \"$PATH\" '\(marker)'"
+    }
 
     public func status() -> Snapshot {
         reader.read()
