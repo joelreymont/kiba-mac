@@ -24,7 +24,7 @@ scratch directory with no network and no real Keychain:
 
 | Effect            | Protocol / type      | Production                         | Tests                     |
 |-------------------|----------------------|------------------------------------|---------------------------|
-| paths             | `Paths(env:)`        | process env                        | scratch env               |
+| paths             | `Paths(env:)`        | process env                        | scratch HOME              |
 | saved accounts    | `Store`              | SQLite at `paths.db`               | SQLite in the scratch store |
 | secret bytes      | `SecretStore`        | `KeychainItem`, `FileSecret`       | `MemorySecret`, `FileSecret` |
 | HTTP              | `HTTPClient`         | `URLSessionClient`                 | `StubHTTP`                |
@@ -77,13 +77,13 @@ error becomes that provider's `error` string or that account's usage `note`.
 ```swift
 public struct Paths: Sendable {
   public init(env: [String: String], username: String) throws   // io("HOME is not set") when HOME is missing or empty
-  // store: $KIBA_STORE when non-empty, else
-  // $HOME/Library/Application Support/Kiba. Local to this Mac; never shared.
+  // store: $HOME/Library/Application Support/Kiba. Local to this Mac;
+  // never shared. No kiba-specific variable: tests move HOME.
   public let store: URL
   public var db: URL                // store/kiba.db
   public var probe: URL             // store/probe
   public func loginRoot(_ p: Provider) -> URL            // store/probe/login-<provider>
-  // HOME, KIBA_STORE, CLAUDE_CONFIG_DIR, CODEX_HOME must be absolute when set:
+  // HOME, CLAUDE_CONFIG_DIR, CODEX_HOME must be absolute when set:
   // a relative or `~` value throws io("<VAR> is not an absolute path: <value>");
   // nothing ever expands `~`.
   // live files; `root` selects a throwaway home for `add`
@@ -578,8 +578,7 @@ restore in 5c covers a Keychain-writing login.
 
 ### AppModel (`@MainActor @Observable`)
 
-The model talks to the core through one seam so the UI builds and runs on
-fixtures before the core lands:
+The model talks to the core through one seam:
 
 ```swift
 public protocol Backend: Sendable {
@@ -593,10 +592,9 @@ public protocol Backend: Sendable {
 ```
 
 `Backend.swift` in KibaCore holds the protocol plus `ProbeReport` and
-`AddResult`; `CoreBackend` (Switcher + StatusReader + LoginRunner) conforms
-once the core exists, and `FixtureBackend` (a `Snapshot` loaded from JSON via
-`KIBA_FIXTURE=<path>`, actions that mutate it in memory) drives the UI in
-development.
+`AddResult`; `CoreBackend` (Switcher + StatusReader + LoginRunner) is the
+only production conformer. Tests drive `AppModel` on a scratch HOME through
+the same `CoreBackend`.
 
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
 `refreshing`, `busy`, `message`, `error`, `panelOpen`, `autoProbed`, `now`
@@ -706,7 +704,7 @@ login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
 ## Build, bundle, test
 
 - `swift build` / `swift test` from the package root. Tests are
-  integration tests: each one sets `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`,
+  integration tests: each one sets `HOME`, `CLAUDE_CONFIG_DIR` and
   `CODEX_HOME` to a scratch directory, seeds live files and saved rows, drives
   `Switcher`, `StatusReader`, `LoginRunner` (with fake `claude`/`codex`
   executables on a scratch PATH) or `AppModel`, and asserts the resulting

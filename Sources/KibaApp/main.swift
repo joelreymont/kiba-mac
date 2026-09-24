@@ -18,16 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// `KIBA_FIXTURE=<snapshot.json>` runs the app on a fixture instead of the store.
-private let fixtureVar = "KIBA_FIXTURE"
-
-private let connect: Connect = {
-    guard let path = ProcessInfo.processInfo.environment[fixtureVar], !path.isEmpty else {
-        return { EmptyBackend() }
-    }
-    let file = URL(fileURLWithPath: path)
-    return { () throws(KibaError) -> any Backend in try FixtureBackend(file: file) }
-}()
+private let connect: Connect = { EmptyBackend() }
 
 let app = NSApplication.shared
 let delegate = AppDelegate(connect: connect)

@@ -20,8 +20,9 @@ layout, UI spec. Read it before changing anything.
   flow that uses it.
 - `Scripts/` — `icon.swift` (app icon renderer). `build.sh` builds and
   installs `~/Applications/Kiba.app`; `test.sh` runs the suite.
-- Store: `~/Library/Application Support/Kiba` (or `$KIBA_STORE`): one
-  SQLite file, `kiba.db`, local to this Mac and never shared.
+- Store: `~/Library/Application Support/Kiba/kiba.db`, one SQLite file
+  under HOME, local to this Mac and never shared. No kiba-specific
+  environment variables: tests move HOME.
 
 ## Rules
 
@@ -29,7 +30,7 @@ layout, UI spec. Read it before changing anything.
   tests: no `~/.claude.json`, `~/.claude/`, `~/.codex/`, no Keychain item
   other than `kiba-mac-test-*`, no provider endpoint with a real token, and
   no folder holding real saved accounts (the store, `~/.config/kiba`, or
-  any old kiba-layout folder). Tests set `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
+  any old kiba-layout folder). Tests set `HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`
   to a scratch directory and use `FileSecret`/`MemorySecret`, `StubHTTP`, a
   frozen clock.
 - Never run `claude auth logout` or `codex logout` from code or tests: both
@@ -62,8 +63,7 @@ layout, UI spec. Read it before changing anything.
   path), `swiftc` fails with `couldNotFindTmpDir`: export a fresh one
   first, as `build.sh` and `test.sh` do.
 - `./build.sh` produces `build/Kiba.app` and installs `~/Applications/Kiba.app`;
-  `plutil -lint` and `codesign -dv` pass. The user runs it:
-  `KIBA_FIXTURE=$PWD/Fixtures/demo.json ~/Applications/Kiba.app/Contents/MacOS/Kiba`.
+  `plutil -lint` and `codesign -dv` pass. The user runs it.
 - Read-only checks against the real store are fine (the app's status read).
   Never trigger switch, save, add, forget, or probe against the real HOME
   while testing.

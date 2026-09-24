@@ -1,8 +1,7 @@
 import Foundation
 
-/// The one seam between the app and the account logic. `CoreBackend`
-/// (Switcher, StatusReader, LoginRunner) conforms in production; a fixture
-/// conforms during UI development.
+/// The one seam between the app and the account logic; `CoreBackend`
+/// (Switcher, StatusReader, LoginRunner) conforms.
 public protocol Backend: Sendable {
     /// Reads every provider; never takes the store lock.
     func status() -> Snapshot

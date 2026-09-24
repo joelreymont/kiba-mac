@@ -14,7 +14,6 @@ for sig in HUP INT TERM; do
 done
 
 export HOME="$scratch/home"
-export KIBA_STORE="$scratch/store"
 export CLAUDE_CONFIG_DIR="$scratch/claude"
 export CODEX_HOME="$scratch/codex"
 # The inherited TMPDIR may not exist, and swiftc fails without one.

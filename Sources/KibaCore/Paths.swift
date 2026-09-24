@@ -4,7 +4,7 @@ import Foundation
 /// URLs never touch the file system: they carry no trailing slash whether or
 /// not the path exists, so equal paths always compare equal.
 public struct Paths: Sendable {
-    /// `$KIBA_STORE`, else `$HOME/.config/kiba`.
+    /// `$HOME/Library/Application Support/Kiba`.
     public let store: URL
     /// Keychain account attribute of the live Claude credentials.
     public let username: String
@@ -15,13 +15,13 @@ public struct Paths: Sendable {
     private let claudeEnv: URL?
     private let codexEnv: URL?
 
-    /// Throws `io` when `HOME` is unset or empty, or when `HOME`, `KIBA_STORE`,
+    /// Throws `io` when `HOME` is unset or empty, or when `HOME`,
     /// `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is set to a path not starting with `/`.
     public init(env: [String: String], username: String) throws {
         guard let home = try Self.dir(env, Var.home) else { throw KibaError.io("HOME is not set") }
         self.home = home
         self.username = username
-        store = try Self.dir(env, Var.store) ?? Name.storeParts.reduce(home, Self.child)
+        store = Name.storeParts.reduce(home, Self.child)
         claudeEnv = try Self.dir(env, Provider.claude.homeVar)
         codexEnv = try Self.dir(env, Provider.codex.homeVar)
     }
@@ -86,12 +86,11 @@ public struct Paths: Sendable {
 
     private enum Var {
         static let home = "HOME"
-        static let store = "KIBA_STORE"
     }
 
     private enum Name {
         static let root = UInt8(ascii: "/")
-        static let storeParts = [".config", "kiba"]
+        static let storeParts = ["Library", "Application Support", "Kiba"]
         static let lock = "lock"
         static let probe = "probe"
         static let usage = "usage.json"
