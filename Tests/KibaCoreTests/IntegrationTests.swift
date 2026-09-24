@@ -156,6 +156,39 @@ import Testing
     }
 }
 
+@Test func switchMovesKeychainLiveLogin() async throws {
+    try ensureKeychain()
+    let service = "\(Fixed.keychainPrefix)\(UUID().uuidString)"
+    let item = KeychainItem(service: service, account: Fixed.user)
+    defer { #expect(throws: Never.self) { try item.remove() } }
+    try await scratch(keychainService: service) { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let liveCreds = claudeCreds("xa2", plan: "max", expires: Fixed.now + Fixed.day)
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        // No credentials file: the live login is the Keychain item.
+        try claudeConfig(profA).write(to: w.paths.claudeConfigFile(root: nil))
+        try item.write(liveCreds)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
+                   login: claudeCreds("xa1", plan: "max", expires: Fixed.now), profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB)
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60)),
+                             answer(Status.ok, claudeUsage(session: 10, week: 20))])
+
+        try await w.switcher(http).use(.claude, bx)
+
+        #expect(try item.read() == credsB)
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == nil)
+        #expect(w.read(w.paths.claudeConfigFile(root: nil)) == claudeConfig(profB))
+        #expect(try w.store.fetch(.claude, ax)?.login == liveCreds)
+        #expect(try w.store.installed(.claude) == bx)
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-xb", "Bearer at-xa2"])
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        #expect(claude?.live == LiveLogin(email: "b@x", plan: "pro"))
+        #expect(claude?.accounts.map(\.active) == [false, true])
+    }
+}
+
 // MARK: - Probe
 
 @Test func probeRefreshesSavedClaudeLoginsOnly() async throws {
@@ -490,6 +523,8 @@ enum Fixed {
     /// lookup cannot reach real credentials.
     static let user = "kiba-mac-test-user"
     static let keychainPrefix = "kiba-mac-test-"
+    /// The service of tests that never touch the Keychain: no item is ever filed under it.
+    static let noKeychain = "kiba-mac-test-none"
     /// How long the app model may take to finish a read or an action.
     static let settleLimit = Duration.seconds(5)
     static let pollStep = Duration.milliseconds(10)
@@ -540,7 +575,7 @@ struct World: Sendable {
     let store: Store
     let clock: Clock = { Date(timeIntervalSince1970: TimeInterval(Fixed.now)) }
 
-    init() throws {
+    init(keychainService: String) throws {
         var template = Array(Fixed.scratchTemplate.utf8CString)
         let path = try template.withUnsafeMutableBufferPointer { buf -> String in
             guard let made = mkdtemp(buf.baseAddress) else { throw KibaError.io("mkdtemp \(Fixed.scratchTemplate): errno \(errno)") }
@@ -556,7 +591,7 @@ struct World: Sendable {
             try FileManager.default.createDirectory(at: dir.appending(component: sub), withIntermediateDirectories: false)
         }
         self.env = env
-        paths = try Paths(env: env, username: Fixed.user)
+        paths = try Paths(env: env, username: Fixed.user, keychainService: keychainService)
         store = try Store(paths: paths)
     }
 
@@ -615,8 +650,9 @@ struct World: Sendable {
 }
 
 /// Runs `body` in a fresh world, then removes the world.
-func scratch(_ body: (World) async throws -> Void) async throws {
-    let w = try World()
+/// `keychainService` names the throwaway item a Keychain-backed live login uses.
+func scratch(keychainService: String = Fixed.noKeychain, _ body: (World) async throws -> Void) async throws {
+    let w = try World(keychainService: keychainService)
     do {
         try await body(w)
     } catch {
@@ -661,17 +697,22 @@ struct FakeKeychain: KeychainLister {
 /// `test.sh` that HOME is a scratch directory with none, where an add blocks
 /// on a "keychain not found" prompt; give it a throwaway keychain there. A
 /// real home is never given one.
+/// Tests that use the Keychain run in parallel; one at a time may create it.
+let keychainGate = NSLock()
+
 func ensureKeychain() throws {
-    let found = try Subprocess.run(Fixed.security, ["default-keychain"], stdin: nil, env: nil, setsid: true)
-    guard found.status != 0 else { return }
-    let home = try #require(ProcessInfo.processInfo.environment["HOME"])
-    let account = String(cString: try #require(getpwuid(getuid())).pointee.pw_dir)
-    try #require(home != account, "no default keychain in the real home \(home)")
-    let dir = URL(fileURLWithPath: home).appending(components: "Library", "Keychains")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let file = dir.appending(component: Fixed.loginKeychain).path
-    let made = try Subprocess.run(Fixed.security, ["create-keychain", "-p", "", file], stdin: nil, env: nil, setsid: true)
-    guard made.status == 0 else { throw KibaError.tool(Fixed.security.path, made.status, text(made.stderr)) }
+    try keychainGate.withLock {
+        let found = try Subprocess.run(Fixed.security, ["default-keychain"], stdin: nil, env: nil, setsid: true)
+        guard found.status != 0 else { return }
+        let home = try #require(ProcessInfo.processInfo.environment["HOME"])
+        let account = String(cString: try #require(getpwuid(getuid())).pointee.pw_dir)
+        try #require(home != account, "no default keychain in the real home \(home)")
+        let dir = URL(fileURLWithPath: home).appending(components: "Library", "Keychains")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appending(component: Fixed.loginKeychain).path
+        let made = try Subprocess.run(Fixed.security, ["create-keychain", "-p", "", file], stdin: nil, env: nil, setsid: true)
+        guard made.status == 0 else { throw KibaError.tool(Fixed.security.path, made.status, text(made.stderr)) }
+    }
 }
 
 // MARK: - Fixtures
@@ -758,7 +799,7 @@ func probed(_ limits: [Limit]) -> UsageRecord {
 // MARK: - App model
 
 @MainActor @Test func appModelListsRowsAndSwitches() async throws {
-    let w = try World()
+    let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
     let (ay, by) = (try slot("a@y"), try slot("b@y"))
     let liveAuth = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")

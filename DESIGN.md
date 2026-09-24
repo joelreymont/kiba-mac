@@ -24,7 +24,7 @@ scratch directory with no network and no real Keychain:
 
 | Effect            | Protocol / type      | Production                         | Tests                     |
 |-------------------|----------------------|------------------------------------|---------------------------|
-| paths             | `Paths(env:)`        | process env                        | scratch HOME              |
+| paths             | `Paths(env:username:keychainService:)` | process env      | scratch HOME, `kiba-mac-test-<uuid>` service |
 | saved accounts    | `Store`              | SQLite at `paths.db`               | SQLite in the scratch store |
 | secret bytes      | `SecretStore`        | `KeychainItem`, `FileSecret`       | `MemorySecret`, `FileSecret` |
 | HTTP              | `HTTPClient`         | `URLSessionClient`                 | `StubHTTP`                |
@@ -93,7 +93,7 @@ public struct Paths: Sendable {
   public func codexHome(root: URL?) -> URL         // root/.codex | $CODEX_HOME | $HOME/.codex
   public func codexAuthFile(root: URL?) -> URL     // <home>/auth.json
   public let username: String                      // Keychain account attribute
-  public let keychainService: String               // "Claude Code-credentials"
+  public let keychainService: String               // Paths.claudeService = "Claude Code-credentials", tests pass their own
 }
 ```
 

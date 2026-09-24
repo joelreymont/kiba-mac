@@ -9,7 +9,10 @@ public struct Paths: Sendable {
     /// Keychain account attribute of the live Claude credentials.
     public let username: String
     /// Keychain service of the live Claude credentials.
-    public let keychainService = "Claude Code-credentials"
+    public let keychainService: String
+
+    /// The service Claude Code files its credentials under.
+    public static let claudeService = "Claude Code-credentials"
 
     private let home: URL
     private let claudeEnv: URL?
@@ -17,10 +20,12 @@ public struct Paths: Sendable {
 
     /// Throws `io` when `HOME` is unset or empty, or when `HOME`,
     /// `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is set to a path not starting with `/`.
-    public init(env: [String: String], username: String) throws {
+    /// Tests name a throwaway `keychainService`; the app keeps Claude Code's.
+    public init(env: [String: String], username: String, keychainService: String = Self.claudeService) throws {
         guard let home = try Self.dir(env, Var.home) else { throw KibaError.io("HOME is not set") }
         self.home = home
         self.username = username
+        self.keychainService = keychainService
         store = Name.storeParts.reduce(home, Self.child)
         claudeEnv = try Self.dir(env, Provider.claude.homeVar)
         codexEnv = try Self.dir(env, Provider.codex.homeVar)
