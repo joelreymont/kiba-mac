@@ -53,19 +53,12 @@ public struct JSONDoc: Sendable {
     /// The offset of the root object's `}` and whether the object has members.
     public func closingBrace() -> (index: Int, hasMembers: Bool) { (layout.close, !layout.root.isEmpty) }
 
-    /// The document with `span` replaced by `bytes`. The caller splices a span this
-    /// document located (or the empty span at `closingBrace`) with bytes that keep the
-    /// object well-formed; bytes read from disk are checked with `JSONDoc(_:)` first. A
-    /// splice that breaks the object is a programming error and traps. The result is
-    /// not held to the 4 MiB limit; the next `JSONDoc(_:)` of its bytes is.
-    public func replacing(_ span: Range<Int>, with bytes: Data) -> JSONDoc {
+    /// The document with `span` replaced by `bytes`, checked like `JSONDoc(_:)`:
+    /// `badJSON` when the result does not scan, `capacity` over 4 MiB.
+    public func replacing(_ span: Range<Int>, with bytes: Data) throws -> JSONDoc {
         var out = data
         out.replaceSubrange(span, with: bytes)
-        do {
-            return try JSONDoc(scanning: out)
-        } catch {
-            preconditionFailure("splicing bytes \(span) broke the JSON object: \(error)")
-        }
+        return try JSONDoc(out)
     }
 }
 

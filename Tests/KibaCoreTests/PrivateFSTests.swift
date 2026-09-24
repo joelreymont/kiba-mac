@@ -48,7 +48,7 @@ import KibaCore
         #expect(doc.valueSpan("café", "oauthAccount").map { doc.data[$0] } == Data(#"{"deep": true}"#.utf8))
         let (brace, hasMembers) = doc.closingBrace()
         #expect(hasMembers && doc.data[brace] == UInt8(ascii: "}"))
-        doc = doc.replacing(brace ..< brace, with: Self.key + Self.slotA)
+        doc = try doc.replacing(brace ..< brace, with: Self.key + Self.slotA)
         try PrivateFS.writePrivate(doc.data, to: live)
         #expect(try Data(contentsOf: real) == base[..<brace] + Self.key + Self.slotA + base[brace...])
 
@@ -57,7 +57,7 @@ import KibaCore
         let span = try #require(doc.objectSpan("oauthAccount"))
         #expect(doc.data[span] == Self.slotA)
         let before = doc.data
-        doc = doc.replacing(span, with: Self.slotB)
+        doc = try doc.replacing(span, with: Self.slotB)
         try PrivateFS.writePrivate(doc.data, to: live)
         #expect(try Data(contentsOf: real) == before[..<span.lowerBound] + Self.slotB + before[span.upperBound...])
 
