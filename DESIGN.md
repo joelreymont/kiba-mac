@@ -533,15 +533,27 @@ per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
 
 ```swift
 public protocol TerminalLauncher: Sendable { func open(_ script: URL) throws }
-public protocol KeychainLister: Sendable { func services(prefix: String) throws -> Set<String> }
+public protocol KeychainLister: Sendable {
+  func services(prefix: String) throws -> Set<String>   // generic-password service names under prefix
+  func item(_ service: String) -> SecretStore            // the item behind one of them
+}
 public struct AddResult: Equatable { public var saved: SlotName; public var expected: String?; public var differs: Bool }
 public actor LoginRunner {
-  public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, lister: KeychainLister, clock: Clock)
+  public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, lister: KeychainLister, searchPath: String)
   public func add(_ p: Provider, expected email: String?) async throws -> AddResult
 }
 ```
 
-1. `claude`/`codex` must be on PATH (`noCLI`). Root = `paths.loginRoot(p)`:
+Production: `TerminalApp` runs `/usr/bin/open -a Terminal <script>`;
+`KeychainTool` lists `security dump-keychain` service names (attributes
+only, never secret data) and hands back `KeychainItem`s. `searchPath` is the
+PATH searched for the CLIs; `CoreBackend` takes it from the user's login
+shell (`$SHELL -lc`, PATH printed between markers so profile output cannot
+pollute it), because an app started from Finder or a login item inherits
+only the system default PATH, which lacks the CLIs.
+
+1. `claude`/`codex` must be on `searchPath` (`noCLI`); the script runs the
+   one found. Root = `paths.loginRoot(p)`:
    remove, create 0700, create `root/.claude` or `root/.codex`.
 2. Claude only: snapshot `before = lister.services(prefix: keychainService)`
    and `liveBytes = KeychainItem.read()`.
