@@ -692,23 +692,26 @@ eyebrows `11pt semibold, uppercase, tracking 0.8, idle`; names `13pt`
 (`bold` when active); meta `11pt idle`; figures `11pt semibold,
 monospacedDigit`, colored by state.
 
-Layout (width 340, vertical padding 10, row inset 10):
+Layout (width 340, vertical padding 10, row inset 10). The panel is as tall
+as its content, capped at the menu bar screen's visible height less 24 pt
+(measured before each show); taller content scrolls with no scroll
+indicators. Each provider's eyebrow line carries the add action at its
+right, "+ ADD ACCOUNT" in eyebrow style, `idle`, `accent` under the cursor;
+there is no add row. Cursor order in a section: add, accounts, save.
 
 ```
 ┌──────────────────────────────────────────────┐
 │ Room to work                 Probed 2 min ago│  title (serif) · meta
 │ ──────────────────────────────────────────── │
-│ CLAUDE CODE                                  │  eyebrow
+│ CLAUDE CODE                    + ADD ACCOUNT │  eyebrow · add action
 │ joel@x.com (max)              72% · 40% · 9% │  name · plan · figures
 │ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir
 │ other@x.com (pro, 5d)                 limit  │
-│ ░░░░░░░░░░  ██████░░░░                       │
-│ Save the current login                       │  action rows
-│ Add account…                                 │
-│ CODEX                                        │
+│ ▒▒▒▒▒▒▒▒▒▒  ██████░░░░                       │  spent window: red track
+│ Save the current login                       │  action row
+│ CODEX                          + ADD ACCOUNT │
 │ me@y.com (plus)                    88% · 61% │
 │ █████████░  ██████░░░░                       │
-│ Add account…                                 │
 │ ──────────────────────────────────────────── │
 │ Refresh usage                    2 min ago   │
 └──────────────────────────────────────────────┘
@@ -718,8 +721,9 @@ Signature — the **reservoir**: under every account row a 4 pt bar split
 into one segment per window (session, week, each model window, in figure
 order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100,
 each segment in its own color: `room` with half or more left, `low` under
-half (`Rows.isLow`). A used-up segment is an empty track, and a dead row's
-bar is drained: every segment an empty track. A row with no figures yet
+half (`Rows.isLow`). A used-up segment (`Rows.isSpent`) is an empty track
+drawn in `out`, and a dead row's bar is drained: every segment an empty grey
+track. A row with no figures yet
 (unknown usage) shows two empty tracks, session and week, so the bar is
 never missing. The bar says how much of each
 window is left and nothing else; the row's verdict lives in the sort order,

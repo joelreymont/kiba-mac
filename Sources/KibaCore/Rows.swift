@@ -125,6 +125,11 @@ public enum Rows {
         f.left < Level.half
     }
 
+    /// Nothing of the window is left: the segment's track draws in `out`.
+    public static func isSpent(_ f: Figure) -> Bool {
+        f.left <= 0
+    }
+
     /// `"72% · 40% · 9%"`, or `"limit"` while a window is used up.
     public static func figuresText(_ u: UsageRecord?) -> String {
         if state(u, active: false) == .blocked { return Copy.limit }

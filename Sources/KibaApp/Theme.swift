@@ -41,6 +41,9 @@ enum Theme {
     static let title = Font.system(size: 17, weight: .semibold, design: .serif)
     static let eyebrow = Font.system(size: 11, weight: .semibold)
     static let eyebrowTracking: CGFloat = 0.8
+    /// The plus before "ADD ACCOUNT" in the eyebrow line.
+    static let plus = Font.system(size: 9, weight: .bold)
+    static let plusGap: CGFloat = 3
     static let name = Font.system(size: 13)
     static let nameActive = Font.system(size: 13, weight: .bold)
     static let meta = Font.system(size: 11)
@@ -50,8 +53,11 @@ enum Theme {
     // MARK: Layout
 
     static let width: CGFloat = 340
-    /// Taller content scrolls.
+    /// Height cap until a screen is known; the screen's visible height less
+    /// `screenInset` replaces it. Taller content scrolls, without indicators.
     static let maxHeight: CGFloat = 600
+    /// Room for the popover arrow and shadow under the menu bar.
+    static let screenInset: CGFloat = 24
     /// Panel padding above and below the content.
     static let pad: CGFloat = 10
     /// Space between the panel edge and a row's highlight.

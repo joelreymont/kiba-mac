@@ -78,6 +78,9 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
             return
         }
         NSApp.activate()
+        if let screen = button.window?.screen ?? NSScreen.main {
+            model.fit(height: screen.visibleFrame.height - Theme.screenInset)
+        }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         popover.contentViewController?.view.window?.makeKey()
     }

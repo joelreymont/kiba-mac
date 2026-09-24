@@ -7,11 +7,12 @@ struct PanelView: View {
     let model: AppModel
 
     var body: some View {
-        CapHeight(limit: Theme.maxHeight) {
+        CapHeight(limit: model.heightLimit) {
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
                     content
                 }
+                .scrollIndicators(.hidden)
                 .scrollBounceBehavior(.basedOnSize)
                 .onChange(of: model.scrollSerial) {
                     guard let k = model.scrollKey else { return }
@@ -90,13 +91,18 @@ struct PanelView: View {
     private func block(_ sec: Section) -> some View {
         let p = sec.id
         return VStack(alignment: .leading, spacing: 0) {
-            Text(p.title.uppercased())
-                .font(Theme.eyebrow)
-                .tracking(Theme.eyebrowTracking)
-                .foregroundStyle(Theme.idle)
-                .padding(.horizontal, Theme.inset)
-                .padding(.top, Theme.eyebrowTop)
-                .padding(.bottom, Theme.eyebrowBottom)
+            HStack(spacing: Theme.gap) {
+                Text(p.title.uppercased())
+                    .font(Theme.eyebrow)
+                    .tracking(Theme.eyebrowTracking)
+                    .foregroundStyle(Theme.idle)
+                Spacer(minLength: Theme.gap)
+                AddButton(model: model, provider: p)
+            }
+            .padding(.horizontal, Theme.inset)
+            .padding(.top, Theme.eyebrowTop)
+            .padding(.bottom, Theme.eyebrowBottom)
+            .id(ActionKey.add(p))
             if let e = sec.status.error {
                 line(e, color: Theme.out)
             } else if sec.status.live == nil {
@@ -110,8 +116,6 @@ struct PanelView: View {
                 ActionRow(model: model, key: .save(p), label: Copy.save) { model.trigger(.save(p)) }
                     .id(ActionKey.save(p))
             }
-            ActionRow(model: model, key: .add(p), label: Copy.add) { model.trigger(.add(p)) }
-                .id(ActionKey.add(p))
         }
     }
 
@@ -130,13 +134,49 @@ struct PanelView: View {
         static let retry = "Retry"
         static let usage = "Refresh usage"
         static let save = "Save the current login"
-        static let add = "Add account…"
         static let loggedOut = "Not logged in"
     }
 }
 
 /// Takes its content's height up to `limit`, then hands the content exactly
 /// that height; the scroll view inside scrolls whatever is taller.
+/// "+ ADD ACCOUNT" at the right of a provider's eyebrow line: the add action,
+/// lit in `accent` under the pointer or the keyboard cursor.
+private struct AddButton: View {
+    let model: AppModel
+    let provider: Provider
+
+    private var key: ActionKey { .add(provider) }
+
+    var body: some View {
+        HStack(spacing: Theme.plusGap) {
+            Image(systemName: Symbol.plus)
+                .font(Theme.plus)
+            Text(Copy.add)
+                .font(Theme.eyebrow)
+                .tracking(Theme.eyebrowTracking)
+        }
+        .foregroundStyle(model.cursor == key ? Theme.accent : Theme.idle)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { model.point(key) }
+        }
+        .onTapGesture { model.trigger(key) }
+        .help(Copy.addHelp)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private enum Symbol {
+        static let plus = "plus"
+    }
+
+    private enum Copy {
+        static let add = "ADD ACCOUNT"
+        static let addHelp = "Log in to another account in Terminal and save it"
+    }
+}
+
 private struct CapHeight: Layout {
     let limit: CGFloat
 

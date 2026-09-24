@@ -54,6 +54,9 @@ final class AppModel {
     private(set) var busy = false
     private(set) var message = ""
     private(set) var panelOpen = false
+    /// The tallest the panel may be: the screen's visible height less the
+    /// popover chrome, set before each show.
+    private(set) var heightLimit: CGFloat = Theme.maxHeight
     private(set) var autoProbed = false
     /// The clock rows are drawn against; ticks while the panel is open.
     private(set) var now = Date()
@@ -206,9 +209,9 @@ final class AppModel {
         }
         var keys: [ActionKey] = []
         for sec in sections {
+            keys.append(.add(sec.id))
             keys += sec.accounts.map { .use(sec.id, $0.name) }
             if sec.canSave { keys.append(.save(sec.id)) }
-            keys.append(.add(sec.id))
         }
         if !sections.isEmpty { keys.append(.usage) }
         actions = keys
@@ -277,6 +280,11 @@ final class AppModel {
     // MARK: Cursor
 
     /// Hover: moves the cursor without scrolling.
+    /// Caps the panel at `height` points.
+    func fit(height: CGFloat) {
+        heightLimit = height
+    }
+
     func point(_ k: ActionKey) {
         cursor = k
     }
