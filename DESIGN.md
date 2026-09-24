@@ -78,8 +78,9 @@ error becomes that provider's `error` string or that account's usage `note`.
 
 ```swift
 public struct Paths: Sendable {
-  public init(env: [String: String], username: String)
-  // store: $KIBA_STORE, else $HOME/Library/Application Support/kiba
+  public init(env: [String: String], username: String) throws   // io("HOME is not set") when HOME is missing or empty
+  // store: $KIBA_STORE when non-empty, else $HOME/.config/kiba. Local to
+  // this Mac; never shared with another machine.
   public let store: URL
   public var lock: URL              // store/lock  (directory)
   public var probe: URL             // store/probe
@@ -90,6 +91,9 @@ public struct Paths: Sendable {
   public func installedFile(_ p: Provider) -> URL        // <providerDir>/.installed
   public func markFile(_ p: Provider) -> URL             // <providerDir>/.installing
   public func loginRoot(_ p: Provider) -> URL            // store/probe/login-<provider>
+  // HOME, KIBA_STORE, CLAUDE_CONFIG_DIR, CODEX_HOME must be absolute when set:
+  // a relative or `~` value throws io("<VAR> is not an absolute path: <value>");
+  // nothing ever expands `~`.
   // live files; `root` selects a throwaway home for `add`
   public func claudeConfigDir(root: URL?) -> URL   // root/.claude | $CLAUDE_CONFIG_DIR | $HOME/.claude
   public func claudeConfigFile(root: URL?) -> URL  // <dir>/.claude.json when dir is explicit, else $HOME/.claude.json
@@ -105,6 +109,13 @@ public struct Paths: Sendable {
 
 A slot name is an email, or `email #n` (n ≥ 2). Rules from kiba `NAME-OK?`:
 1–127 bytes, no byte < 0x20, no 0x7F, no `/`, no leading `.`.
+The suffix is the TRAILING `" #"` + ASCII digits (value > 0), the exact
+inverse of how `liveName` builds names, so an email that itself contains
+`" #"` still parses. `belongs(to: e)` is kiba's `NAME-FOR-EMAIL?`: raw == e, or
+raw == e + `" #"` + positive digits. Equality and hashing are bytewise on the
+spelling; the file system may fold case and Unicode normalization, so a
+name returned for an existing slot is always the on-disk spelling from
+`Store.list`, never a constructed candidate (see `liveName`).
 
 ```swift
 public struct SlotName: Hashable, Sendable, Comparable, CustomStringConvertible {
@@ -113,7 +124,7 @@ public struct SlotName: Hashable, Sendable, Comparable, CustomStringConvertible 
   public var email: String                  // part before " #"
   public var suffix: Int?                   // n in "email #n", nil for the bare email
   public func belongs(to email: String) -> Bool
-  public static func < (a, b) -> Bool       // different emails: bytewise; same email: by suffix (bare = 1)
+  public static func < (a, b) -> Bool       // different email parts: bytewise on the email part; same email: by suffix (bare = 1), then raw bytes
 }
 ```
 
@@ -132,9 +143,9 @@ public enum PrivateFS {
 
 `writePrivate`: resolve the write target through the symlink chain (a live
 file that is a symlink stays a symlink; the file behind it is replaced), open
-`<target>.tmp` in the same directory with `O_WRONLY|O_CREAT|O_TRUNC`, mode
-0600 (remove a stale temp first; refuse if the temp path is a symlink), write
-all bytes, `rename` over the target. Any failure removes the temp file and
+a uniquely named temp (`<target>.<random>.tmp`, `O_EXCL`) in the same
+directory, mode 0600, write all bytes, `fsync`, `rename` over the target; two
+unlocked writers can never disturb each other's temp. Any failure removes the temp file and
 rethrows. Never `Data.write(options: .atomic)`: it does not control the mode.
 
 ### JSONDoc — byte-exact splicing
@@ -151,7 +162,7 @@ public struct JSONDoc {
   public func objectSpan(_ key: String) -> Range<Int>?                // same, only when the value is an object
   public func valueSpan(_ key1: String, _ key2: String) -> Range<Int>? // one level down
   public func closingBrace() -> (index: Int, hasMembers: Bool)
-  public func replacing(_ span: Range<Int>, with: Data) -> JSONDoc
+  public func replacing(_ span: Range<Int>, with: Data) throws -> JSONDoc   // badJSON when the result does not scan, capacity over 4 MiB
   public var data: Data
 }
 ```
@@ -186,7 +197,12 @@ public struct Identity: Equatable, Sendable { public var email: String; public v
 
 public enum ClaudeIdentity {
   static func fromOAuthAccount(_ obj: Data) throws -> Identity        // {emailAddress, organizationUuid}; plan ""
-  static func fromLive(config: Data, creds: Data) throws -> Identity   // config.oauthAccount.{emailAddress,organizationUuid}; creds.claudeAiOauth.subscriptionType
+  static func fromLive(config: Data, creds: Data) throws -> Identity
+  // = fromOAuthAccount(config[JSONDoc(config).objectSpan("oauthAccount")]) with
+  // plan = planFromCreds(creds); no span → badJSON("oauthAccount"). Only the
+  // span is decoded: .claude.json is Claude Code's file and may hold values
+  // (a lone surrogate escape, a huge number) that JSONSerialization rejects, and the
+  // identity must come from the very bytes ClaudeLive.save copies.
   static func planFromCreds(_ creds: Data) -> String                   // "" when absent
 }
 public enum CodexIdentity {
@@ -199,7 +215,12 @@ public enum CodexIdentity {
 }
 ```
 
-`badJSON` when the email is missing. Plan and org are "" when absent.
+`badJSON` when the email is missing or empty. Plan and org are "" when
+absent. `Base64URL` (internal) accepts only the url alphabet with optional
+trailing `=` padding (at most two, then end of text); anything else is
+`badJSON` naming the field (`tokens.id_token`). Field reads on parsed
+documents go through one internal reader, `JSONFields` (`init(_:what:)`,
+`str`, `obj`, `int`), shared by identity, live-login, and probe code.
 
 ### SecretStore
 
@@ -270,8 +291,8 @@ public struct Store {
 `liveName` (kiba `LIVE-NAME`): candidates `email`, `email #2` … `email #9`.
 For each: no slot dir → first free candidate remembered; slot exists and its
 identity's org equals the live org (both empty counts as equal; one empty
-does not) → return it; slot exists but damaged → counts as free. Return the
-first free; none → `capacity`.
+does not) → return the name as `list` spells it on disk; slot exists but
+damaged → counts as free. Return the first free; none → `capacity`.
 
 ### Claude live login
 
@@ -537,6 +558,26 @@ restore in 5c covers a Keychain-writing login.
 
 ### AppModel (`@MainActor @Observable`)
 
+The model talks to the core through one seam so the UI builds and runs on
+fixtures before the core lands:
+
+```swift
+public protocol Backend: Sendable {
+  func status() -> Snapshot
+  func use(_ p: Provider, _ n: SlotName) async throws
+  func save(_ p: Provider) throws -> SlotName?
+  func forget(_ p: Provider, _ n: SlotName) throws
+  func probeAll(_ p: Provider) async -> ProbeReport
+  func add(_ p: Provider, expected: String?) async throws -> AddResult
+}
+```
+
+`Backend.swift` in KibaCore holds the protocol plus `ProbeReport` and
+`AddResult`; `CoreBackend` (Switcher + StatusReader + LoginRunner) conforms
+once the core exists, and `FixtureBackend` (a `Snapshot` loaded from JSON via
+`KIBA_FIXTURE=<path>`, actions that mutate it in memory) drives the UI in
+development.
+
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
 `refreshing`, `busy`, `message`, `error`, `panelOpen`, `autoProbed`, `now`
 (ticks every 30 s while open), `cursor: ActionKey?`, `refreshIntervalSec`
@@ -644,11 +685,13 @@ login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
 
 ## Build, bundle, test
 
-- `swift build` / `swift test` from the package root; tests set
-  `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME` to a scratch
-  directory per test and use `FileSecret`/`MemorySecret`, `StubHTTP`, a
-  frozen clock. The one Keychain test uses service `kiba-mac-test-<uuid>`
-  and deletes it in `defer`.
+- `swift build` / `swift test` from the package root. Tests are
+  integration tests: each one sets `HOME`, `KIBA_STORE`, `CLAUDE_CONFIG_DIR`,
+  `CODEX_HOME` to a scratch directory, seeds live files and slots, drives
+  `Switcher`, `StatusReader`, `LoginRunner` (with fake `claude`/`codex`
+  executables on a scratch PATH) or `AppModel`, and asserts the resulting
+  files, Keychain item (`kiba-mac-test-<uuid>`, removed in `defer`), HTTP
+  requests (`StubHTTP`), and snapshot. No per-type unit suites.
 - `build.sh`: `swift build -c release`, assemble `build/Kiba.app`
   (`Contents/MacOS/Kiba`, `Info.plist`: `CFBundleIdentifier
   io.github.joelreymont.kiba`, `LSUIElement` true, `LSMinimumSystemVersion
@@ -660,7 +703,7 @@ login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
 ## Store layout
 
 ```
-~/Library/Application Support/kiba/
+~/.config/kiba/
   lock/pid                  held only during writes
   probe/                    scratch: login-claude/, login-codex/
   claude/.installed         slot name whose files are live
@@ -684,7 +727,11 @@ Directories 0700, files 0600, every write temp + rename.
   undocumented and change; the throwaway home keeps the live login out of
   reach, and the three-way credential detection covers every place a Claude
   login under `CLAUDE_CONFIG_DIR` may write.
-- Store under Application Support, not `$XDG_DATA_HOME`: the macOS
-  convention; there is no CLI to share the store with.
+- Store at `~/.config/kiba`, local to this Mac and never shared: kiba's
+  layout unchanged, so an existing kiba folder moves in with `cp -Rp`. Saved
+  tokens stay in 0600 files rather than Keychain items: Codex keeps its own
+  live login in a 0600 file, every slot operation stays a file operation
+  that tests can check byte for byte, and a status read costs no
+  subprocesses.
 - No CLI, no Habu, no Forth: the app owns the logic; tests replace the
   Forth suite.
