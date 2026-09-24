@@ -169,7 +169,7 @@ public actor LoginRunner {
             }
             return status
         }
-        throw CancellationError()
+        throw KibaError.io("login wait cancelled before \(file.path) appeared")
     }
 
     static let scriptMode: mode_t = 0o700

@@ -48,8 +48,9 @@ extension KibaError {
         case .db(let what):
             return "the account database refused: \(what)"
         case .tool(let name, let status, let stderr):
-            let detail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            return detail.isEmpty ? "\(name) failed (exit \(status))" : "\(name) failed (exit \(status)): \(detail)"
+            let lines = stderr.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard let detail = lines.first(where: { !$0.isEmpty }) else { return "\(name) failed (exit \(status))" }
+            return "\(name) failed (exit \(status)): \(detail)"
         }
     }
 }
