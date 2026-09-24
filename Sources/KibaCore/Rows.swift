@@ -125,10 +125,15 @@ public enum Rows {
         f.left < Level.half
     }
 
-    /// The provider refuses this window: the segment's whole track draws in
-    /// `out`. The only categorical state in the bar; everything else is length.
-    public static func isSpent(_ f: Figure) -> Bool {
-        f.left <= 0
+    /// Whether the account can take work now; nil while its usage is unknown.
+    /// The status dot's verdict, and a drained bar when false: a limited
+    /// account has no usable limit left, whatever its other windows hold.
+    public static func usable(_ s: RowState) -> Bool? {
+        switch s {
+        case .ok, .tight: return true
+        case .blocked, .dead: return false
+        case .unknown: return nil
+        }
     }
 
     /// `"72% · 40% · 9%"`, or `"limit"` while a window is used up.

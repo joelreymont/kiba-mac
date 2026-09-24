@@ -711,13 +711,13 @@ right, a standard plus button, `accent` under the keyboard cursor, tooltip
 │ Room to work                 Probed 2 min ago│  title (serif) · meta
 │ ──────────────────────────────────────────── │
 │ Claude Code                                + │  section header · add
-│ joel@x.com (max)              72% · 40% · 9% │  name · plan · figures
-│ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir
-│ other@x.com (pro, 5d)                 limit  │
-│ ▒▒▒▒▒▒▒▒▒▒  ██████░░░░                       │  spent window: red track
+│ ● joel@x.com (max)            72% · 40% · 9% │  dot · name · plan · figures
+│ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir: usable limit left
+│ ● other@x.com (pro, 5d)               limit  │  red dot: limited
+│ ░░░░░░░░░░  ░░░░░░░░░░                       │  drained: nothing usable
 │ Save the current login                       │  action row
 │ Codex                                      + │
-│ me@y.com (plus)                    88% · 61% │
+│ ● me@y.com (plus)                  88% · 61% │
 │ █████████░  ██████░░░░                       │
 │ ──────────────────────────────────────────── │
 │ Refresh usage                    2 min ago   │
@@ -729,16 +729,19 @@ into one segment per window (session, week, each model window, in figure
 order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100,
 each segment in its own color: `room` with half or more left, `low` under
 half (`Rows.isLow`); a remainder too thin to see still draws a sliver as
-wide as the bar is tall. One meaning per channel: length is how much is
-left, fill color is whether that window is comfortable, and red is the one
-fact, the provider refuses. A spent segment (`Rows.isSpent`, 100% used) is an empty track
-drawn in `out`, and a dead row's bar is drained: every segment an empty grey
-track. A row with no figures yet
-(unknown usage) shows two empty tracks, session and week, so the bar is
-never missing. The bar says how much of each
-window is left and nothing else; the row's verdict lives in the sort order,
-the figures' color and the plan text. There is no status dot. The reset
-countdown lives in the plan text `(pro, 5d)`. The menu bar icon is the same
+wide as the bar is tall. The track is always grey. The bar shows the
+**usable** limit left: when the account cannot take work (`Rows.usable`
+false: a window at its limit, or dead) it is drained, every segment an
+empty track, because a limited account has no usable limit left whatever
+its other windows hold. A row with no figures yet (unknown usage) shows two
+empty tracks, session and week, so the bar is never missing. The verdict is
+the **status dot** before the name (8 pt): `room` green when the account
+can take work (ok or tight), `out` red when it is limited or dead, `idle`
+grey while unknown;
+under Differentiate Without Color it is a check, cross, or question mark
+symbol, and VoiceOver reads "has room", "limited", or "not probed". The
+verdict also lives in the sort order and the plan text. The reset countdown
+lives in the plan text `(pro, 5d)`. The menu bar icon is the same
 idea at 18 px: one thin vertical cell per provider, filled to the active
 account's headline remaining, outline only when unknown; drawn `out` when
 `error != nil`, at 50 % opacity when unavailable, otherwise the menu bar's

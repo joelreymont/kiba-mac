@@ -27,6 +27,16 @@ enum Theme {
     /// The active account's name.
     static let accent = Color.accentColor
 
+    /// The status dot: `room` when the account can take work, `out` when it
+    /// is limited or dead, `idle` while unknown.
+    static func dot(_ usable: Bool?) -> Color {
+        switch usable {
+        case true?: return room
+        case false?: return out
+        case nil: return idle
+        }
+    }
+
     // MARK: Type
 
     /// System text styles only, so Bold Text and the system's weights apply.
@@ -55,6 +65,8 @@ enum Theme {
     /// Between the name, the plan, and the figures.
     static let gap: CGFloat = 8
     static let rowPad: CGFloat = 6
+    /// The status dot before a name.
+    static let dot: CGFloat = 8
     static let actionPad: CGFloat = 5
     /// Between a row's name line and its reservoir.
     static let lineGap: CGFloat = 5
