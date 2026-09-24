@@ -109,7 +109,6 @@ import Testing
         let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
         try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
         try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB)
-        try w.store.write { try $0.noteInstalled(.claude, ax) }
         // The live credentials link into a directory no file can be created in:
         // they read, but replacing them fails after the config is written.
         let locked = w.dir.appending(component: "locked")
@@ -141,6 +140,18 @@ import Testing
         try claudeConfig(profB).write(to: config)
         try claudeCreds("xa4", plan: "max", expires: Fixed.now + Fixed.day).write(to: creds)
         #expect(throws: KibaError.mixed) { try sw.save(.claude) }
+
+        // Days later a@x's saved tokens have expired. The live credentials
+        // are still a@x's, so a probe must not spend a@x's refresh grant.
+        let http = StubHTTP([
+            answer(Status.ok, #"{"access_token":"at-xa5","refresh_token":"rt-xa5","expires_in":\#(Fixed.tokenLife)}"#),
+            answer(Status.ok, claudeUsage(session: 10, week: 20)),
+        ])
+        let later = Switcher(paths: w.paths, store: w.store, http: http) {
+            Date(timeIntervalSince1970: TimeInterval(Fixed.now + Fixed.later))
+        }
+        #expect(await later.probeAll(.claude).saveBackError == KibaError.mixed.reason)
+        #expect(!http.requests.contains { $0.url.absoluteString == Endpoint.claudeToken })
         #expect(try w.store.list(.claude).map(\.login) == [refreshed, credsB])
     }
 }
@@ -210,6 +221,65 @@ import Testing
     }
 }
 
+@Test(arguments: ProbeCase.all) func probeKeepsSavedLoginWhenCheckFails(_ c: ProbeCase) async throws {
+    try await scratch { w in
+        let name = try slot(ProbeCase.email)
+        try w.seed(c.provider, name, Identity(email: ProbeCase.email, plan: "pro", org: "org-s"), login: c.login,
+                   profile: c.provider == .claude ? profile(ProbeCase.email, org: "org-s") : nil)
+        let http = StubHTTP(c.answers)
+
+        let report = await w.switcher(http).probeAll(c.provider)
+
+        #expect(report.providerError == nil)
+        #expect(http.requests.count == c.answers.count)
+        let status = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == c.provider }
+        #expect(status?.accounts == [Account(
+            name: name, plan: "pro", active: false,
+            usage: UsageRecord(fetchedAt: Fixed.now, state: c.state, note: c.note, limits: []))])
+        #expect(try w.store.fetch(c.provider, name)?.login == c.login)
+    }
+}
+
+/// A saved login whose check fails: what the provider answers, in order, and
+/// the state and note its row then shows.
+struct ProbeCase: Sendable, CustomTestStringConvertible {
+    let provider: Provider
+    let login: Data
+    let answers: [HTTPOutcome]
+    let state: UsageState
+    let note: String
+
+    var testDescription: String { "\(provider.rawValue): \(note)" }
+
+    static let email = "s@x"
+    /// Expired, so the check starts with a refresh.
+    static let stale = claudeCreds("s", plan: "pro", expires: Fixed.now - Fixed.hour)
+    static let fresh = claudeCreds("s", plan: "pro", expires: Fixed.now + Fixed.day)
+    static let auth = codexAuth(email, plan: "pro", account: "org-s", tag: "s")
+    /// A rejected access token the provider has not revoked: it earns a refresh.
+    static let rejected = answer(Status.unauthorized, #"{"error":{"code":"token_expired"}}"#)
+    static let down = HTTPOutcome.unreachable("host down")
+
+    static let all = [
+        ProbeCase(provider: .claude, login: stale, answers: [answer(Status.badRequest, #"{"error":"invalid_grant"}"#)],
+                  state: .expired, note: "access token expired and the refresh was refused; log in again"),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(Status.serverError, "")],
+                  state: .error, note: "Anthropic's token endpoint answered 500"),
+        ProbeCase(provider: .claude, login: fresh, answers: [down],
+                  state: .error, note: "Anthropic's usage endpoint could not be reached"),
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],
+                  state: .error, note: "Anthropic is rate limiting usage checks; try again later"),
+        ProbeCase(provider: .codex, login: auth, answers: [rejected, answer(Status.badRequest, #"{"error":"invalid_grant"}"#)],
+                  state: .expired, note: "access token rejected and the refresh was refused; log in again"),
+        ProbeCase(provider: .codex, login: auth, answers: [rejected, down],
+                  state: .error, note: "OpenAI's token endpoint could not be reached"),
+        ProbeCase(provider: .codex, login: auth, answers: [answer(Status.serverError, "")],
+                  state: .error, note: "OpenAI's usage endpoint answered 500"),
+        ProbeCase(provider: .codex, login: auth, answers: [answer(Status.tooMany, "{}")],
+                  state: .error, note: "OpenAI is rate limiting usage checks; try again later"),
+    ]
+}
+
 // MARK: - Rows
 
 @Test func rowsSortRoomTightUsedUpThenDead() async throws {
@@ -263,6 +333,7 @@ import Testing
         #expect(try w.store.list(.codex).map(\.name.raw) == ["new@y"])
         #expect(w.read(w.paths.codexAuthFile(root: nil)) == liveAuth)
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.codex).path))
+        #expect(w.calls() == ["codex login"])
     }
 }
 
@@ -271,6 +342,7 @@ import Testing
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         let keychain = FakeKeychain(items: [w.paths.keychainService: MemorySecret(liveCreds)])
         let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60)),
+                             answer(Status.ok, claudeUsage(session: 30, week: 60)),
                              answer(Status.ok, claudeUsage(session: 30, week: 60))])
 
         let otherCreds = claudeCreds("o", plan: "pro", expires: Fixed.now + Fixed.day)
@@ -296,8 +368,24 @@ import Testing
         #expect(added == AddResult(saved: try slot("k@y"), expected: "k@y", differs: false))
         #expect(try w.store.fetch(.claude, try slot("k@y"))?.login == newCreds)
         #expect(try live.read() == liveCreds)
-        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-o", "Bearer at-k"])
+
+        // The same login with no live item, as when the live credentials are a
+        // file: the item it creates is removed.
+        try live.remove()
+        let itemCreds = claudeCreds("f", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(claudeConfig(profile("f@y", org: "org-f"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
+        let created = try await w.runner(http, keychain: keychain) { try live.write(itemCreds) }.add(.claude, expected: "f@y")
+        #expect(created == AddResult(saved: try slot("f@y"), expected: "f@y", differs: false))
+        #expect(try w.store.fetch(.claude, try slot("f@y"))?.login == itemCreds)
+        #expect(try live.read() == nil)
+
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-o", "Bearer at-k", "Bearer at-f"])
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.claude).path))
+        #expect(w.calls() == [
+            "claude auth login --email x@y", "claude auth login --email k@y", "claude auth login --email f@y",
+        ])
     }
 }
 
@@ -323,6 +411,7 @@ import Testing
         #expect(try leftover.read() == nil)
         #expect(try keychain.item(w.paths.keychainService).read() == liveCreds)
         #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-n"])
+        #expect(w.calls() == ["claude auth login --email n@y"])
     }
 }
 
@@ -332,6 +421,7 @@ import Testing
         await #expect(throws: KibaError.noCLI("codex")) { try await runner.add(.codex, expected: nil) }
         try w.fakeCLI("codex", "exit 3")
         await #expect(throws: KibaError.loginFailed(3)) { try await runner.add(.codex, expected: nil) }
+        #expect(w.calls() == ["codex login"])
         #expect(try w.store.list(.codex).isEmpty)
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.codex).path))
     }
@@ -389,6 +479,8 @@ enum Fixed {
     static let now = 1_790_000_000
     static let hour = 3_600
     static let day = 86_400
+    /// Long enough for every token the fixtures issue to expire.
+    static let later = 2 * day
     static let msPerSecond = 1_000
     /// Seconds a refreshed access token lives, as the token endpoints answer.
     static let tokenLife = 28_800
@@ -421,7 +513,10 @@ enum Fixed {
 
 enum Status {
     static let ok = 200
+    static let badRequest = 400
     static let unauthorized = 401
+    static let tooMany = 429
+    static let serverError = 500
 }
 
 enum Endpoint {
@@ -497,11 +592,20 @@ struct World: Sendable {
         try store.write { try $0.put(p, SavedLogin(name: name, identity: id, login: login, profile: profile, usage: usage)) }
     }
 
-    /// A `name` executable on the scratch PATH running `body` under `/bin/sh`.
+    /// A `name` executable on the scratch PATH running `body` under `/bin/sh`,
+    /// once it has added its command line to `calls()`.
     func fakeCLI(_ name: String, _ body: String) throws {
         let url = bin.appending(component: name)
-        try Data("#!/bin/sh\n\(body)\n".utf8).write(to: url)
+        let record = "printf '%s\\n' \"\(name) $*\" >> '\(callLog.path)'"
+        try Data("#!/bin/sh\n\(record)\n\(body)\n".utf8).write(to: url)
         try FileManager.default.setAttributes([.posixPermissions: Fixed.execMode], ofItemAtPath: url.path)
+    }
+
+    var callLog: URL { dir.appending(component: "calls") }
+
+    /// Every fake CLI run so far, oldest first, as `<name> <arguments>`.
+    func calls() -> [String] {
+        (read(callLog).map(text) ?? "").split(separator: "\n").map(String.init)
     }
 
     /// The file's bytes; nil when it does not exist.

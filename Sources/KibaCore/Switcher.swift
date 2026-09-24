@@ -26,14 +26,18 @@ public final class Switcher: Sendable {
     }
 
     /// Saves the live login back so its refreshed tokens are kept (skipped
-    /// when the live files are mixed: the install repairs them), installs
-    /// `n`, then probes it as the live login and records its usage. A live
-    /// login that cannot be read or saved stops the switch before anything
-    /// is written, so no login is overwritten unsaved. The login saved back
-    /// is then probed as saved: its usage came from a live probe, which
-    /// never refreshes, so an expired token would leave it looking dead.
+    /// when the live files are mixed: the install repairs them) and notes it
+    /// as installed, since the live files hold its login: a crash inside the
+    /// install then leaves a pending install whose installed name still owns
+    /// the live tokens, which `probeAll` never refreshes. Installs `n`, then
+    /// probes it as the live login and records its usage. A live login that
+    /// cannot be read or saved stops the switch before anything is written,
+    /// so no login is overwritten unsaved. The login saved back is then
+    /// probed as saved: its usage came from a live probe, which never
+    /// refreshes, so an expired token would leave it looking dead.
     public func use(_ p: Provider, _ n: SlotName) async throws {
         let old = try isMixed(p) ? nil : saveLive(p)
+        if let old { try store.write { try $0.noteInstalled(p, old) } }
         try live(p).install(n)
         try await probe(p, n, live: true)
         if let old, old != n { try await probe(p, old, live: false) }

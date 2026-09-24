@@ -483,13 +483,17 @@ public struct ProbeReport { public var saveBackError: String?; public var provid
 - `save`: `isMixed` → `mixed`; identity nil → nil; else `liveName` and the
   provider's `save(to:)` inside one `store.write`.
 - `use`: save-back (skip when mixed; save when a live identity exists),
-  then install `n`; then probe `n` as live and `write` its usage; then,
-  when the save-back named an account other than `n`, probe that one as
-  saved and `write` it like `probeAll` does. Its usage came from a live
-  probe, which never refreshes, so an expired token would otherwise leave
-  it dead ("log in again") once inactive.
+  then `noteInstalled` the saved-back name, whose login the live files
+  hold, so a crash between the install's two live writes leaves a pending
+  install whose installed name owns the live tokens (`probeAll` treats it
+  as live); then install `n`; then probe `n` as live and `write` its
+  usage; then, when the save-back named an account other than `n`, probe
+  that one as saved and `write` it like `probeAll` does. Its usage came
+  from a live probe, which never refreshes, so an expired token would
+  otherwise leave it dead ("log in again") once inactive.
 - `probeAll`: save-back (an error becomes `saveBackError`), `list`. Then
-  for every saved account: probe (`live` = name == live name); `write`:
+  for every saved account: probe (`live` = name == live name, or, while
+  the Claude files are mixed, the installed name); `write`:
   `setUsage`, `setLogin` when the doc changed, or on `.revoked` for a
   non-live account `remove`. The live account is never refreshed and never
   removed.
