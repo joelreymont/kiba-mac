@@ -213,11 +213,13 @@ its ACL always admits us and the app never triggers a Keychain prompt:
 
 - read: `security find-generic-password -a <account> -s <service> -w`;
   exit 44 (`errSecItemNotFound`) → nil; other non-zero → `tool`.
-- write: `security add-generic-password -U -a <account> -s <service> -w`
-  with `-w` LAST and no value, spawned with `POSIX_SPAWN_SETSID` so the
-  child has no controlling terminal; `readpassphrase` then falls back to
-  stdin, and the secret is piped in (secret + "\n", twice: the tool asks to
-  retype). The secret never appears in argv.
+- write: `add-generic-password -U -a <account> -s <service> -X <hex>` as
+  one command line on the stdin of `security -i`, spawned with
+  `POSIX_SPAWN_SETSID`. (`-w` on stdin reads at most 128 bytes; a login is
+  larger.) `security -i` cuts a line at 4096 bytes and still stores the
+  cut secret, so a line that would not fit is instead run as the same
+  command in argv, the way Claude Code itself writes a large credential;
+  only then is the secret visible in the process list for the tool's run.
 - remove: `security delete-generic-password -a … -s …`; exit 44 → no-op.
 
 The live Claude credential store is chosen by existence, never by platform:
@@ -738,7 +740,9 @@ are written by `PrivateFS` temp + rename.
 - `/usr/bin/security` over the Security framework: Claude Code creates the
   item with `security`, so `security` is on its ACL and never prompts; a
   differently signed app would prompt on every rebuild and after every
-  fresh login. The secret goes in on stdin under `setsid`, never in argv.
+  fresh login. The secret goes in on stdin under `setsid` whenever it fits
+  the tool's line buffer, and in argv only beyond that, matching Claude
+  Code's own exposure rather than adding a Keychain prompt to avoid it.
 - Login through the provider's own command in Terminal: the OAuth flows are
   undocumented and change; the throwaway home keeps the live login out of
   reach, and the three-way credential detection covers every place a Claude

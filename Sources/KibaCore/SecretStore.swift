@@ -86,17 +86,17 @@ public struct KeychainItem: SecretStore {
     }
 
     /// `add-generic-password -U … -X <hex>` as a command line on the stdin of
-    /// `security -i`, so the secret never appears in argv. (The `-w` prompt
-    /// reads at most 128 bytes, too few for a login.) `capacity` when the line
-    /// would not fit the tool's line buffer.
+    /// `security -i`, so the secret stays out of argv. (The `-w` prompt reads
+    /// at most 128 bytes, too few for a login.) A secret too long for the
+    /// tool's line buffer goes as the same command in argv instead, which is
+    /// how Claude Code itself writes a large credential.
     public func write(_ data: Data) throws {
+        let hex = Self.hex(data)
         let head = "add-generic-password -U -a \(try Self.quoted(account)) -s \(try Self.quoted(service)) -X "
-        let line = Data(head.utf8) + Self.hex(data) + [Self.newline]
-        guard line.count < Self.lineMax else {
-            let room = (Self.lineMax - 1 - head.utf8.count - 1) / Self.hexWidth
-            throw KibaError.capacity("bytes in a Keychain secret: \(data.count) (limit \(room))")
-        }
-        let r = try Self.run(["-i"], stdin: line)
+        let line = Data(head.utf8) + hex + [Self.newline]
+        let r = line.count < Self.lineMax
+            ? try Self.run(["-i"], stdin: line)
+            : try Self.run(["add-generic-password", "-U", "-a", account, "-s", service, "-X", String(decoding: hex, as: UTF8.self)], stdin: nil)
         guard r.status == 0, r.stderr.isEmpty else { throw Self.failed(r) }
     }
 
