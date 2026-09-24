@@ -148,12 +148,12 @@ private struct AddButton: View {
     private var key: ActionKey { .add(provider) }
 
     var body: some View {
-        Button(Copy.add, systemImage: Symbol.plus) { model.trigger(key) }
+        Button("\(Copy.add) \(provider.title) \(Copy.account)", systemImage: Symbol.plus) { model.trigger(key) }
             .labelStyle(.iconOnly)
             .buttonStyle(.accessoryBar)
             .foregroundStyle(model.cursor == key ? Theme.accent : Theme.idle)
             .disabled(model.busy)
-            .help(Copy.add)
+            .help("\(Copy.add) \(Copy.account)")
             .onHover { inside in
                 if inside { model.point(key) }
             }
@@ -164,7 +164,8 @@ private struct AddButton: View {
     }
 
     private enum Copy {
-        static let add = "Add account"
+        static let add = "Add"
+        static let account = "account"
     }
 }
 

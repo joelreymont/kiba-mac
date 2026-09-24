@@ -655,9 +655,9 @@ State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
   the panel first; `probeUsage()` probes every provider; `forget(p, name)`
   (context menu, confirmed inline: the row turns into "Forget <email>?
   Forget / Keep").
-- `actions: [ActionKey]` in panel order: every account row (`use`), `save`
-  when the provider has a live login, no error and no active row, `add` per
-  provider, `usage` at the end. The cursor tracks its key across refreshes.
+- `actions: [ActionKey]` in panel order: per provider `add`, every account
+  row (`use`), then `save` when the provider has a live login, no error and
+  no active row; `usage` at the end. The cursor tracks its key across refreshes.
 
 ### Status item and popover
 
@@ -686,8 +686,9 @@ Tokens (`Theme.swift`):
 | `track` | quaternary label color  | empty reservoir                      |
 | accent  | `Color.accentColor`     | the active account's name            |
 
-Type: system text styles only (HIG: never hard-coded sizes, so Bold Text
-and the system weights apply): title `.title3.bold()`; section headers
+Type: system text styles only, the HIG's recommendation for Mac text and
+the one choice that lets the system's weight and legibility settings apply
+where it honours them: title `.title3.bold()`; section headers
 `.headline` in sentence case ("Claude Code", "Codex"), `ink`; names `.body`
 (`.bold()` when active); meta and plan text `.subheadline`, `idle`; figures
 `.subheadline.monospacedDigit()` in `ink`. Text is never colored by usage
@@ -708,7 +709,7 @@ right, a standard plus button, `accent` under the keyboard cursor, tooltip
 
 ```
 ┌──────────────────────────────────────────────┐
-│ Room to work                 Probed 2 min ago│  title (serif) · meta
+│ Room to work                 Probed 2 min ago│  title · meta
 │ ──────────────────────────────────────────── │
 │ Claude Code                                + │  section header · add
 │ ● joel@x.com (max)            72% · 40% · 9% │  dot · name · plan · figures

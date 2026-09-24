@@ -380,9 +380,11 @@ final class AppModel {
             var notes: [String] = []
             var problems: [String] = []
             for (p, r) in reports {
-                probed += r.accounts.count
                 for (n, o) in r.accounts {
-                    if case .revoked(let note) = o { notes.append("\(p.title): removed \(n.raw), \(note)") }
+                    switch o {
+                    case .record: probed += 1
+                    case .revoked(let note): notes.append("\(p.title): removed \(n.raw), \(note)")
+                    }
                 }
                 if let e = r.saveBackError { problems.append("\(p.title): \(e)") }
                 if let e = r.providerError { problems.append("\(p.title): \(e)") }

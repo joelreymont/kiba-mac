@@ -16,18 +16,11 @@ struct AccountRow: View {
     var body: some View {
         Group {
             if model.forgetting == key {
-                confirm
+                confirm.modifier(Slab(fill: fill))
             } else {
                 row
             }
         }
-        .padding(.horizontal, Theme.inset)
-        .padding(.vertical, Theme.rowPad)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.corner)
-                .fill(Theme.ink.opacity(fill)))
-        .contentShape(Rectangle())
         .onHover { inside in
             if inside { model.point(key) }
         }
@@ -70,7 +63,7 @@ struct AccountRow: View {
                 }
                 ReservoirView(figures: Rows.figures(account.usage), drained: red)
             }
-            .contentShape(Rectangle())
+            .modifier(Slab(fill: fill))
         }
         .buttonStyle(.plain)
         .disabled(model.busy)
@@ -116,6 +109,23 @@ struct AccountRow: View {
             case false?: return "limited"
             case nil: return "not probed"
             }
+        }
+    }
+
+    /// The row's padding, full width, highlight and hit shape, applied inside
+    /// the button so every lit point activates it.
+    private struct Slab: ViewModifier {
+        let fill: Double
+
+        func body(content: Content) -> some View {
+            content
+                .padding(.horizontal, Theme.inset)
+                .padding(.vertical, Theme.rowPad)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.corner)
+                        .fill(Theme.ink.opacity(fill)))
+                .contentShape(Rectangle())
         }
     }
 

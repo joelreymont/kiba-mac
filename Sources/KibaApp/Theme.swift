@@ -7,9 +7,11 @@ import SwiftUI
 enum Theme {
     // MARK: Color
 
-    static let roomNS = dynamic(light: 0x2E9E6B, dark: 0x4FC08A)
-    static let lowNS = dynamic(light: 0xC98A1E, dark: 0xE2A93B)
-    static let outNS = dynamic(light: 0xC93B3B, dark: 0xE25555)
+    /// Light values hold 3:1 against the track on the popover material; the
+    /// red holds 4.5:1 as text on both appearances (Apple's contrast criteria).
+    static let roomNS = dynamic(light: 0x1F7F52, dark: 0x4FC08A)
+    static let lowNS = dynamic(light: 0x9E6A0E, dark: 0xE2A93B)
+    static let outNS = dynamic(light: 0xB52F2F, dark: 0xF07070)
 
     /// Reservoir segments with half or more left.
     static let room = Color(nsColor: roomNS)

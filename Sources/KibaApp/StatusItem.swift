@@ -130,10 +130,10 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
     @objc private func toggleLogin() {
         let app = SMAppService.mainApp
         do {
-            if app.status == .enabled {
-                try app.unregister()
-            } else {
-                try app.register()
+            switch app.status {
+            case .enabled: try app.unregister()
+            case .requiresApproval: break
+            default: try app.register()
             }
         } catch {
             model.report("Start at login: \(error.localizedDescription)")
