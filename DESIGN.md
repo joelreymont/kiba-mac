@@ -268,6 +268,10 @@ CREATE TABLE IF NOT EXISTS live (
   provider  TEXT PRIMARY KEY,      -- row absent: nothing installed yet
   installed TEXT NOT NULL          -- name whose login is live
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pending (
+  provider TEXT PRIMARY KEY,       -- row absent: no install in flight
+  name     TEXT NOT NULL           -- name an unfinished install was writing
+) WITHOUT ROWID;
 ```
 
 ```swift
@@ -285,6 +289,7 @@ public struct Store: Sendable {
   public func fetch(_ p: Provider, _ n: SlotName) throws -> SavedLogin?
   public func liveName(_ p: Provider, live: Identity) throws -> SlotName
   public func installed(_ p: Provider) throws -> SlotName?
+  public func pending(_ p: Provider) throws -> SlotName?          // nil when no install is in flight
   public func write<T>(_ body: (Tx) throws -> T) throws -> T   // BEGIN IMMEDIATE … COMMIT; any throw rolls back and rethrows
 }
 public struct Tx {                                  // only inside `write`
@@ -293,6 +298,8 @@ public struct Tx {                                  // only inside `write`
   public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws
   public func remove(_ p: Provider, _ n: SlotName) throws        // no-op when absent
   public func noteInstalled(_ p: Provider, _ n: SlotName) throws // upsert into live
+  public func notePending(_ p: Provider, _ n: SlotName) throws   // upsert into pending
+  public func clearPending(_ p: Provider) throws                 // no-op when absent
 }
 ```
 
@@ -333,14 +340,22 @@ else `mismatch`; login must be an object with a `claudeAiOauth` object else
 `oauthAccount` value replaced by the profile bytes (any value kind,
 including `null`), or inserted before the closing brace (with a comma when
 the object has members), or a new `{"oauthAccount":…}` when the file does not
-exist. Then, inside one `store.write`: write config → `secrets.write(login)`
-→ `tx.noteInstalled(n)`. A crash between the two live writes leaves
-`installed` naming the previous account, which `isMixed` detects.
+exist. The checks, the read of the previous config bytes and the splice run
+in one `store.write` that ends with `tx.notePending(n)`, committed before
+either live file changes. Then, in a second `store.write`: write config →
+`secrets.write(login)` → `tx.noteInstalled(n)` → `tx.clearPending`. When
+either live write fails, the previous config bytes go back (the file is
+removed when there was none) and `clearPending` commits; the write's error
+is thrown. A config that cannot go back leaves the install pending. A crash
+between the two live writes also leaves it pending, and a pending install
+is mixed whatever the tokens are, so a refresh by Claude Code cannot make
+the next save-back file one account's tokens under another's name.
 
-`isMixed` (kiba `CLAUDE-MIXED?`): `installed` names row S and S exists and
-the live identity reads and the live config does NOT name S (email differs,
-or both orgs known and differ) and the live creds bytes equal S's login
-bytes → true.
+`isMixed` (kiba `CLAUDE-MIXED?`): a pending install → true. Else `installed`
+names row S and S exists and the live identity reads and the live config
+does NOT name S (email differs, or both orgs known and differ) and the live
+creds bytes equal S's login bytes → true. The next successful install
+clears it.
 
 ### Codex live login
 
@@ -768,8 +783,9 @@ are written by `PrivateFS` temp + rename.
   login under `CLAUDE_CONFIG_DIR` may write.
 - Saved accounts in one SQLite file under Application Support, local to
   this Mac and never shared. A row holds what a slot directory held, a
-  transaction replaces the lock directory, the install marker and every
-  temp + rename in the store, and a status read is two queries. Saved
+  transaction replaces the lock directory and every temp + rename in the
+  store, a `pending` row the install marker, and a status read is two
+  queries. Saved
   tokens stay in the 0600 database rather than Keychain items: no
   subprocess per read, and tests check the bytes directly. Nothing moves in
   from an old kiba folder: accounts are added through the provider login.

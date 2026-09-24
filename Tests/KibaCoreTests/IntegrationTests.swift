@@ -101,6 +101,50 @@ import Testing
     }
 }
 
+@Test func failedCredsWriteKeepsLiveLogin() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let credsA = claudeCreds("xa2", plan: "max", expires: Fixed.now + Fixed.day)
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB)
+        try w.store.write { try $0.noteInstalled(.claude, ax) }
+        // The live credentials link into a directory no file can be created in:
+        // they read, but replacing them fails after the config is written.
+        let locked = w.dir.appending(component: "locked")
+        let creds = locked.appending(component: "creds.json")
+        let config = w.paths.claudeConfigFile(root: nil)
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+        try credsA.write(to: creds)
+        try claudeConfig(profA).write(to: config)
+        try FileManager.default.createSymbolicLink(at: w.paths.claudeCredsFile(root: nil), withDestinationURL: creds)
+        try FileManager.default.setAttributes([.posixPermissions: Fixed.lockedMode], ofItemAtPath: locked.path)
+        defer { chmod(locked.path, mode_t(Fixed.openMode)) }
+        let sw = w.switcher(StubHTTP([]))
+
+        await #expect(throws: KibaError.self) { try await sw.use(.claude, bx) }
+        #expect(w.read(config) == claudeConfig(profA))
+        #expect(w.read(creds) == credsA)
+        #expect(try w.store.installed(.claude) == ax)
+
+        // Claude Code refreshes a@x's tokens; saving files them under a@x.
+        let refreshed = claudeCreds("xa3", plan: "max", expires: Fixed.now + Fixed.day)
+        try refreshed.write(to: creds)
+        #expect(try sw.save(.claude) == ax)
+        #expect(try w.store.fetch(.claude, ax)?.login == refreshed)
+        #expect(try w.store.fetch(.claude, bx)?.login == credsB)
+
+        // A crash between the two live writes of an install of b@x, then a
+        // refresh: the tokens match no saved row, and still nothing saves them.
+        try w.store.write { try $0.notePending(.claude, bx) }
+        try claudeConfig(profB).write(to: config)
+        try claudeCreds("xa4", plan: "max", expires: Fixed.now + Fixed.day).write(to: creds)
+        #expect(throws: KibaError.mixed) { try sw.save(.claude) }
+        #expect(try w.store.list(.claude).map(\.login) == [refreshed, credsB])
+    }
+}
+
 // MARK: - Probe
 
 @Test func probeRefreshesSavedClaudeLoginsOnly() async throws {
@@ -366,6 +410,9 @@ enum Fixed {
     /// Where the login script finds `mv`.
     static let systemPath = "/usr/bin:/bin"
     static let execMode = 0o755
+    /// A directory that lists and reads but takes no new file.
+    static let lockedMode = 0o500
+    static let openMode = 0o700
     /// `Fixed.now + hour` and `Fixed.now + 4 days` in ISO 8601.
     static let sessionReset = "2026-09-21T15:13:20Z"
     static let weekReset = "2026-09-25T14:13:20Z"

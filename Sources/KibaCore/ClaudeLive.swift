@@ -43,33 +43,44 @@ public struct ClaudeLive {
         try tx.put(.claude, SavedLogin(name: n, identity: id, login: creds, profile: profile, usage: nil))
     }
 
-    /// kiba `CLAUDE-INSTALL`, in one transaction so the row read is the row
-    /// installed: the row must exist (`noAccount`), its profile must name an
-    /// email `n` belongs to (`mismatch`), its login must hold a `claudeAiOauth`
-    /// object (`badJSON`). Then the config gets the profile, the credentials
-    /// get the login, and `n` is noted as installed. A crash between the two
-    /// live writes leaves the previous name installed, which `isMixed` detects.
+    /// kiba `CLAUDE-INSTALL`. The row must exist (`noAccount`), its profile
+    /// must name an email `n` belongs to (`mismatch`), its login must hold a
+    /// `claudeAiOauth` object (`badJSON`); then `n` is noted as pending and
+    /// committed, so a crash between the two live writes leaves a pending
+    /// install, which `isMixed` reports. A second transaction gives the config
+    /// the profile and the credentials the login, notes `n` as installed and
+    /// clears the pending install. When a live write fails, the previous
+    /// config goes back and the pending install is cleared; the write's error
+    /// is thrown.
     public func install(_ n: SlotName) throws {
-        try store.write { tx in
-            guard let row = try store.fetch(.claude, n) else { throw KibaError.noAccount(.claude, n.raw) }
-            guard let profile = row.profile, n.belongs(to: try ClaudeIdentity.fromOAuthAccount(profile).email) else {
-                throw KibaError.mismatch(.claude, n.raw)
-            }
-            guard try JSONDoc(row.login).objectSpan(ClaudeIdentity.Key.oauth) != nil else {
-                throw KibaError.badJSON(ClaudeIdentity.Key.oauth)
-            }
-            let config = try spliced(profile)
-            try PrivateFS.ensurePrivateDir(configFile.deletingLastPathComponent())
-            try PrivateFS.writePrivate(config, to: configFile)
-            try secrets.write(row.login)
-            try tx.noteInstalled(.claude, n)
+        let change = try store.write { tx in
+            let change = try prepare(n)
+            try tx.notePending(.claude, n)
+            return change
         }
+        let failure = try store.write { tx -> (any Error)? in
+            do {
+                try putConfig(change.after)
+                try secrets.write(change.login)
+            } catch {
+                // The credentials were not replaced. A config that cannot go
+                // back keeps the install pending: the files read as mixed.
+                if (try? putConfig(change.before)) != nil { try tx.clearPending(.claude) }
+                return error
+            }
+            try tx.noteInstalled(.claude, n)
+            try tx.clearPending(.claude)
+            return nil
+        }
+        if let failure { throw failure }
     }
 
-    /// kiba `CLAUDE-MIXED?`: the installed row exists, the live config names
+    /// kiba `CLAUDE-MIXED?`, plus an unfinished install: an install is pending,
+    /// whatever the tokens; or the installed row exists, the live config names
     /// another account (email differs, or both orgs are known and differ), and
     /// the live credentials are still byte for byte that row's login.
     public func isMixed() throws -> Bool {
+        guard try store.pending(.claude) == nil else { return true }
         guard let name = try store.installed(.claude), let row = try store.fetch(.claude, name),
               let (config, creds) = try live() else { return false }
         let id = try ClaudeIdentity.fromLive(config: config, creds: creds)
@@ -85,11 +96,32 @@ public struct ClaudeLive {
         return (config, creds)
     }
 
-    /// The live config with its top-level `oauthAccount` value, of any kind,
+    /// What installing `n` writes, checked: the live config now and with the
+    /// row's profile spliced in, and the row's login.
+    func prepare(_ n: SlotName) throws -> (before: Data?, after: Data, login: Data) {
+        guard let row = try store.fetch(.claude, n) else { throw KibaError.noAccount(.claude, n.raw) }
+        guard let profile = row.profile, n.belongs(to: try ClaudeIdentity.fromOAuthAccount(profile).email) else {
+            throw KibaError.mismatch(.claude, n.raw)
+        }
+        guard try JSONDoc(row.login).objectSpan(ClaudeIdentity.Key.oauth) != nil else {
+            throw KibaError.badJSON(ClaudeIdentity.Key.oauth)
+        }
+        let before = try PrivateFS.read(configFile)
+        return (before, try spliced(before, profile), row.login)
+    }
+
+    /// Makes the live config `doc`; nil removes the file a write would replace.
+    func putConfig(_ doc: Data?) throws {
+        guard let doc else { return try PrivateFS.removeTree(PrivateFS.writeTarget(configFile)) }
+        try PrivateFS.ensurePrivateDir(configFile.deletingLastPathComponent())
+        try PrivateFS.writePrivate(doc, to: configFile)
+    }
+
+    /// The config `old` with its top-level `oauthAccount` value, of any kind,
     /// replaced by `profile`; inserted before the closing brace when absent; a
     /// new document when there is no config.
-    func spliced(_ profile: Data) throws -> Data {
-        guard let old = try PrivateFS.read(configFile) else { return Self.open + Self.member + profile + Self.close }
+    func spliced(_ old: Data?, _ profile: Data) throws -> Data {
+        guard let old else { return Self.open + Self.member + profile + Self.close }
         let doc = try JSONDoc(old)
         if let span = doc.valueSpan(ClaudeIdentity.Key.account) {
             return try doc.replacing(span, with: profile).data

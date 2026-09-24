@@ -50,6 +50,10 @@ public struct Store: Sendable {
           provider  TEXT PRIMARY KEY,
           installed TEXT NOT NULL
         ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS pending (
+          provider TEXT PRIMARY KEY,
+          name     TEXT NOT NULL
+        ) WITHOUT ROWID;
         """
 
     /// Creates the store directory (0700) and the database (0600) when missing,
@@ -100,13 +104,12 @@ public struct Store: Sendable {
 
     /// The name whose login was installed last; nil before the first install.
     public func installed(_ p: Provider) throws -> SlotName? {
-        var raw: String?
-        try Connection(db).query("SELECT installed FROM live WHERE provider = ?", "installed", [.text(p.rawValue)]) {
-            raw = $0.text(0)
-        }
-        guard let raw else { return nil }
-        guard let name = SlotName(raw) else { throw KibaError.badName(raw) }
-        return name
+        try name("SELECT installed FROM live WHERE provider = ?", "installed", p)
+    }
+
+    /// The name whose install began and has not finished; nil when none is in flight.
+    public func pending(_ p: Provider) throws -> SlotName? {
+        try name("SELECT name FROM pending WHERE provider = ?", "pending", p)
     }
 
     /// Runs `body` in one `BEGIN IMMEDIATE` transaction and commits; any throw
@@ -123,6 +126,15 @@ public struct Store: Sendable {
             if conn.inTransaction { try conn.exec("ROLLBACK", "rollback") }
             throw error
         }
+    }
+
+    /// The name `sql` selects for `p`; nil when there is no row.
+    func name(_ sql: String, _ op: String, _ p: Provider) throws -> SlotName? {
+        var raw: String?
+        try Connection(db).query(sql, op, [.text(p.rawValue)]) { raw = $0.text(0) }
+        guard let raw else { return nil }
+        guard let name = SlotName(raw) else { throw KibaError.badName(raw) }
+        return name
     }
 
     /// A row decoded; a name that fails `NAME-OK?` was written by hand and is `badName`.
@@ -184,6 +196,20 @@ public struct Tx {
             INSERT INTO live (provider, installed) VALUES (?, ?)
             ON CONFLICT (provider) DO UPDATE SET installed = excluded.installed
             """, "note installed", [.text(p.rawValue), .text(n.raw)])
+    }
+
+    /// Records an install of `n` as begun; committed before any live file changes.
+    public func notePending(_ p: Provider, _ n: SlotName) throws {
+        try conn.run(
+            """
+            INSERT INTO pending (provider, name) VALUES (?, ?)
+            ON CONFLICT (provider) DO UPDATE SET name = excluded.name
+            """, "note pending", [.text(p.rawValue), .text(n.raw)])
+    }
+
+    /// Nothing to do when no install is pending.
+    public func clearPending(_ p: Provider) throws {
+        try conn.run("DELETE FROM pending WHERE provider = ?", "clear pending", [.text(p.rawValue)])
     }
 
     static func usageText(_ u: UsageRecord) -> String {
