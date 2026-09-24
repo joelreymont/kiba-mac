@@ -1,0 +1,257 @@
+{
+  "providers": [
+    {
+      "provider": "claude",
+      "live": {
+        "email": "joel@reymont.dev",
+        "plan": "max"
+      },
+      "accounts": [
+        {
+          "name": "joel@reymont.dev",
+          "plan": "max",
+          "active": true,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 18,
+                "resetsAt": "2026-09-24T13:12:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 35,
+                "resetsAt": "2026-09-28T16:00:00Z"
+              },
+              {
+                "label": "Opus Weekly",
+                "percent": 44,
+                "resetsAt": "2026-09-28T16:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "ops@northwind.io",
+          "plan": "max",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 5,
+                "resetsAt": "2026-09-24T14:40:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 22,
+                "resetsAt": "2026-09-26T13:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "research@northwind.io",
+          "plan": "pro",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 64,
+                "resetsAt": "2026-09-24T11:25:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 41,
+                "resetsAt": "2026-09-29T11:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "joel@reymont.dev #2",
+          "plan": "team",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243820,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 30,
+                "resetsAt": "2026-09-24T12:50:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 45,
+                "resetsAt": "2026-09-28T06:00:00Z"
+              },
+              {
+                "label": "Opus Weekly",
+                "percent": 78,
+                "resetsAt": "2026-09-28T06:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "studio@kestrel.design",
+          "plan": "pro",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 0,
+                "resetsAt": ""
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 100,
+                "resetsAt": "2026-09-29T12:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "hana.sato@fieldnotes.jp",
+          "plan": "max",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 100,
+                "resetsAt": "2026-09-24T13:05:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 70,
+                "resetsAt": "2026-09-30T14:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "alex@driftwood.co",
+          "plan": "pro",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790241540,
+            "state": "expired",
+            "note": "access token expired; the refresh was refused; log in again",
+            "limits": []
+          }
+        },
+        {
+          "name": "priya.n@lumenlabs.ai",
+          "plan": "pro",
+          "active": false
+        }
+      ]
+    },
+    {
+      "provider": "codex",
+      "live": {
+        "email": "joel@reymont.dev",
+        "plan": "plus"
+      },
+      "accounts": [
+        {
+          "name": "joel@reymont.dev",
+          "plan": "plus",
+          "active": true,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 12,
+                "resetsAt": "2026-09-24T12:10:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 39,
+                "resetsAt": "2026-09-27T21:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "builds@northwind.io",
+          "plan": "pro",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "ok",
+            "note": "",
+            "limits": [
+              {
+                "label": "Session (5-hour)",
+                "percent": 81,
+                "resetsAt": "2026-09-24T10:55:00Z"
+              },
+              {
+                "label": "Weekly (7-day)",
+                "percent": 55,
+                "resetsAt": "2026-09-26T05:00:00Z"
+              }
+            ]
+          }
+        },
+        {
+          "name": "api-key",
+          "plan": "apikey",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "unknown",
+            "note": "API-key login: no usage windows to read",
+            "limits": []
+          }
+        },
+        {
+          "name": "old@driftwood.co",
+          "plan": "plus",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790238240,
+            "state": "revoked",
+            "note": "login revoked by a later `codex login`",
+            "limits": []
+          }
+        },
+        {
+          "name": "mika@fieldnotes.jp",
+          "plan": "team",
+          "active": false,
+          "usage": {
+            "fetchedAt": 1790243880,
+            "state": "error",
+            "note": "OpenAI is rate limiting usage checks; try again later",
+            "limits": []
+          }
+        }
+      ]
+    }
+  ]
+}
