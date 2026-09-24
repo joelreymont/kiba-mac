@@ -11,7 +11,7 @@ let package = Package(
     targets: [
         .target(name: "KibaCore"),
         .executableTarget(name: "KibaApp", dependencies: ["KibaCore"]),
-        .testTarget(name: "KibaCoreTests", dependencies: ["KibaCore"]),
+        .testTarget(name: "KibaCoreTests", dependencies: ["KibaCore", "KibaApp"]),
     ],
     swiftLanguageModes: [.v6]
 )

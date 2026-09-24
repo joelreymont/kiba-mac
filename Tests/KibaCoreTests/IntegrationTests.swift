@@ -2,6 +2,8 @@ import Foundation
 import KibaCore
 import Testing
 
+@testable import KibaApp
+
 // Every test runs in its own scratch world (HOME, CLAUDE_CONFIG_DIR, CODEX_HOME
 // and PATH under /private/tmp), with stubbed HTTP and a frozen clock, and checks
 // what the user would see: live files, store rows, snapshots and rows.
@@ -289,6 +291,9 @@ enum Fixed {
     /// lookup cannot reach real credentials.
     static let user = "kiba-mac-test-user"
     static let keychainPrefix = "kiba-mac-test-"
+    /// How long the app model may take to finish a read or an action.
+    static let settleLimit = Duration.seconds(5)
+    static let pollStep = Duration.milliseconds(10)
     /// Under /private/tmp: the store refuses symlinked paths such as /tmp.
     static let scratchTemplate = "/private/tmp/kiba-it-XXXXXX"
     static let shell = URL(fileURLWithPath: "/bin/sh", isDirectory: false)
@@ -534,4 +539,52 @@ func windows(session: Int, week: Int) -> [Limit] {
 
 func probed(_ limits: [Limit]) -> UsageRecord {
     UsageRecord(fetchedAt: Fixed.now, state: .ok, note: "", limits: limits)
+}
+
+// MARK: - App model
+
+@MainActor @Test func appModelListsRowsAndSwitches() async throws {
+    let w = try World()
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (ay, by) = (try slot("a@y"), try slot("b@y"))
+    let liveAuth = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")
+    try w.writeCodex(liveAuth)
+    try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: liveAuth, profile: nil)
+    try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
+               login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb"), profile: nil)
+    let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45))])
+    let backend = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: w.runner(http, keychain: FakeKeychain(items: [:])))
+    let model = AppModel(connect: { backend })
+
+    model.start()
+    try await settle(model)
+    #expect(model.availability == .ready)
+    let before = model.sections.first { $0.id == .codex }
+    #expect(before?.accounts.map(\.name) == [ay, by])
+    #expect(before?.accounts.map(\.active) == [true, false])
+    #expect(model.actions.contains(.use(.codex, by)))
+
+    model.use(.codex, by)
+    #expect(model.busy)
+    try await settle(model)
+    #expect(model.message == "Codex: now b@y")
+    #expect(model.error == "")
+    let after = model.snapshot.providers.first { $0.provider == .codex }
+    #expect(after?.live == LiveLogin(email: "b@y", plan: "pro"))
+    #expect(after?.accounts == [
+        Account(name: ay, plan: "plus", active: false, usage: nil),
+        Account(name: by, plan: "pro", active: true, usage: probed(windows(session: 20, week: 45))),
+    ])
+}
+
+/// Waits until the model has no read or action in flight.
+@MainActor func settle(_ model: AppModel) async throws {
+    let clock = ContinuousClock()
+    let end = clock.now + Fixed.settleLimit
+    while model.busy || model.refreshing {
+        try #require(clock.now < end, "the model did not settle")
+        try await Task.sleep(for: Fixed.pollStep)
+    }
 }
