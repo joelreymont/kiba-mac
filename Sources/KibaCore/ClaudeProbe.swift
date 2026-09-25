@@ -29,7 +29,7 @@ public struct ClaudeProbe: Sendable {
         case .stale(let state, let note): return done(state, note)
         }
         guard let token = accessToken(doc) else { return done(.error, ProbeNote.noAccess) }
-        let got = await http.send(.get(Endpoint.usage, bearer: token, extra: Endpoint.beta))
+        let got = await http.send(.get(Endpoint.usage, bearer: token, agent: Endpoint.agent, extra: Endpoint.beta))
         guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
         switch r.status {
         case HTTPStatus.ok:
@@ -57,7 +57,7 @@ public struct ClaudeProbe: Sendable {
         let url = Endpoint.organizations.appending(component: org).appending(component: Endpoint.resetPath)
         func send(_ doc: Data) async -> HTTPOutcome? {
             guard let token = accessToken(doc) else { return nil }
-            return await http.send(.post(url, json: body, bearer: token, extra: Endpoint.beta))
+            return await http.send(.post(url, json: body, bearer: token, agent: Endpoint.agent, extra: Endpoint.beta))
         }
 
         switch await fresh(doc, live: i.live, now: now) {
@@ -211,6 +211,12 @@ public struct ClaudeProbe: Sendable {
         static let resetPath = "reset_rate_limits"
         static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
         static let beta = ["anthropic-beta": "oauth-2025-04-20"]
+        /// The usage endpoint offers limit resets only to Claude Code's own
+        /// User-Agent (any other is `ineligible_reason: surface`; the CLI's
+        /// other headers make no difference), so the usage and reset calls
+        /// carry it, with the CLI version the check was made against.
+        static let cliVersion = "2.1.282"
+        static let agent = "claude-cli/\(cliVersion) (external, cli)"
     }
 
     /// Members of the saved credentials document.

@@ -40,8 +40,9 @@ layout, UI spec. Read it before changing anything.
 - Credential files and slot directories are 0600/0700 and replaced by
   temp + rename (`PrivateFS`). Login documents are rewritten by byte
   splicing (`JSONDoc`), never by re-serialising.
-- Every request names `kiba` as User-Agent (the ChatGPT backend calls,
-  usage and reset, keep `codex-cli`).
+- Every request names `kiba` as User-Agent except usage and reset: the
+  ChatGPT backend calls keep `codex-cli`, the Claude ones carry Claude
+  Code's `claude-cli/<version>`, which alone opens the limit-reset surface.
 - Every error is a `KibaError` with a one-line `reason`; nothing is logged
   and swallowed. Isolation happens only in `StatusReader` and
   `Switcher.probeAll`.

@@ -433,8 +433,15 @@ public final class StubHTTP: HTTPClient  // scripted responses, records requests
 ```
 
 Every request sets `Accept: application/json` and `User-Agent: kiba` except
-the ChatGPT backend calls (usage and reset), which send `User-Agent:
-codex-cli`. Builders: `HTTPRequest.get(url, bearer:, agent:, extra:)`,
+the usage and reset calls of both providers: the ChatGPT backend calls send
+`User-Agent: codex-cli`, and the Claude ones send Claude Code's own
+`claude-cli/<version> (external, cli)` (`ClaudeProbe.Endpoint.agent`, the
+CLI version the check was made against). The Claude usage endpoint answers
+every other User-Agent with `ineligible_reason: "surface"` in both reset
+blocks, and the CLI's other headers (`x-app`, `anthropic-client-platform`,
+`anthropic-client-version`) change nothing (checked 2026-09-25 with the
+live login: the User-Agent alone turned `cedar_ember.eligible` true). The
+token refresh keeps `kiba`. Builders: `HTTPRequest.get(url, bearer:, agent:, extra:)`,
 `.post(url, json:, bearer:, agent:, extra:)` (adds `Content-Type:
 application/json`), and `.post(url, json:)` for token grants, which carry
 no bearer.
@@ -468,7 +475,8 @@ Claude:
 2. GET `https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1`
    (the flags ask for both reset blocks, as Claude Code 2.1.282 does; its
    `skip_spend=1` is omitted), `Authorization: Bearer`,
-   `anthropic-beta: oauth-2025-04-20`. 200 → limits: `five_hour` →
+   `anthropic-beta: oauth-2025-04-20`, UA `claude-cli/<version> (external,
+   cli)` (see HTTP: the reset blocks are empty for any other). 200 → limits: `five_hour` →
    Session; `seven_day_oauth_apps` else `seven_day` → Weekly (each bucket
    `{utilization, resets_at}`); then every `limits[]` entry with
    `scope.model.display_name` → `"<display_name> Weekly"` when `kind` starts
@@ -530,7 +538,8 @@ endpoint failure is `remote(note)`):
   refresh it"); saved: refresh, send again. The live token is never refreshed.
 - Claude: POST `https://api.anthropic.com/api/organizations/<org>/reset_rate_limits`,
   `<org>` = `Identity.org` (`oauthAccount.organizationUuid`; empty →
-  `badJSON`), bearer, `anthropic-beta`, UA `kiba`. Body
+  `badJSON`), bearer, `anthropic-beta`, UA `claude-cli/<version> (external,
+  cli)`. Body
   `{"program":"cedar_ember","grant_id":<grant>,"request_id":<UUID>}` or
   `{"program":"juniper_tide"}`; another program → `noResets`. 200
   `{"result":…}`: `reset` | `already_used` | `not_limited` | `cooldown` |

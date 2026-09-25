@@ -51,7 +51,7 @@ import Testing
         #expect(http.requests.map(\.url.absoluteString) ==
                 [Endpoint.claudeUsage, Endpoint.claudeUsage, Endpoint.codexUsage, Endpoint.codexUsage])
         #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-xb", "Bearer at-xa2", "Bearer at-yb", "Bearer at-ya2"])
-        #expect(http.requests.map { $0.headers[Header.agent] } == ["kiba", "kiba", "codex-cli", "codex-cli"])
+        #expect(http.requests.map { $0.headers[Header.agent] } == [Fixed.claudeAgent, Fixed.claudeAgent, "codex-cli", "codex-cli"])
 
         let want = [
             ProviderStatus(provider: .claude, live: LiveLogin(email: "b@x", plan: "pro"), accounts: [
@@ -437,7 +437,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(post.headers[Header.auth] == "Bearer at-b2")
         #expect(post.headers[Header.beta] == "oauth-2025-04-20")
         #expect(post.headers[Header.contentType] == "application/json")
-        #expect(post.headers[Header.agent] == "kiba")
+        #expect(post.headers[Header.agent] == Fixed.claudeAgent)
+        #expect(http.requests[0].headers[Header.agent] == "kiba")
         let body = try members(post.body)
         #expect(body.keys.sorted() == ["grant_id", "program", "request_id"])
         #expect(body["program"] == "cedar_ember")
@@ -839,6 +840,9 @@ enum Fixed {
     static let msPerSecond = 1_000
     /// Seconds a refreshed access token lives, as the token endpoints answer.
     static let tokenLife = 28_800
+    /// What the Claude usage and reset calls must send: the server opens
+    /// limit resets to this User-Agent alone.
+    static let claudeAgent = "claude-cli/2.1.282 (external, cli)"
     /// Longer than half of `security -i`'s 4096-byte line once hex-encoded.
     static let bigSecret = 3_000
     /// Keychain account of the live Claude item; never the user's, so a stray
