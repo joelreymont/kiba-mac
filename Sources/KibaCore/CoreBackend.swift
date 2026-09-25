@@ -22,7 +22,7 @@ public struct CoreBackend: Backend {
         self.init(
             switcher: switcher,
             reader: StatusReader(paths: paths, store: store),
-            runner: LoginRunner(
+            runner: try LoginRunner(
                 paths: paths, switcher: switcher, terminal: TerminalApp(), lister: KeychainTool(account: username),
                 searchPath: try Self.loginPath(env: env)))
     }

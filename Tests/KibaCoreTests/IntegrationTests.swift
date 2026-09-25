@@ -535,7 +535,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         try w.fakeCLI("claude", """
             printf '%s' '\(text(claudeConfig(profile("k@y", org: "org-k"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
             """)
-        let runner = w.runner(http, keychain: keychain) { try live.write(newCreds) }
+        let runner = try w.runner(http, keychain: keychain) { try live.write(newCreds) }
         let added = try await runner.add(.claude, expected: "k@y")
         #expect(added == AddResult(saved: try slot("k@y"), expected: "k@y", differs: false))
         #expect(try w.store.fetch(.claude, try slot("k@y"))?.login == newCreds)
@@ -574,7 +574,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             printf '%s' '\(text(claudeConfig(profile("n@y", org: "org-n"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
             """)
         let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
-        let runner = w.runner(http, keychain: keychain) { try leftover.write(newCreds) }
+        let runner = try w.runner(http, keychain: keychain) { try leftover.write(newCreds) }
 
         let added = try await runner.add(.claude, expected: "n@y")
 
@@ -589,13 +589,138 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 @Test func addReportsMissingCLIAndFailedLogin() async throws {
     try await scratch { w in
-        let runner = w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:]))
+        let runner = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:]))
         await #expect(throws: KibaError.noCLI("codex")) { try await runner.add(.codex, expected: nil) }
         try w.fakeCLI("codex", "exit 3")
         await #expect(throws: KibaError.loginFailed(3)) { try await runner.add(.codex, expected: nil) }
         #expect(w.calls() == ["codex login"])
         #expect(try w.store.list(.codex).isEmpty)
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.codex).path))
+    }
+}
+
+@Test func addPutsLiveItemBackWhateverLoginDoes() async throws {
+    try await scratch { w in
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let keychain = FakeKeychain(items: [w.paths.keychainService: MemorySecret(liveCreds)])
+        let live = keychain.item(w.paths.keychainService)
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
+
+        // A login that overwrites the live item and then fails.
+        try w.fakeCLI("claude", "exit 3")
+        let failing = try w.runner(http, keychain: keychain) {
+            try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
+        }
+        await #expect(throws: KibaError.loginFailed(3)) { try await failing.add(.claude, expected: "x@y") }
+        #expect(try live.read() == liveCreds)
+
+        // A login that writes a credentials file and overwrites the live item too.
+        let fileCreds = claudeCreds("f", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(fileCreds))' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+            printf '%s' '\(text(claudeConfig(profile("f@y", org: "org-f"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
+        let both = try w.runner(http, keychain: keychain) {
+            try live.write(claudeCreds("k", plan: "pro", expires: Fixed.now + Fixed.day))
+        }
+        let added = try await both.add(.claude, expected: "f@y")
+        #expect(added == AddResult(saved: try slot("f@y"), expected: "f@y", differs: false))
+        #expect(try w.store.fetch(.claude, try slot("f@y"))?.login == fileCreds)
+        #expect(try live.read() == liveCreds)
+        #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.claude).path))
+    }
+}
+
+@Test func cancelledAddStopsLoginAndPutsLiveItemBack() async throws {
+    try await scratch { w in
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let keychain = FakeKeychain(items: [w.paths.keychainService: MemorySecret(liveCreds)])
+        let live = keychain.item(w.paths.keychainService)
+        // A login that overwrites the live item, then waits on the browser.
+        let cliPid = w.dir.appending(component: "cli.pid")
+        try w.fakeCLI("claude", "printf '%s' \"$$\" > '\(cliPid.path)'\nsleep \(Fixed.stall)")
+        let runner = try w.runner(StubHTTP([]), keychain: keychain, background: true) {
+            try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
+        }
+        let add = Task { try await runner.add(.claude, expected: "x@y") }
+        try await until("the login to start") { w.read(cliPid) != nil }
+
+        add.cancel()
+
+        let exit = w.paths.loginRoot(.claude).appending(component: "exit")
+        await #expect(throws: KibaError.io("login wait cancelled before \(exit.path) appeared")) { try await add.value }
+        #expect(try live.read() == liveCreds)
+        let pid = try #require(w.read(cliPid).flatMap { pid_t(text($0)) })
+        #expect(kill(pid, 0) == -1 && errno == ESRCH, "the login still runs")
+        #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.claude).path))
+    }
+}
+
+@Test func addWhileLoginRunsIsRefused() async throws {
+    try await scratch { w in
+        let signedIn = w.dir.appending(component: "signed-in")
+        let auth = codexAuth("new@y", plan: "pro", account: "acct-n", tag: "n")
+        // A login that waits until the test signs in, for `Fixed.stall` seconds at most.
+        try w.fakeCLI("codex", """
+            n=0
+            while [ ! -e '\(signedIn.path)' ] && [ "$n" -lt \(Fixed.stall * Fixed.ticksPerSecond) ]; do
+              sleep \(Fixed.tickSeconds); n=$((n + 1))
+            done
+            printf '%s' '\(text(auth))' > "$CODEX_HOME/auth.json"
+            """)
+        let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45))])
+        let runner = try w.runner(http, keychain: FakeKeychain(items: [:]), background: true)
+        let first = Task { try await runner.add(.codex, expected: nil) }
+        try await until("the first login to start") { !w.calls().isEmpty }
+
+        let second = await #expect(throws: KibaError.self) { try await runner.add(.codex, expected: nil) }
+        #expect(second?.reason == "a Codex login is already running")
+
+        FileManager.default.createFile(atPath: signedIn.path, contents: nil)
+        let added = try await finish(first)
+        #expect(added == AddResult(saved: try slot("new@y"), expected: nil, differs: false))
+        #expect(try w.store.fetch(.codex, try slot("new@y"))?.login == auth)
+        #expect(w.calls() == ["codex login"])
+    }
+}
+
+@Test func failedImportKeepsNewLogin() async throws {
+    try await scratch { w in
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let found = MemorySecret(nil)
+        let keychain = FakeKeychain(items: [
+            w.paths.keychainService: MemorySecret(liveCreds), "\(w.paths.keychainService)-login": found,
+        ])
+        // An account the store cannot name: a name holds no slash.
+        let config = claudeConfig(profile("n/x@y", org: "org-n"))
+        try w.fakeCLI("claude", "printf '%s' '\(text(config))' > \"$CLAUDE_CONFIG_DIR/.claude.json\"")
+        let newCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
+        let runner = try w.runner(StubHTTP([]), keychain: keychain) { try found.write(newCreds) }
+
+        await #expect(throws: KibaError.badName("n/x@y")) { try await runner.add(.claude, expected: nil) }
+
+        #expect(try found.read() == newCreds)
+        #expect(w.read(w.paths.claudeConfigFile(root: w.paths.loginRoot(.claude))) == config)
+        #expect(try keychain.item(w.paths.keychainService).read() == liveCreds)
+        #expect(try w.store.list(.claude).isEmpty)
+    }
+}
+
+@Test func startUndoesAddTheAppDidNotFinish() async throws {
+    try await scratch { w in
+        // The app died while an add's login had overwritten the live item.
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let live = MemorySecret(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
+        let keychain = FakeKeychain(items: [w.paths.keychainService: live])
+        try w.store.write { try $0.noteAdding(.claude, LiveItem(bytes: liveCreds)) }
+        let root = w.paths.loginRoot(.claude)
+        try FileManager.default.createDirectory(at: w.paths.claudeConfigDir(root: root), withIntermediateDirectories: true)
+
+        _ = try w.runner(StubHTTP([]), keychain: keychain)
+
+        #expect(try live.read() == liveCreds)
+        #expect(try w.store.adding(.claude) == nil)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 }
 
@@ -669,6 +794,11 @@ enum Fixed {
     static let pollStep = Duration.milliseconds(10)
     /// Why the store cannot be opened while a test holds the app offline.
     static let offline = "store offline"
+    /// Seconds a fake login waits for a sign-in that never comes.
+    static let stall = 10
+    /// How often a fake login looks for its sign-in.
+    static let ticksPerSecond = 10
+    static let tickSeconds = 1.0 / Double(ticksPerSecond)
     /// Under /private/tmp: the store refuses symlinked paths such as /tmp.
     static let scratchTemplate = "/private/tmp/kiba-it-XXXXXX"
     static let shell = URL(fileURLWithPath: "/bin/sh", isDirectory: false)
@@ -754,13 +884,18 @@ struct World: Sendable {
         Switcher(paths: paths, store: store, http: http, clock: clock)
     }
 
-    /// `during` stands for what the provider login does outside its home.
-    func runner(_ http: StubHTTP, keychain: FakeKeychain, during: @escaping @Sendable () throws -> Void = {}) -> LoginRunner {
+    /// `during` stands for what the provider login does outside its home;
+    /// with `background` the Terminal launch returns while the login runs.
+    func runner(
+        _ http: StubHTTP, keychain: FakeKeychain, background: Bool = false,
+        during: @escaping @Sendable () throws -> Void = {}
+    ) throws -> LoginRunner {
         var shellEnv = env
         shellEnv["PATH"] = "\(bin.path):\(Fixed.systemPath)"
-        return LoginRunner(
-            paths: paths, switcher: switcher(http), terminal: ShellTerminal(env: shellEnv, during: during),
-            lister: keychain, searchPath: bin.path)
+        let terminal: any TerminalLauncher =
+            background ? BackgroundTerminal(env: shellEnv, during: during) : ShellTerminal(env: shellEnv, during: during)
+        return try LoginRunner(
+            paths: paths, switcher: switcher(http), terminal: terminal, lister: keychain, searchPath: bin.path)
     }
 
     func writeClaude(config: Data, creds: Data) throws {
@@ -840,6 +975,53 @@ struct ShellTerminal: TerminalLauncher {
         }
         try during()
     }
+}
+
+/// Starts the login script with `/bin/sh` in a session of its own and
+/// returns at once, as Terminal does, then runs `during`. The script runs on
+/// until it ends or `add` stops it. Terminal's shell starts it with no signal
+/// blocked, while this process's threads block the ones `add` stops it with,
+/// and a spawned child inherits its thread's mask: the spawning thread
+/// unblocks them first.
+struct BackgroundTerminal: TerminalLauncher {
+    let env: [String: String]
+    let during: @Sendable () throws -> Void
+
+    func open(_ script: URL) throws {
+        let env = env
+        Thread.detachNewThread {
+            var none = sigset_t()
+            sigemptyset(&none)
+            precondition(pthread_sigmask(SIG_SETMASK, &none, nil) == 0, "the signal mask did not clear")
+            do {
+                _ = try Subprocess.run(Fixed.shell, [script.path], stdin: nil, env: env, setsid: true)
+            } catch {
+                preconditionFailure("the login script did not run: \(error)")
+            }
+        }
+        try during()
+    }
+}
+
+/// Waits until `done` holds, for `Fixed.settleLimit` at most.
+func until(_ what: String, _ done: () throws -> Bool) async throws {
+    let clock = ContinuousClock()
+    let end = clock.now + Fixed.settleLimit
+    while try !done() {
+        try #require(clock.now < end, "timed out waiting for \(what)")
+        try await Task.sleep(for: Fixed.pollStep)
+    }
+}
+
+/// The value of `task`, cancelled past `Fixed.settleLimit`: an add whose
+/// login never reports fails the test instead of hanging it.
+func finish<T: Sendable>(_ task: Task<T, any Error>) async throws -> T {
+    let timer = Task {
+        try await Task.sleep(for: Fixed.settleLimit)
+        task.cancel()
+    }
+    defer { timer.cancel() }
+    return try await task.value
 }
 
 /// The Keychain as `add` sees it, one in-memory item per service.
@@ -1097,7 +1279,7 @@ func codexPair(_ w: World) throws -> (CoreBackend, SlotName, SlotName) {
                          answer(Status.ok, codexUsage(session: 15, week: 25))])
     let backend = CoreBackend(
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
-        runner: w.runner(http, keychain: FakeKeychain(items: [:])))
+        runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
     return (backend, ay, by)
 }
 

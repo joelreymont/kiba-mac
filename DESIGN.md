@@ -56,6 +56,7 @@ public enum KibaError: Error, Equatable {
   case badJSON(String)               // a login file lacks an expected field / is not JSON
   case loginFailed(Int32)            // provider login exited non-zero
   case loginProducedNothing(Provider)// login exited 0 but no credentials were found
+  case loginRunning(Provider)        // an add for this provider is still waiting on its login
   case noCLI(String)                 // claude/codex not on PATH
   case mismatch(Provider, String)    // saved row names another account than its name
   case mixed                         // live Claude config and tokens name different accounts
@@ -274,6 +275,10 @@ CREATE TABLE IF NOT EXISTS pending (
   provider TEXT PRIMARY KEY,       -- row absent: no install in flight
   name     TEXT NOT NULL           -- name an unfinished install was writing
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS adding (
+  provider TEXT PRIMARY KEY,       -- row absent: no add in flight
+  live     BLOB                    -- the live Keychain item before the add's login; NULL: there was none
+) WITHOUT ROWID;
 ```
 
 ```swift
@@ -285,6 +290,8 @@ public struct SavedLogin: Equatable, Sendable {
   public var usage: UsageRecord?
 }
 
+public struct LiveItem: Equatable, Sendable { public var bytes: Data? }   // nil: no item
+
 public struct Store: Sendable {
   public init(paths: Paths) throws                 // mkdir store 0700; open/create db 0600; apply schema
   public func list(_ p: Provider) throws -> [SavedLogin]              // sorted by SlotName
@@ -292,6 +299,7 @@ public struct Store: Sendable {
   public func liveName(_ p: Provider, live: Identity) throws -> SlotName
   public func installed(_ p: Provider) throws -> SlotName?
   public func pending(_ p: Provider) throws -> SlotName?          // nil when no install is in flight
+  public func adding(_ p: Provider) throws -> LiveItem?          // nil when no add is in flight
   public func write<T>(_ body: (Tx) throws -> T) throws -> T   // BEGIN IMMEDIATE … COMMIT; any throw rolls back and rethrows
 }
 public struct Tx {                                  // only inside `write`
@@ -302,6 +310,8 @@ public struct Tx {                                  // only inside `write`
   public func noteInstalled(_ p: Provider, _ n: SlotName) throws // upsert into live
   public func notePending(_ p: Provider, _ n: SlotName) throws   // upsert into pending
   public func clearPending(_ p: Provider) throws                 // no-op when absent
+  public func noteAdding(_ p: Provider, _ i: LiveItem) throws    // upsert into adding
+  public func clearAdding(_ p: Provider) throws                  // no-op when absent
 }
 ```
 
@@ -630,7 +640,7 @@ public protocol KeychainLister: Sendable {
 }
 public struct AddResult: Equatable { public var saved: SlotName; public var expected: String?; public var differs: Bool }
 public actor LoginRunner {
-  public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, lister: KeychainLister, searchPath: String)
+  public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, lister: KeychainLister, searchPath: String) throws
   public func add(_ p: Provider, expected email: String?) async throws -> AddResult
 }
 ```
@@ -643,44 +653,79 @@ shell (`$SHELL -lc`, PATH printed between markers so profile output cannot
 pollute it), because an app started from Finder or a login item inherits
 only the system default PATH, which lacks the CLIs.
 
+`init` undoes an add the app did not live to finish before anything reads
+the live login: when `store.adding(.claude)` holds a record, it stops that
+login if it still runs, puts the live item back as in 5, and removes
+`paths.loginRoot(.claude)`.
+
+`add` holds a per-provider lease from its first line to its return, across
+every await. Every login of a provider uses the same root, so a second `add`
+for a provider whose login is in flight throws `loginRunning` rather than
+queueing.
+
 1. `claude`/`codex` must be on `searchPath` (`noCLI`); the script runs the
    one found. Root = `paths.loginRoot(p)`:
    remove, create 0700, create `root/.claude` or `root/.codex`.
-2. Claude only: snapshot `before`, the bytes of every item in
-   `lister.services(prefix: keychainService)` but the live one, and
-   `liveBytes = KeychainItem.read()`.
-3. Write `root/login.command` (0700):
+2. Write `root/login.command` (0700):
    ```sh
    #!/bin/sh
+   printf '%s' "$$" > "<root>/pid.tmp" && ln "<root>/pid.tmp" "<root>/pid" || exit 1
    export CLAUDE_CONFIG_DIR="<root>/.claude"      # or CODEX_HOME="<root>/.codex"
+   report() { printf '%s' "$1" > "<root>/exit.tmp" && mv "<root>/exit.tmp" "<root>/exit"; }
+   trap 'report 129; exit 129' HUP                # INT 130 and TERM 143 alike
    printf 'Sign in to %s at %s in your browser, then press Enter to continue: ' '<email or "the account to add">' '<site>'
    read -r _
    claude auth login --email '<email>'            # or: codex login   (no --email without one)
    rc=$?
-   printf '%s' "$rc" > "<root>/exit.tmp" && mv "<root>/exit.tmp" "<root>/exit"
+   trap - HUP INT TERM
+   report "$rc"
    if [ "$rc" -ne 0 ]; then printf '\nPress Enter to close\n'; read -r _; fi
    exit "$rc"
    ```
-   Shell-quote every interpolated value. `terminal.open(script)`.
-4. Wait for `root/exit` (directory watch via `DispatchSource`, plus a 1 s
-   poll as belt and braces). Non-zero → `loginFailed`.
-5. Locate the new credentials (Claude), in this order, first hit wins:
+   Shell-quote every interpolated value. The hard link publishes the pid
+   whole and fails when the name exists, so a stop can claim it first.
+3. Claude only: snapshot `before`, the bytes of every item in
+   `lister.services(prefix: keychainService)` but the live one, and `old`,
+   the live item's bytes (`KeychainItem.read()`). Commit
+   `tx.noteAdding(.claude, LiveItem(bytes: old))` before the launch.
+4. `terminal.open(script)`, then wait for `root/exit` (directory watch via
+   `DispatchSource`, plus a 1 s poll as belt and braces). A wait that ends
+   without a status (the task was cancelled, the file is unreadable) or a
+   failed open stops the login, then rethrows.
+5. Claude only, whatever 4 ended in: put the live item back. Bytes that
+   differ from `old` are kept as `written`, and `old` is written back
+   (the item removed when `old` is nil); then `tx.clearAdding`. A restore
+   that fails leaves the record for the next start. Then a non-zero status
+   → `loginFailed`.
+6. Locate the new credentials (Claude), reading only, first hit wins:
    a. `root/.claude/.credentials.json` exists → its bytes.
    b. a non-live prefixed item that is new or whose bytes differ from
-      `before` → keep its bytes, delete the item. Content, not name
+      `before` → its bytes; the item is the source. Content, not name
       novelty: the login home's fixed path always names the same item, and
       an earlier add killed before its removal leaves that item behind.
-   c. `KeychainItem.read() != liveBytes` → the login overwrote the live
-      item: keep the new bytes, write `liveBytes` back (or remove when it
-      was nil).
+   c. `written` → the login overwrote the live item.
    d. → `loginProducedNothing`.
-6. `switcher.importLogin(p, root, claudeCreds)`; probe the new account
-   (`live: false`) and `write` its usage; remove root. `differs` = expected
-   email given and `saved.email != expected`.
+7. `switcher.importLogin(p, root, claudeCreds)`. Only once it has committed
+   are the source item (6b) deleted and root removed: a failed import leaves
+   both in place and throws its error. Then probe the new account
+   (`live: false`) and `write` its usage. `differs` = expected email given
+   and `saved.email != expected`. Any failure before 7 removes root.
+
+Stopping a login: claim `root/pid` by an exclusive create. When that
+succeeds the script has not filed its pid and, its link failing, exits
+without running the login; a missing root has nothing running from it.
+Otherwise the file holds the script's pid. When that process still runs
+the script (its arguments name `root/login.command`; a pid since reused
+names something else), SIGTERM goes to its process group, which ends the
+CLI and makes the script report as for a closed window, and SIGKILL follows
+after 5 s.
 
 The live login is never read by the provider's login command and never
-revoked: the throwaway home guarantees that on Codex; on Claude the snapshot
-restore in 5c covers a Keychain-writing login.
+revoked: the throwaway home guarantees that on Codex; on Claude the restore
+in 5 covers a Keychain-writing login on every outcome, and the `adding`
+record carries it across a crash to the next start. Credentials a login
+wrote only over the live item (6c) are lost when the import fails: the live
+login comes first.
 
 ## KibaApp
 

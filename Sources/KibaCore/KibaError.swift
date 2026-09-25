@@ -8,6 +8,7 @@ public enum KibaError: Error, Equatable, Sendable {
     case badJSON(String)
     case loginFailed(Int32)
     case loginProducedNothing(Provider)
+    case loginRunning(Provider)
     case noCLI(String)
     case mismatch(Provider, String)
     case mixed
@@ -35,6 +36,8 @@ extension KibaError {
             return "the provider login did not complete (exit \(status))"
         case .loginProducedNothing(let p):
             return "the \(p.title) login finished but left no credentials to save"
+        case .loginRunning(let p):
+            return "a \(p.title) login is already running"
         case .noCLI(let name):
             return "\(name) is not on PATH"
         case .mismatch(let p, let name):

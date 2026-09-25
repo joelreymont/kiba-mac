@@ -22,6 +22,15 @@ public struct SavedLogin: Equatable, Sendable {
     }
 }
 
+/// A live Keychain item's bytes at one moment; nil when there was no item.
+public struct LiveItem: Equatable, Sendable {
+    public var bytes: Data?
+
+    public init(bytes: Data?) {
+        self.bytes = bytes
+    }
+}
+
 /// Every saved account, in one SQLite database. The value holds only the
 /// database URL and every call opens its own connection, so it is `Sendable`
 /// without a mutex; a write transaction is the cross-process mutex.
@@ -53,6 +62,10 @@ public struct Store: Sendable {
         CREATE TABLE IF NOT EXISTS pending (
           provider TEXT PRIMARY KEY,
           name     TEXT NOT NULL
+        ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS adding (
+          provider TEXT PRIMARY KEY,
+          live     BLOB
         ) WITHOUT ROWID;
         """
 
@@ -110,6 +123,16 @@ public struct Store: Sendable {
     /// The name whose install began and has not finished; nil when none is in flight.
     public func pending(_ p: Provider) throws -> SlotName? {
         try name("SELECT name FROM pending WHERE provider = ?", "pending", p)
+    }
+
+    /// The live item an add's login may overwrite, as it was before that login
+    /// ran; nil when no add is in flight.
+    public func adding(_ p: Provider) throws -> LiveItem? {
+        var item: LiveItem?
+        try Connection(db).query("SELECT live FROM adding WHERE provider = ?", "adding", [.text(p.rawValue)]) {
+            item = LiveItem(bytes: $0.blob(0))
+        }
+        return item
     }
 
     /// Runs `body` in one `BEGIN IMMEDIATE` transaction and commits; any throw
@@ -210,6 +233,21 @@ public struct Tx {
     /// Nothing to do when no install is pending.
     public func clearPending(_ p: Provider) throws {
         try conn.run("DELETE FROM pending WHERE provider = ?", "clear pending", [.text(p.rawValue)])
+    }
+
+    /// Records an add's login as begun, with the live item it must leave as
+    /// it found; committed before the login is launched.
+    public func noteAdding(_ p: Provider, _ item: LiveItem) throws {
+        try conn.run(
+            """
+            INSERT INTO adding (provider, live) VALUES (?, ?)
+            ON CONFLICT (provider) DO UPDATE SET live = excluded.live
+            """, "note adding", [.text(p.rawValue), .blob(item.bytes)])
+    }
+
+    /// Nothing to do when no add is in flight.
+    public func clearAdding(_ p: Provider) throws {
+        try conn.run("DELETE FROM adding WHERE provider = ?", "clear adding", [.text(p.rawValue)])
     }
 
     static func usageText(_ u: UsageRecord) -> String {
