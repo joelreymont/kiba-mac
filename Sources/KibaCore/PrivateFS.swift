@@ -111,15 +111,30 @@ public enum PrivateFS {
     }
 
     /// Whether `url` is a regular file, following links. Only nothing there
-    /// (`ENOENT`, `ENOTDIR`) is false; any other failure, such as a link loop
-    /// or a directory on the way that cannot be searched, is `io`.
+    /// (`ENOENT`, `ENOTDIR`) is false. Anything else is `io`: a path that
+    /// cannot be inspected, such as a link loop or a directory on the way
+    /// that cannot be searched, and another kind of file, named.
     public static func isFile(_ url: URL) throws -> Bool {
         var st = stat()
         guard stat(url.path, &st) == 0 else {
             guard errno == ENOENT || errno == ENOTDIR else { throw KibaError.io(failure("stat", url.path)) }
             return false
         }
-        return st.st_mode & S_IFMT == S_IFREG
+        let kind = st.st_mode & S_IFMT
+        guard kind == S_IFREG else { throw KibaError.io("\(url.path) is \(kindName(kind)), not a regular file") }
+        return true
+    }
+
+    /// How an error names a kind of file that is not a regular one.
+    static func kindName(_ kind: mode_t) -> String {
+        switch kind {
+        case S_IFDIR: "a directory"
+        case S_IFIFO: "a FIFO"
+        case S_IFSOCK: "a socket"
+        case S_IFCHR: "a character device"
+        case S_IFBLK: "a block device"
+        default: "a special file"
+        }
     }
 
     /// Whether `url` can be seen to be a regular file, following links; a path

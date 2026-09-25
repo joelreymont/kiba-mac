@@ -24,7 +24,7 @@ scratch directory with no network and no real Keychain:
 
 | Effect            | Protocol / type      | Production                         | Tests                     |
 |-------------------|----------------------|------------------------------------|---------------------------|
-| paths             | `Paths(env:username:keychainService:)` | process env      | scratch HOME, `kiba-mac-test-<uuid>` service |
+| paths             | `Paths(env:username:keychainService:)` | process env      | scratch HOME, `kiba-mac-test-<uuid>` base service |
 | saved accounts    | `Store`              | SQLite at `paths.db`               | SQLite in the scratch store |
 | secret bytes      | `SecretStore`        | `KeychainItem`, `FileSecret`       | `MemorySecret`, `FileSecret` |
 | HTTP              | `HTTPClient`         | `URLSessionClient`                 | `StubHTTP`                |
@@ -99,11 +99,21 @@ public struct Paths: Sendable {
   public func codexHome(root: URL?) -> URL         // root/.codex | $CODEX_HOME | $HOME/.codex
   public func codexAuthFile(root: URL?) -> URL     // <home>/auth.json
   public let username: String                      // Keychain account attribute
-  public let keychainService: String               // Paths.claudeService = "Claude Code-credentials", tests pass their own
-  public var loginService: String                  // keychainService + "-" + first 8 hex digits of
-                                                   // SHA-256(NFC claudeConfigDir(root: loginRoot(.claude)).path)
+  // Claude Keychain services derive from a base, `keychainService:` in
+  // init: Paths.claudeService = "Claude Code-credentials", tests pass
+  // their own `kiba-mac-test-<uuid>`. service(dir) is Claude Code's
+  // (2.1.282): base alone when CLAUDE_CONFIG_DIR is unset or empty, else
+  // base + "-" + the first 8 lowercase hex digits of SHA-256 over the
+  // UTF-8 of dir in NFC, the string as given (a trailing slash counts).
+  public let keychainService: String               // service($CLAUDE_CONFIG_DIR): the live item
+  public var loginService: String                  // service(claudeConfigDir(root: loginRoot(.claude)).path)
 }
 ```
+
+The app hands `Paths` its own environment, so the live item is the one
+Claude Code keeps for the config dir the app was given: were it always the
+bare service, a `CLAUDE_CONFIG_DIR` profile's identity would be paired with
+the default profile's tokens.
 
 ### SlotName
 
@@ -136,6 +146,7 @@ public enum PrivateFS {
   public static func removeTree(_ url: URL) throws
   public static func writeTarget(_ url: URL) throws -> URL   // follows ≤ 8 symlink hops; throws unsafePath if still a link
   public static func isFile(_ url: URL) throws -> Bool       // regular file; false only for ENOENT/ENOTDIR, else io
+                                                             // (another kind: io("<path> is a directory, not a regular file"))
   public static func exists(_ url: URL) -> Bool              // regular file; uninspectable reads as absent (PATH search)
   public static func isDir(_ url: URL) -> Bool
 }
@@ -184,7 +195,11 @@ string escapes and no raw control byte in a string, JSON number grammar
 located, never decoded. Reading fields (`JSONFields`: `str`, `obj`, `num`,
 `int`, …) runs the same scan over the same bytes and builds a tree whose
 numbers keep their spelling, read as `Decimal` without a binary
-floating-point step; `JSONDoc` only locates spans for writes.
+floating-point step; `JSONDoc` only locates spans for writes. Both key
+members by their decoded bytes (a lone surrogate as generalized UTF-8), so
+keys Swift strings would merge (`é` composed and decomposed, two lone
+surrogates) stay distinct: only keys equal in bytes repeat. A key the app
+names is looked up by its UTF-8.
 
 ### Identity
 
@@ -254,10 +269,13 @@ The live Claude credential store is chosen by existence, never by platform:
 ```swift
 public enum ClaudeSecrets {
   public static func live(paths: Paths, root: URL?) -> SecretStore
-  // FileSecret(<configDir>/.credentials.json) when that file exists,
-  // else KeychainItem(paths.keychainService, paths.username); chosen again
-  // at every read and write. Only a missing file (ENOENT, ENOTDIR) selects
-  // the Keychain; one that cannot be inspected (EACCES, ELOOP, …) is io.
+  // FileSecret(<configDir>/.credentials.json) when that is a regular file,
+  // else KeychainItem(paths.keychainService, paths.username): the item
+  // Claude Code keeps for $CLAUDE_CONFIG_DIR (see Paths). Chosen again at
+  // every read and write. Only a missing file (ENOENT, ENOTDIR) selects the
+  // Keychain; one that cannot be inspected (EACCES, ELOOP, …) is io, and so
+  // is another kind of file there (a directory, FIFO, socket, device),
+  // named in the reason; nothing is read or written then.
 }
 ```
 
@@ -742,10 +760,13 @@ derives its service from the config dir:
 `dir = ($CLAUDE_CONFIG_DIR ?? ~/.claude)` in NFC; the service is
 `Claude Code-credentials`, plus `-` and the first 8 lowercase hex digits of
 SHA-256 of `dir`'s UTF-8 bytes when `CLAUDE_CONFIG_DIR` is set and non-empty;
-the account is `$USER`, else the login name. The login script exports
+the account is `$USER`, else the login name. `Paths` holds that
+derivation once: the login script exports
 `claudeConfigDir(root: loginRoot(.claude)).path`, so `paths.loginService`
-names that item (`keychainService` stands in for the base service). Items
-of other config dirs, which refresh on their own, are never read.
+names that item, and `paths.keychainService` the live one, the item of the
+app's own `CLAUDE_CONFIG_DIR` (tests' base service stands in for
+`Claude Code-credentials`). Items of other config dirs, which refresh on
+their own, are never read.
 `searchPath` is the PATH searched for the CLIs; `CoreBackend` takes it from
 the user's login shell (`$SHELL -lc`, PATH printed between markers so
 profile output cannot pollute it), because an app started from Finder or a

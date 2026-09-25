@@ -9,26 +9,31 @@ public struct Paths: Sendable {
     public let store: URL
     /// Keychain account attribute of the live Claude credentials.
     public let username: String
-    /// Keychain service of the live Claude credentials.
+    /// Keychain service of the live Claude credentials: Claude Code's for
+    /// `$CLAUDE_CONFIG_DIR`.
     public let keychainService: String
 
     /// The service Claude Code files its credentials under.
     public static let claudeService = "Claude Code-credentials"
 
+    /// The service every Claude Keychain item name derives from.
+    private let baseService: String
     private let home: URL
     private let claudeEnv: URL?
     private let codexEnv: URL?
 
     /// Throws `io` when `HOME` is unset or empty, or when `HOME`,
     /// `CLAUDE_CONFIG_DIR` or `CODEX_HOME` is set to a path not starting with `/`.
-    /// Tests name a throwaway `keychainService`; the app keeps Claude Code's.
-    public init(env: [String: String], username: String, keychainService: String = Self.claudeService) throws {
+    /// Tests name a throwaway base `keychainService`; the app keeps Claude Code's.
+    public init(env: [String: String], username: String, keychainService base: String = Self.claudeService) throws {
         guard let home = try Self.dir(env, Var.home) else { throw KibaError.io("HOME is not set") }
         self.home = home
         self.username = username
-        self.keychainService = keychainService
+        baseService = base
         store = Name.storeParts.reduce(home, Self.child)
-        claudeEnv = try Self.dir(env, Provider.claude.homeVar)
+        let claudeVar = try Self.value(env, Provider.claude.homeVar)
+        claudeEnv = claudeVar.map(Self.url)
+        keychainService = Self.service(base, dir: claudeVar)
         codexEnv = try Self.dir(env, Provider.codex.homeVar)
     }
 
@@ -40,14 +45,20 @@ public struct Paths: Sendable {
     /// Throwaway home for a provider login run by `add`.
     public func loginRoot(_ p: Provider) -> URL { Self.child(probe, Name.loginPrefix + p.rawValue) }
 
-    /// Keychain service of the Claude login `add` runs. That login exports its
-    /// config dir as `CLAUDE_CONFIG_DIR`, so Claude Code (2.1.282) files its
-    /// credentials under `keychainService`, `-`, and the first hex digits of
-    /// the SHA-256 of that path in NFC.
+    /// Keychain service of the Claude login `add` runs, which exports this
+    /// config dir as `CLAUDE_CONFIG_DIR`.
     public var loginService: String {
-        let dir = claudeConfigDir(root: loginRoot(.claude)).path.precomposedStringWithCanonicalMapping
-        let hex = KeychainItem.hex(Data(SHA256.hash(data: Data(dir.utf8))))
-        return keychainService + Name.serviceSeparator + String(decoding: hex.prefix(Name.serviceHashDigits), as: UTF8.self)
+        Self.service(baseService, dir: claudeConfigDir(root: loginRoot(.claude)).path)
+    }
+
+    /// The Keychain service Claude Code (2.1.282) files credentials under
+    /// when `CLAUDE_CONFIG_DIR` is `dir`: `base` alone when it is unset, else
+    /// `base`, `-`, and the first hex digits of the SHA-256 of `dir` in NFC,
+    /// hashed as given, trailing slash and all.
+    private static func service(_ base: String, dir: String?) -> String {
+        guard let dir else { return base }
+        let hex = KeychainItem.hex(Data(SHA256.hash(data: Data(dir.precomposedStringWithCanonicalMapping.utf8))))
+        return base + Name.serviceSeparator + String(decoding: hex.prefix(Name.serviceHashDigits), as: UTF8.self)
     }
 
     /// `root/.claude`, else `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
@@ -78,14 +89,24 @@ public struct Paths: Sendable {
         root.map { Self.child($0, Name.claudeDir) } ?? claudeEnv
     }
 
-    /// The directory an environment variable names; unset and empty both mean
-    /// absent. `URL(filePath:)` expands a leading `~` with the process's real
-    /// home and resolves other relative paths against the working directory;
-    /// a value starting with `/` reaches neither, so nothing escapes `env`.
+    /// The directory an environment variable names; unset and empty both mean absent.
     private static func dir(_ env: [String: String], _ name: String) throws -> URL? {
+        try value(env, name).map(url)
+    }
+
+    /// The absolute path an environment variable holds, as given; unset and
+    /// empty both mean absent. `URL(filePath:)` expands a leading `~` with the
+    /// process's real home and resolves other relative paths against the
+    /// working directory; a value starting with `/` reaches neither, so
+    /// nothing escapes `env`.
+    private static func value(_ env: [String: String], _ name: String) throws -> String? {
         guard let value = env[name], !value.isEmpty else { return nil }
         guard value.utf8.first == Name.root else { throw KibaError.io("\(name) is not an absolute path: \(value)") }
-        return URL(filePath: value, directoryHint: .notDirectory)
+        return value
+    }
+
+    private static func url(_ path: String) -> URL {
+        URL(filePath: path, directoryHint: .notDirectory)
     }
 
     private static func child(_ url: URL, _ name: String) -> URL {

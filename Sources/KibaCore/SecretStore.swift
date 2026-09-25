@@ -160,8 +160,9 @@ public struct KeychainItem: SecretStore {
 
 /// The live Claude Code credential store, chosen by what exists rather than by
 /// platform, afresh at every access: a `.credentials.json` in the config dir
-/// wins, else the Keychain item. Only a file that is not there selects the
-/// Keychain; one that cannot be inspected is an error, never another store.
+/// wins, else the Keychain item Claude Code keeps for that dir. Only a file
+/// that is not there selects the Keychain; one that cannot be inspected, or
+/// that is not a regular file, is an error, never another store.
 public enum ClaudeSecrets {
     public static func live(paths: Paths, root: URL?) -> SecretStore {
         LiveSecret(
@@ -170,7 +171,8 @@ public enum ClaudeSecrets {
     }
 }
 
-/// A secret in `file` when that is a regular file, else in `item`.
+/// A secret in `file` when that is a regular file, in `item` when nothing is
+/// there, else nowhere: `PrivateFS.isFile` throws.
 struct LiveSecret: SecretStore {
     let file: FileSecret
     let item: KeychainItem

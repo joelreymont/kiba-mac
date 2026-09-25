@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import KibaCore
 import SQLite3
@@ -273,16 +274,24 @@ import os
 @Test func switchMovesKeychainLiveLogin() async throws {
     try ensureKeychain()
     let service = "\(Fixed.keychainPrefix)\(UUID().uuidString)"
-    let item = KeychainItem(service: service, account: Fixed.user)
-    defer { #expect(throws: Never.self) { try item.remove() } }
     try await scratch(keychainService: service) { w in
+        // Claude Code names the live item after the config dir it was given;
+        // the item of the default dir holds another login and is never read.
+        let item = KeychainItem(service: "\(service)-\(try dirHash(w))", account: Fixed.user)
+        let bare = KeychainItem(service: service, account: Fixed.user)
+        defer { #expect(throws: Never.self) { try item.remove() } }
+        defer { #expect(throws: Never.self) { try bare.remove() } }
         let (ax, bx) = (try slot("a@x"), try slot("b@x"))
         let liveCreds = claudeCreds("xa2", plan: "max", expires: Fixed.now + Fixed.day)
         let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        let bareCreds = claudeCreds("xz", plan: "team", expires: Fixed.now + Fixed.day)
         let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
         // No credentials file: the live login is the Keychain item.
         try claudeConfig(profA).write(to: w.paths.claudeConfigFile(root: nil))
         try item.write(liveCreds)
+        try bare.write(bareCreds)
+        let before = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        #expect(before?.live == LiveLogin(email: "a@x", plan: "max"))
         try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
                    login: claudeCreds("xa1", plan: "max", expires: Fixed.now), profile: profA)
         try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB)
@@ -292,6 +301,7 @@ import os
         try await w.switcher(http).use(.claude, bx)
 
         #expect(try item.read() == credsB)
+        #expect(try bare.read() == bareCreds)
         #expect(w.read(w.paths.claudeCredsFile(root: nil)) == nil)
         #expect(w.read(w.paths.claudeConfigFile(root: nil)) == claudeConfig(profB))
         #expect(try w.store.fetch(.claude, ax)?.login == liveCreds)
@@ -1140,9 +1150,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 @Test func addFindsLoginKeychainItem() async throws {
     try ensureKeychain()
     let service = "\(Fixed.keychainPrefix)\(UUID().uuidString)"
-    let live = KeychainItem(service: service, account: Fixed.user)
-    defer { #expect(throws: Never.self) { try live.remove() } }
     try await scratch(keychainService: service) { w in
+        let live = KeychainItem(service: w.paths.keychainService, account: Fixed.user)
+        defer { #expect(throws: Never.self) { try live.remove() } }
         let found = KeychainItem(service: w.paths.loginService, account: Fixed.user)
         defer { #expect(throws: Never.self) { try found.remove() } }
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
@@ -1168,6 +1178,48 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+@Test func credsPathOfAnotherKindIsAnError() async throws {
+    // Were the directory passed over, the Keychain item would be read and written.
+    try ensureKeychain()
+    try await scratch(keychainService: "\(Fixed.keychainPrefix)\(UUID().uuidString)") { w in
+        let item = KeychainItem(service: w.paths.keychainService, account: Fixed.user)
+        defer { #expect(throws: Never.self) { try item.remove() } }
+        let ax = try slot("a@x")
+        let prof = profile("a@x", org: "org-a")
+        try claudeConfig(prof).write(to: w.paths.claudeConfigFile(root: nil))
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
+                   login: claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day), profile: prof)
+        let creds = w.paths.claudeCredsFile(root: nil)
+        try FileManager.default.createDirectory(at: creds, withIntermediateDirectories: false)
+        let refused = KibaError.io("\(creds.path) is a directory, not a regular file")
+
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        #expect(claude?.error == refused.reason)
+        #expect(throws: refused) { try w.switcher(StubHTTP([])).save(.claude) }
+        await #expect(throws: refused) { try await w.switcher(StubHTTP([])).use(.claude, ax) }
+
+        #expect(try item.read() == nil)
+        #expect(try w.store.installed(.claude) == nil)
+    }
+}
+
+@Test func profileKeysDistinctOnlyInBytesRead() async throws {
+    try await scratch { w in
+        // Distinct JSON keys that equal Swift strings would merge: é composed
+        // and decomposed, and two lone surrogates.
+        let prof = Data(#"""
+            { "é": 1, "e\u0301": 2, "\ud800": 3, "\udbff": 4, "emailAddress": "a@x", "organizationUuid": "org-a" }
+            """#.utf8)
+        try w.writeClaude(config: claudeConfig(prof), creds: claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day))
+
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        #expect(claude?.error == nil)
+        #expect(claude?.live == LiveLogin(email: "a@x", plan: "max"))
+        #expect(try w.switcher(StubHTTP([])).save(.claude) == slot("a@x"))
+        #expect(try w.store.fetch(.claude, slot("a@x"))?.profile == prof)
+    }
+}
+
 // MARK: - World
 
 enum Fixed {
@@ -1189,6 +1241,9 @@ enum Fixed {
     /// lookup cannot reach real credentials.
     static let user = "kiba-mac-test-user"
     static let keychainPrefix = "kiba-mac-test-"
+    /// Claude Code keeps 8 hex digits of a config dir's hash: 4 bytes.
+    static let hashBytes = 4
+    static let hexByte = "%02x"
     /// The service of tests that never touch the Keychain: no item is ever filed under it.
     static let noKeychain = "kiba-mac-test-none"
     /// How long the app model may take to finish a read or an action.
@@ -1492,6 +1547,13 @@ func ensureKeychain() throws {
 }
 
 // MARK: - Fixtures
+
+/// What Claude Code appends to its Keychain service for the config dir `w`
+/// gives it: the first hex digits of the SHA-256 of that path.
+func dirHash(_ w: World) throws -> String {
+    let dir = try #require(w.env[Provider.claude.homeVar])
+    return SHA256.hash(data: Data(dir.utf8)).prefix(Fixed.hashBytes).map { String(format: Fixed.hexByte, $0) }.joined()
+}
 
 func slot(_ raw: String) throws -> SlotName {
     try #require(SlotName(raw))
