@@ -9,9 +9,14 @@ enum Theme {
 
     /// Light values hold 3:1 against the track on the popover material; the
     /// red holds 4.5:1 as text on both appearances (Apple's contrast criteria).
-    static let roomNS = dynamic(light: 0x1F7F52, dark: 0x4FC08A)
-    static let lowNS = dynamic(light: 0x9E6A0E, dark: 0xE2A93B)
-    static let outNS = dynamic(light: 0xB52F2F, dark: 0xF07070)
+    /// Under Increase Contrast each holds 7:1 against the window background
+    /// and 3:1 against the raised track.
+    static let roomNS = dynamic(
+        light: rgb(0x1F7F52), dark: rgb(0x4FC08A), lightContrast: rgb(0x0F5132), darkContrast: rgb(0x6FD9A4))
+    static let lowNS = dynamic(
+        light: rgb(0x9E6A0E), dark: rgb(0xE2A93B), lightContrast: rgb(0x6B4700), darkContrast: rgb(0xF2C263))
+    static let outNS = dynamic(
+        light: rgb(0xB52F2F), dark: rgb(0xF07070), lightContrast: rgb(0x8F1F1F), darkContrast: rgb(0xFFAAAA))
 
     /// Reservoir segments with half or more left.
     static let room = Color(nsColor: roomNS)
@@ -23,9 +28,10 @@ enum Theme {
     static let idle = Color(nsColor: .secondaryLabelColor)
     /// Names and figures: text is never colored by state, the bars are.
     static let ink = Color(nsColor: .labelColor)
-    /// Empty reservoir; `trackContrast` under Increase Contrast.
-    static let track = Color(nsColor: .quaternaryLabelColor)
-    static let trackContrast = Color(nsColor: .tertiaryLabelColor)
+    /// Empty reservoir, raised a step under Increase Contrast.
+    static let track = Color(nsColor: dynamic(
+        light: .quaternaryLabelColor, dark: .quaternaryLabelColor,
+        lightContrast: .tertiaryLabelColor, darkContrast: .tertiaryLabelColor))
     /// The active account's name; the limit-reset badge's fill.
     static let accent = Color.accentColor
     /// Text on an `accent` fill: the badge's count.
@@ -45,7 +51,8 @@ enum Theme {
 
     // MARK: Type
 
-    /// System text styles only, so Bold Text and the system's weights apply.
+    /// System text styles, the HIG's type for Mac text: each size and weight
+    /// is the style's macOS default, never a fixed point size.
     static let title = Font.title3.bold()
     static let section = Font.headline
     static let name = Font.body
@@ -60,7 +67,7 @@ enum Theme {
 
     static let width: CGFloat = 340
     /// Height cap until a screen is known; the screen's visible height less
-    /// `screenInset` replaces it. Taller content scrolls, without indicators.
+    /// `screenInset` replaces it. Taller content scrolls.
     static let maxHeight: CGFloat = 600
     /// Room for the popover arrow and shadow under the menu bar.
     static let screenInset: CGFloat = 24
@@ -114,10 +121,22 @@ enum Theme {
     /// Row fill of the active account.
     static let current = 0.05
 
-    private static func dynamic(light: UInt32, dark: UInt32) -> NSColor {
+    /// The appearances a color resolves for: light, dark, and each under
+    /// Increase Contrast.
+    private static let looks: [NSAppearance.Name] = [
+        .aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua,
+    ]
+
+    private static func dynamic(
+        light: NSColor, dark: NSColor, lightContrast: NSColor, darkContrast: NSColor
+    ) -> NSColor {
         NSColor(name: nil) { look in
-            let isDark = look.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return rgb(isDark ? dark : light)
+            switch look.bestMatch(from: looks) {
+            case .darkAqua?: dark
+            case .accessibilityHighContrastAqua?: lightContrast
+            case .accessibilityHighContrastDarkAqua?: darkContrast
+            default: light
+            }
         }
     }
 

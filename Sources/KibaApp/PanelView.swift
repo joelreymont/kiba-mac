@@ -12,7 +12,7 @@ struct PanelView: View {
                 ScrollView(.vertical) {
                     content
                 }
-                .scrollIndicators(.hidden)
+                .scrollIndicators(.automatic)
                 .scrollBounceBehavior(.basedOnSize)
                 .onChange(of: model.scrollSerial) {
                     guard let k = model.scrollKey else { return }
@@ -22,7 +22,9 @@ struct PanelView: View {
         }
         .frame(width: Theme.width)
         .background(Backdrop())
-        .background(KeyCatcher(move: model.move, activate: model.activate, escape: model.escape))
+        .background(KeyCatcher(
+            move: model.move, activate: model.activate, escape: model.escape,
+            forget: model.forgetCursor, showMenu: { model.showMenu() }))
     }
 
     private var content: some View {

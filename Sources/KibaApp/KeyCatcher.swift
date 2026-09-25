@@ -2,16 +2,19 @@ import AppKit
 import SwiftUI
 
 /// Panel keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor, ⏎ and Space activate,
-/// ⎋ backs out or closes. An invisible AppKit view that takes first
-/// responder whenever the panel's window becomes key, and reads keys through
-/// the standard key bindings. Holding first responder is safe because the
-/// panel has no text field or other control that reads keys, and the cursor
-/// reaches every control a click can, so it replaces the key-view loop
-/// rather than hiding a control from it.
+/// ⌫ and ⌦ ask to forget the cursor's account, the system's context-menu
+/// key opens the app menu, ⎋ backs out or closes. An invisible AppKit view
+/// that takes first responder whenever the panel's window becomes key, and
+/// reads keys through the standard key bindings. Holding first responder is
+/// safe because the panel has no text field or other control that reads
+/// keys, and the cursor reaches every control a click can, so it replaces
+/// the key-view loop rather than hiding a control from it.
 struct KeyCatcher: NSViewRepresentable {
     let move: (Int) -> Void
     let activate: () -> Void
     let escape: () -> Void
+    let forget: () -> Void
+    let showMenu: () -> Void
 
     func makeNSView(context: Context) -> KeyView {
         let v = KeyView()
@@ -27,6 +30,8 @@ struct KeyCatcher: NSViewRepresentable {
         v.move = move
         v.activate = activate
         v.escape = escape
+        v.forget = forget
+        v.showMenu = showMenu
     }
 }
 
@@ -34,6 +39,8 @@ final class KeyView: NSView {
     var move: (Int) -> Void = { _ in }
     var activate: () -> Void = {}
     var escape: () -> Void = {}
+    var forget: () -> Void = {}
+    var showMenu: () -> Void = {}
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -95,6 +102,22 @@ final class KeyView: NSView {
 
     override func cancelOperation(_ sender: Any?) {
         escape()
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        forget()
+    }
+
+    override func deleteForward(_ sender: Any?) {
+        forget()
+    }
+
+    /// The context-menu key (⌃⏎ unless the user changed it) reaches the
+    /// first responder first; the panel's menu is the app menu, as a right
+    /// click on the menu bar icon shows it.
+    @available(macOS 15, *)
+    override func showContextMenuForSelection(_ sender: Any?) {
+        showMenu()
     }
 
     private enum Key {

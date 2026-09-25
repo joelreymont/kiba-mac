@@ -932,8 +932,9 @@ default 120, min 15).
 
 - `refresh(force:)`: skip when the last good read was < 5 s ago unless
   forced; coalesce when one is running; `StatusReader.read()` on a
-  background task; success → snapshot, clear error; failure → availability
-  failed, error = reason.
+  background task; success → snapshot, availability ready, and the status
+  error cleared (action and probe errors stay until Dismiss or the next
+  action); failure → availability failed, status error = reason.
 - Opening the panel: reset cursor, `autoProbed = false`, `refresh()`, then
   `maybeAutoProbe()` (once per open when any provider has saved accounts and
   nothing is busy); start the interval refresh and the clock tick. Closing
@@ -980,8 +981,10 @@ default 120, min 15).
   "No limit resets left for <name>", cooldown "Limit resets are cooling
   down for <name>; try again later", ineligible "<name> cannot reset its
   limit", unavailable "Limit resets are unavailable for <name> right now".
-  Forget (context menu) and Reset (the row's badge) ask first through one
-  mechanism: `ask(kind, p, name)` sets `confirming`, the row turns into its
+  Forget (the row's context menu, or ⌫/⌦ on the row: `forgetCursor()` asks
+  for the cursor's account row and does nothing elsewhere) and Reset (the
+  row's badge) ask first through one mechanism: `ask(kind, p, name)` sets
+  `confirming`, the row turns into its
   confirmation and the cursor goes to Keep; the go button (`confirm`) runs
   the kind's action; Keep or ⎋ ends it and returns the cursor to the
   control that asked, the row or its badge. A confirmation ends with the
@@ -1003,8 +1006,17 @@ default 120, min 15).
 
 `NSStatusItem` with a custom 18×18 image drawn by `GaugeIcon`. Left click
 toggles an `NSPopover` (`.transient`, `NSVisualEffectView` `.popover`
-material) hosting `PanelView`; right click shows a menu: Refresh usage,
-Start at login, Quit. `LSUIElement` true. The icon
+material) hosting `PanelView`; right click, or Control-click with the mouse,
+shows the app menu: Refresh usage, Start at login, Quit. Only a mouse event
+counts as a right or Control-click: a press from the keyboard or VoiceOver
+(whose keys hold Control) toggles the panel. Keyboard and VoiceOver reach
+the menu two ways: the button's accessibility custom action "Show Menu"
+(VoiceOver's actions menu, VO-⌘-Space), which returns before the menu
+tracks; and, while the panel is open, the system's context-menu key (⌃⏎
+unless the user changed it; macOS 15 and later), which `KeyCatcher` takes
+as first responder and hands to the status item through `AppModel.showMenu`:
+the panel closes and the menu opens under the icon, as on a right click.
+`LSUIElement` true. The icon
 tooltip lists `<title>: <live email or none>` per provider, or "AI accounts"
 while unavailable. The button's accessibility value (`AppModel.iconValue`)
 names each provider's cell ("Codex: 80% left", "none left", "usage
@@ -1015,8 +1027,10 @@ and a click unregisters; `.notRegistered` shows off and a click registers,
 then opens Login Items settings if macOS asks for approval;
 `.requiresApproval` shows mixed, titled "Start at login (needs approval in
 Login Items)", and a click opens Login Items settings; `.notFound` shows off
-and a click reports `KibaError.loginItem`. A register or unregister failure
-is reported the same way.
+and a click registers like `.notRegistered`, since macOS has no record of an
+app before its first registration (Apple DTS). Only a register or unregister
+that throws, or a status newer than this build, is reported, as
+`KibaError.loginItem`.
 
 ### Visual design
 
@@ -1024,23 +1038,34 @@ Subject: allowance that drains and refills on a schedule. The panel's one job
 is to answer "which account has room, and how much". Everything is native
 material and system type except one signature and one risk.
 
-Tokens (`Theme.swift`):
+Tokens (`Theme.swift`). The custom colors resolve for four appearances:
+light (`aqua`), dark (`darkAqua`), and each under Increase Contrast
+(`accessibilityHighContrastAqua`, `accessibilityHighContrastDarkAqua`).
+Light values hold 3:1 against the track on the popover material and the
+red holds 4.5:1 as text on both; the Increase Contrast values hold 7:1
+against the window background and 3:1 against the raised track.
 
-| token   | light      | dark       | use                                   |
-|---------|------------|------------|---------------------------------------|
-| `room`  | `#2E9E6B`  | `#4FC08A`  | ok figures; segments half or more full |
-| `low`   | `#C98A1E`  | `#E2A93B`  | tight figures; segments under half    |
-| `out`   | `#C93B3B`  | `#E25555`  | blocked and dead figures, urgent icon |
-| `idle`  | secondary label color   | unknown figures, meta text         |
-| `ink`   | label color             | names                                |
-| `track` | quaternary label color  | empty reservoir                      |
-| accent  | `Color.accentColor`     | the active account's name; the badge |
+| token   | light     | dark      | light, contrast | dark, contrast | use |
+|---------|-----------|-----------|-----------------|----------------|-----|
+| `room`  | `#1F7F52` | `#4FC08A` | `#0F5132`       | `#6FD9A4`      | segments half or more full; the dot of a usable account |
+| `low`   | `#9E6A0E` | `#E2A93B` | `#6B4700`       | `#F2C263`      | segments under half |
+| `out`   | `#B52F2F` | `#F07070` | `#8F1F1F`       | `#FFAAAA`      | "limit", "log in again", errors, the red dot, Forget, the urgent icon |
+| `track` | quaternary label color | quaternary label color | tertiary label color | tertiary label color | empty reservoir |
+
+The rest are system colors, which follow every appearance themselves:
+
+| token      | color                                 | use |
+|------------|---------------------------------------|-----|
+| `idle`     | secondary label color                 | meta and plan text, the unknown dot, idle controls |
+| `ink`      | label color                           | names, figures, the row fill |
+| accent     | `Color.accentColor`                   | the active account's name; the badge |
 | `onAccent` | alternate selected control text color | the badge's count |
-| `focus` | keyboard focus indicator color | the ring on the badge under the cursor |
+| `focus`    | keyboard focus indicator color        | the ring on the badge under the cursor |
 
-Type: system text styles only, the HIG's recommendation for Mac text and
-the one choice that lets the system's weight and legibility settings apply
-where it honours them: title `.title3.bold()`; section headers
+Type: system text styles only, the HIG's recommendation for Mac text, so
+every size and weight is the style's macOS default rather than a fixed point
+size (macOS has no Dynamic Type; the panel claims no text scaling): title
+`.title3.bold()`; section headers
 `.headline` in sentence case ("Claude Code", "Codex"), `ink`; names `.body`
 (`.bold()` when active); meta and plan text `.subheadline`, `idle`; figures
 `.subheadline.monospacedDigit()` in `ink`; the badge's count
@@ -1051,13 +1076,16 @@ text and figures of a blocked or dead row) are `out`. Rows and actions are
 `Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
 is `Button("Add Claude Code account", systemImage: "plus")` (the
 provider's title), `.iconOnly`, `.accessoryBar` style. Reduce Transparency swaps the popover material for
-the window background; Increase Contrast lifts the empty track to
-`tertiaryLabelColor`; Reduce Motion stops the fill animation.
+the window background; Increase Contrast resolves every custom token to its
+contrast column, the empty track included; Reduce Motion stops the fill
+animation.
 
 Layout (width 340, vertical padding 10, row inset 10). The panel is as tall
 as its content, capped at the menu bar screen's visible height less 24 pt
-(measured before each show); taller content scrolls with no scroll
-indicators. Each provider's header line carries the add action at its
+(measured before each show); taller content scrolls, with the system's
+scroll indicators (`.automatic`: overlay scrollers show while it scrolls,
+or always under the "Show scroll bars: Always" setting). Each provider's
+header line carries the add action at its
 right, a standard plus button, `accent` under the keyboard cursor, tooltip
 its label, "Add Codex account"; there is no add row. Cursor order: Dismiss,
 Retry, then per section add, accounts (each followed by its badge), save,
@@ -1123,7 +1151,10 @@ Color. A click asks first, like Forget.
 
 Rows: no boxes; a row highlights with `ink` at 10 % under the pointer or the
 keyboard cursor, 5 % when active. One line: dot, name, plan, figures, badge.
-Plan and figures always fit at their full width; the name alone gives way,
+Plan and figures are short bounded strings (the login's one-word plan, a
+reset countdown or "log in again", a percentage per window or "limit"), so
+they always fit at their full width and one line always holds the row; the
+name alone gives way,
 laid out first (`layoutPriority`) with every point they leave and shortened
 in the middle ("nfnht45…leid.com") so both ends still name the account, as
 the original kiba did. The whole name is in the tooltip and the VoiceOver
@@ -1133,13 +1164,17 @@ one button: label "<Provider>: <name>" plus ", current account"; value the
 plan, the verdict ("has room"; "limit reached, resets in 5 h 12 min";
 "login required, log in again"; "usage not probed yet", the record's note,
 or "no limits reported"), each window "<label>: 72% left", and "probed 12
-min ago"; hint "Switches <Provider> to this account" or "Logs in to this
-account again". The dot and reservoir are hidden from it: the value says
+min ago"; hint "Switches <Provider> to this account" (none on the active
+row) or "Logs in to this account again", then "Delete asks to forget it",
+joined with ". ". The dot and reservoir are hidden from it: the value says
 what they show. Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
 Keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor (scrolling it into view), ⏎ and
-Space activate the cursor's control, ⎋ backs out of a confirmation,
-else closes; hover moves the cursor without scrolling. On a confirming row
+Space activate the cursor's control, ⌫ or ⌦ on an account row asks to
+forget it (the same confirmation as its context menu; the row's VoiceOver
+hint names it), the system's context-menu key opens the app menu (see
+Status item), ⎋ backs out of a confirmation, else closes; hover moves the
+cursor without scrolling. On a confirming row
 the cursor stops on its go button (Forget or Reset) and on Keep, each lit
 with the row fill behind its label. The control under the cursor is the accessibility focus, and a
 control VoiceOver focuses takes the cursor, so both always name one

@@ -1861,6 +1861,8 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(model.sections.first { $0.id == .codex }?.accounts.map(\.name) == [ay, by])
 }
 
+/// Delete on an account row asks to forget it, as its context menu does;
+/// on any other control it asks nothing.
 @MainActor @Test func appModelConfirmsForgetFromTheKeyboard() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
@@ -1869,13 +1871,20 @@ func members(_ body: Data?) throws -> [String: String] {
     model.start()
     try await settle(model)
 
-    model.ask(.forget, .codex, by)
+    model.move(-1)
+    #expect(model.cursor == .usage)
+    model.forgetCursor()
+    #expect(model.confirming == nil)
+    model.move(-1)
+    #expect(model.cursor == .use(.codex, by))
+    model.forgetCursor()
+    #expect(model.confirming == Choice(kind: .forget, provider: .codex, name: by))
     #expect(model.cursor == .keep(.codex, by))
     model.activate()
     #expect(model.confirming == nil)
     #expect(model.cursor == .use(.codex, by))
 
-    model.ask(.forget, .codex, by)
+    model.forgetCursor()
     model.move(-1)
     #expect(model.cursor == .confirm(.codex, by))
     model.activate()

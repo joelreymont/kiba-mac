@@ -151,9 +151,16 @@ struct AccountRow: View {
         }
     }
 
+    /// What a press does, then the Delete key's Forget.
     private func speechHint(_ state: RowState) -> String {
-        if state == .dead { return Copy.loginHint }
-        return account.active ? "" : "Switches \(provider.title) to this account"
+        var parts: [String] = []
+        if state == .dead {
+            parts.append(Copy.loginHint)
+        } else if !account.active {
+            parts.append("Switches \(provider.title) to this account")
+        }
+        parts.append(Copy.forgetHint)
+        return parts.joined(separator: Copy.hintSep)
     }
 
     /// The count of limit resets on offer; a click asks before spending one.
@@ -226,6 +233,8 @@ struct AccountRow: View {
         static let left = "% left"
         static let probed = "probed "
         static let loginHint = "Logs in to this account again"
+        static let forgetHint = "Delete asks to forget it"
+        static let hintSep = ". "
 
         static func forgetAsk(_ name: String) -> String {
             "Forget \(name)?"

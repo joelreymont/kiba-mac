@@ -163,6 +163,8 @@ final class AppModel {
 
     /// Closes the popover; the status item sets it.
     @ObservationIgnored var closePanel: () -> Void = {}
+    /// Closes the popover and opens the app menu; the status item sets it.
+    @ObservationIgnored var showMenu: () -> Void = {}
     /// Speaks what an action came to; the status item posts it to VoiceOver.
     @ObservationIgnored var announce: (String) -> Void = { _ in }
 
@@ -457,6 +459,12 @@ final class AppModel {
     func activate() {
         guard let c = cursor, actions.contains(c) else { return }
         trigger(c)
+    }
+
+    /// Delete on an account row: asks to forget it, as its context menu does.
+    func forgetCursor() {
+        guard case .use(let p, let n)? = cursor else { return }
+        ask(.forget, p, n)
     }
 
     /// Escape: backs out of a confirmation, else closes the panel.

@@ -12,17 +12,16 @@ struct ReservoirView: View {
     let drained: Bool
 
     @Environment(\.accessibilityReduceMotion) private var still
-    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         HStack(spacing: Theme.barGap) {
             if figures.isEmpty {
-                ForEach(0 ..< Self.unknownSegments, id: \.self) { _ in track(empty) }
+                ForEach(0 ..< Self.unknownSegments, id: \.self) { _ in track }
             }
             ForEach(Array(figures.enumerated()), id: \.offset) { _, f in
                 Level(fraction: drained ? 0 : Self.fraction(f))
                     .fill(Rows.isLow(f) ? Theme.low : Theme.room)
-                    .background(track(empty))
+                    .background(track)
             }
         }
         .frame(height: Theme.barHeight)
@@ -30,10 +29,8 @@ struct ReservoirView: View {
         .accessibilityHidden(true)
     }
 
-    private var empty: Color { contrast == .increased ? Theme.trackContrast : Theme.track }
-
-    private func track(_ color: Color) -> some View {
-        RoundedRectangle(cornerRadius: Theme.barRadius).fill(color)
+    private var track: some View {
+        RoundedRectangle(cornerRadius: Theme.barRadius).fill(Theme.track)
     }
 
     /// Session and week: the windows every provider reports.

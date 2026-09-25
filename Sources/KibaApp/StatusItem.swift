@@ -3,7 +3,8 @@ import ServiceManagement
 import SwiftUI
 
 /// The menu bar item: left click toggles the panel popover, right click (or
-/// control-click) shows the app menu.
+/// control-click) shows the app menu. Keyboard and VoiceOver reach the menu
+/// through the item's Show Menu action and the panel's context-menu key.
 @MainActor
 final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
     private let model: AppModel
@@ -36,8 +37,17 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
         button.target = self
         button.action = #selector(click(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        // The action returns before the menu tracks, so the assistive app
+        // that asked is not held while the menu stays open.
+        button.setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: Copy.showMenu) { [weak self] in
+                Task { @MainActor in self?.showMenu() }
+                return true
+            },
+        ])
 
         model.closePanel = { [weak self] in self?.popover.performClose(nil) }
+        model.showMenu = { [weak self] in self?.showMenu() }
         model.announce = { text in
             NSAccessibility.post(
                 element: NSApp as Any, notification: .announcementRequested,
@@ -70,9 +80,12 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
 
     // MARK: Clicks
 
+    /// Only a mouse click can be a right or control-click: a press from the
+    /// keyboard or VoiceOver (whose keys hold Control) toggles the panel.
     @objc private func click(_ sender: NSStatusBarButton) {
         guard let e = NSApp.currentEvent else { return toggle(sender) }
-        if e.type == .rightMouseUp || e.modifierFlags.contains(.control) {
+        let control = e.type == .leftMouseUp && e.modifierFlags.contains(.control)
+        if e.type == .rightMouseUp || control {
             showMenu()
         } else {
             toggle(sender)
@@ -179,6 +192,7 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
         static let login = "Start at login"
         static let loginApproval = "Start at login (needs approval in Login Items)"
         static let quit = "Quit"
+        static let showMenu = "Show Menu"
         static let unknownStatus = "macOS reports a login item status Kiba does not know"
     }
 }
