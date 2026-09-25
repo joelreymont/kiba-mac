@@ -324,7 +324,7 @@ final class Connection {
     /// Opens `url`, creating it 0600 when missing, in WAL mode.
     init(_ url: URL) throws {
         let path = url.path
-        let fresh = !PrivateFS.exists(url)
+        let fresh = try !PrivateFS.isFile(url)
         var db: OpaquePointer?
         let rc = sqlite3_open_v2(path, &db, Self.flags, nil)
         guard rc == SQLITE_OK, let db else {

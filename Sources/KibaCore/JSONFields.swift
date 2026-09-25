@@ -2,17 +2,20 @@ import Foundation
 
 /// Field reads on a parsed JSON object: a login document or a provider
 /// answer. Absent, null and mistyped members all read as nil, so an answer
-/// that lacks a window simply has no such window. Numbers read as `Decimal`,
-/// never as `Double`. Only for reading: a document that is rewritten is
-/// spliced through `JSONDoc`, never re-serialised from here.
+/// that lacks a window simply has no such window. The bytes are checked by the
+/// same scan as `JSONDoc`, and a document that repeats a key within one
+/// object is not read. Numbers keep their spelling and read as `Decimal`,
+/// never through a binary floating-point value. Only for reading: a document
+/// that is rewritten is spliced through `JSONDoc`, never re-serialised here.
 struct JSONFields {
-    private let fields: [String: Any]
+    private let fields: [String: Value]
+
+    /// Numbers are spelled with `.` whatever the user's locale.
+    static let posix = Locale(identifier: "en_US_POSIX")
 
     /// Nil unless `data` is a JSON object.
     init?(_ data: Data) {
-        guard let any = try? JSONSerialization.jsonObject(with: data), let fields = any as? [String: Any] else {
-            return nil
-        }
+        guard let fields = try? Tree.parse(data) else { return nil }
         self.fields = fields
     }
 
@@ -22,45 +25,129 @@ struct JSONFields {
         self = doc
     }
 
-    private init(fields: [String: Any]) {
+    private init(fields: [String: Value]) {
         self.fields = fields
     }
 
     /// The string under `key`; nil when absent, null, or another kind.
     func str(_ key: String) -> String? {
-        fields[key] as? String
+        guard case .string(let s)? = fields[key] else { return nil }
+        return s
     }
 
     /// The object under `key`; nil when absent, null, or another kind.
     func obj(_ key: String) -> JSONFields? {
-        (fields[key] as? [String: Any]).map(JSONFields.init(fields:))
+        guard case .object(let o)? = fields[key] else { return nil }
+        return JSONFields(fields: o)
     }
 
     /// The objects in the array under `key`; other elements are skipped.
     func objs(_ key: String) -> [JSONFields] {
-        (fields[key] as? [Any] ?? []).compactMap { ($0 as? [String: Any]).map(JSONFields.init(fields:)) }
+        guard case .array(let items)? = fields[key] else { return [] }
+        return items.compactMap { item in
+            guard case .object(let o) = item else { return nil }
+            return JSONFields(fields: o)
+        }
     }
 
-    /// The number under `key`; nil when absent, null, a boolean, or another kind.
+    /// The number under `key`, decoded from its spelling; nil when absent,
+    /// null, another kind, or beyond `Decimal`.
     func num(_ key: String) -> Decimal? {
-        number(key)?.decimalValue
+        guard case .number(let spelling)? = fields[key] else { return nil }
+        return Decimal(string: spelling, locale: Self.posix)
     }
 
-    /// The integer under `key`; nil when absent, null, a boolean, another
-    /// kind, or a number with no exact `Int` value.
+    /// The integer under `key`; nil when absent, null, another kind, or a
+    /// number with no exact `Int` value.
     func int(_ key: String) -> Int? {
-        number(key).flatMap { Int(exactly: $0) }
+        guard let n = num(key), let whole = n.whole, Decimal(whole) == n else { return nil }
+        return whole
     }
 
     /// The boolean under `key`; nil when absent, null, or another kind.
     func bool(_ key: String) -> Bool? {
-        guard let num = fields[key] as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() else { return nil }
-        return num.boolValue
+        guard case .bool(let b)? = fields[key] else { return nil }
+        return b
+    }
+}
+
+extension JSONFields {
+    /// A JSON value; a number is kept as spelled.
+    enum Value {
+        case object([String: Value])
+        case array([Value])
+        case string(String)
+        case number(String)
+        case bool(Bool)
+        case null
     }
 
-    /// A JSON number; `true` and `false` are not numbers.
-    private func number(_ key: String) -> NSNumber? {
-        guard let num = fields[key] as? NSNumber, CFGetTypeID(num) != CFBooleanGetTypeID() else { return nil }
-        return num
+    /// Builds the values of a document from what a `JSONDoc.Scan` reports,
+    /// without recursion.
+    struct Tree: JSONSink {
+        static let wantsText = true
+        /// Open containers, innermost last; true for an object.
+        var kinds: [Bool] = []
+        /// The members of each open object, and the key its next one goes under.
+        var objs: [[String: Value]] = []
+        var keys: [String] = []
+        /// The elements of each open array.
+        var arrs: [[Value]] = []
+        /// The root object once it closes.
+        var root: [String: Value] = [:]
+
+        /// The root members of `data`; `badJSON` unless it is a JSON object.
+        static func parse(_ data: Data) throws -> [String: Value] {
+            var tree = Tree()
+            try data.withUnsafeBytes { raw in
+                var scan = JSONDoc.Scan(buf: raw)
+                try scan.run(&tree)
+            }
+            return tree.root
+        }
+
+        mutating func open(_ obj: Bool, depth: Int) {
+            kinds.append(obj)
+            if obj {
+                objs.append([:])
+                keys.append("")
+            } else {
+                arrs.append([])
+            }
+        }
+
+        mutating func key(_ text: [UInt8], depth: Int) -> Bool {
+            let key = String(decoding: text, as: UTF8.self)
+            guard objs[objs.count - 1][key] == nil else { return false }
+            keys[keys.count - 1] = key
+            return true
+        }
+
+        mutating func value(_ span: Range<Int>, _ kind: JSONKind, text: [UInt8], depth: Int) {
+            let v: Value
+            switch kind {
+            case .object:
+                kinds.removeLast()
+                keys.removeLast()
+                let members = objs.removeLast()
+                guard !kinds.isEmpty else {
+                    root = members
+                    return
+                }
+                v = .object(members)
+            case .array:
+                kinds.removeLast()
+                v = .array(arrs.removeLast())
+            case .string: v = .string(String(decoding: text, as: UTF8.self))
+            case .number: v = .number(String(decoding: text, as: UTF8.self))
+            case .bool(let b): v = .bool(b)
+            case .null: v = .null
+            }
+            if kinds[kinds.count - 1] {
+                objs[objs.count - 1][keys[keys.count - 1]] = v
+            } else {
+                arrs[arrs.count - 1].append(v)
+            }
+        }
     }
 }

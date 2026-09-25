@@ -987,6 +987,145 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+// MARK: - Login documents and credential stores
+
+@Test func refreshAddsTokenMembersTheLoginLacked() async throws {
+    try await scratch { w in
+        try w.writeClaude(config: claudeConfig(profile("a@x", org: "org-a")),
+                          creds: claudeCreds("a", plan: "max", expires: Fixed.now - Fixed.hour))
+        let expired = (Fixed.now - Fixed.hour) * Fixed.msPerSecond
+        // Saved with neither an access token nor a refresh token expiry.
+        try w.seed(.claude, try slot("b@x"), Identity(email: "b@x", plan: "pro", org: "org-b"),
+                   login: Data(#"{"claudeAiOauth":{"refreshToken":"rt-b","expiresAt":\#(expired)}}"#.utf8),
+                   profile: profile("b@x", org: "org-b"))
+        let claude = StubHTTP([
+            answer(Status.ok, #"{"access_token":"at-b2","refresh_token":"rt-b2","expires_in":\#(Fixed.tokenLife),"#
+                + #""refresh_token_expires_in":\#(Fixed.day)}"#),
+            answer(Status.ok, claudeUsage(session: 30, week: 60)),
+        ])
+        try w.writeCodex(codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya"))
+        // Saved without `last_refresh`.
+        try w.seed(.codex, try slot("b@y"), Identity(email: "b@y", plan: "pro", org: "acct-b"),
+                   login: Data(#"{"tokens":{"access_token":"at-yb","refresh_token":"rt-yb"}}"#.utf8), profile: nil)
+        let codex = StubHTTP([
+            answer(Status.ok, codexUsage(session: 20, week: 45)),
+            answer(Status.unauthorized, "{}"),
+            answer(Status.ok, #"{"access_token":"at-yb2"}"#),
+            answer(Status.ok, codexUsage(session: 15, week: 25)),
+        ])
+
+        _ = await w.switcher(claude).probeAll(.claude)
+        _ = await w.switcher(codex).probeAll(.codex)
+
+        let ms = Fixed.msPerSecond
+        #expect(try w.store.fetch(.claude, slot("b@x"))?.login == Data(
+            #"{"claudeAiOauth":{"refreshToken":"rt-b2","expiresAt":\#((Fixed.now + Fixed.tokenLife) * ms),"#
+                .utf8) + Data(#""accessToken":"at-b2","refreshTokenExpiresAt":\#((Fixed.now + Fixed.day) * ms)}}"#.utf8))
+        #expect(claude.requests.map { $0.headers[Header.auth] } == [nil, "Bearer at-b2"])
+        #expect(try w.store.fetch(.codex, slot("b@y"))?.login == Data(
+            #"{"tokens":{"access_token":"at-yb2","refresh_token":"rt-yb"},"last_refresh":"2026-09-21T14:13:20Z"}"#.utf8))
+        #expect(codex.requests.map { $0.headers[Header.auth] } == ["Bearer at-ya", "Bearer at-yb", nil, "Bearer at-yb2"])
+    }
+}
+
+@Test func switchRefusesMalformedSavedLogin() async throws {
+    try await scratch { w in
+        let bx = try slot("b@x")
+        let liveCreds = claudeCreds("a", plan: "max", expires: Fixed.now + Fixed.day)
+        try w.writeClaude(config: claudeConfig(profile("a@x", org: "org-a")), creds: liveCreds)
+        let head = Data(#"{"claudeAiOauth":{"refreshToken":"rt-b","scopes":[],"accessToken":"#.utf8)
+        let words = ["nope", "tru", "nulls", "01", "-", "1.", ".5", "1e", "+1", "0x1F", #""\q""#, #""\u12G4""#]
+        let bytes: [[UInt8]] = [
+            [UInt8(ascii: "\""), 0x01, UInt8(ascii: "\"")],        // a raw control byte
+            [UInt8(ascii: "\""), 0xC0, 0xAF, UInt8(ascii: "\"")],  // overlong UTF-8
+            [UInt8(ascii: "\""), 0xED, 0xA0, 0x80, UInt8(ascii: "\"")],  // a surrogate in UTF-8
+            [UInt8(ascii: "\""), 0xE2, 0x82, UInt8(ascii: "\"")],  // a cut sequence
+        ]
+        for value in words.map({ Data($0.utf8) }) + bytes.map({ Data($0) }) {
+            try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"),
+                       login: head + value + Data("}}".utf8), profile: profile("b@x", org: "org-b"))
+            do {
+                try await w.switcher(StubHTTP([])).use(.claude, bx)
+                Issue.record("installed \(Array(value))")
+            } catch KibaError.badJSON {}
+            #expect(w.read(w.paths.claudeCredsFile(root: nil)) == liveCreds)
+        }
+        // A huge number and an escaped lone surrogate are valid JSON.
+        let odd = head + Data(#""at-b\ud800","big":-1.5e999999}}"#.utf8)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: odd, profile: profile("b@x", org: "org-b"))
+        try await w.switcher(StubHTTP([])).use(.claude, bx)
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == odd)
+    }
+}
+
+@Test func usagePercentRoundsTheDecimalAsSent() async throws {
+    try await scratch { w in
+        try w.writeClaude(config: claudeConfig(profile("a@x", org: "org-a")),
+                          creds: claudeCreds("a", plan: "max", expires: Fixed.now + Fixed.day))
+        let http = StubHTTP([answer(Status.ok,
+            #"{"five_hour":{"utilization":0.49999999999999999,"resets_at":"\#(Fixed.sessionReset)"},"#
+                + #""seven_day":{"utilization":0.5,"resets_at":"\#(Fixed.weekReset)"}}"#)])
+
+        _ = await w.switcher(http).probeAll(.claude)
+
+        #expect(try w.store.fetch(.claude, slot("a@x"))?.usage == probed(windows(session: 0, week: 1)))
+    }
+}
+
+@Test func uninspectableCredsFileIsAnError() async throws {
+    // Were the file passed over, the Keychain would be read: give `security` one.
+    try ensureKeychain()
+    try await scratch { w in
+        try claudeConfig(profile("a@x", org: "org-a")).write(to: w.paths.claudeConfigFile(root: nil))
+        let creds = w.paths.claudeCredsFile(root: nil).path
+        func error() -> String? {
+            StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }?.error
+        }
+        func stat(_ code: Int32) -> String { KibaError.io("stat \(creds): \(String(cString: strerror(code)))").reason }
+        // A link to itself: every lookup through it loops.
+        try FileManager.default.createSymbolicLink(atPath: creds, withDestinationPath: creds)
+        #expect(error() == stat(ELOOP))
+        // A file in a directory that cannot be searched.
+        let shut = w.dir.appending(component: "shut")
+        try FileManager.default.createDirectory(at: shut, withIntermediateDirectories: false)
+        try FileManager.default.removeItem(atPath: creds)
+        try FileManager.default.createSymbolicLink(atPath: creds, withDestinationPath: shut.appending(component: "creds").path)
+        try FileManager.default.setAttributes([.posixPermissions: Fixed.shutMode], ofItemAtPath: shut.path)
+        #expect(error() == stat(EACCES))
+        try FileManager.default.setAttributes([.posixPermissions: Fixed.openMode], ofItemAtPath: shut.path)
+    }
+}
+
+@Test func addFindsKeychainItemDumpedAsHex() async throws {
+    try ensureKeychain()
+    let service = "\(Fixed.keychainPrefix)\(UUID().uuidString)"
+    let live = KeychainItem(service: service, account: Fixed.user)
+    // Not every byte printable: `security dump-keychain` prints the name in hex.
+    let found = KeychainItem(service: "\(service)-é", account: Fixed.user)
+    defer {
+        #expect(throws: Never.self) {
+            try live.remove()
+            try found.remove()
+        }
+    }
+    try await scratch(keychainService: service) { w in
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        try live.write(liveCreds)
+        let config = claudeConfig(profile("n@x", org: "org-n"))
+        try w.fakeCLI("claude", "printf '%s' '\(text(config))' > \"$CLAUDE_CONFIG_DIR/.claude.json\"")
+        let newCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 5, week: 10))])
+        let runner = try w.runner(http, keychain: KeychainTool(account: Fixed.user)) { try found.write(newCreds) }
+
+        let result = try await runner.add(.claude, expected: nil)
+
+        #expect(result.saved == (try slot("n@x")))
+        #expect(try w.store.fetch(.claude, slot("n@x"))?.login == newCreds)
+        #expect(try found.read() == nil)
+        #expect(try live.read() == liveCreds)
+    }
+}
+
 // MARK: - World
 
 enum Fixed {
@@ -1032,6 +1171,8 @@ enum Fixed {
     /// A directory that lists and reads but takes no new file.
     static let lockedMode = 0o500
     static let openMode = 0o700
+    /// A directory that cannot even be searched.
+    static let shutMode = 0o000
     /// `Fixed.now + hour` and `Fixed.now + 4 days` in ISO 8601.
     static let sessionReset = "2026-09-21T15:13:20Z"
     static let weekReset = "2026-09-25T14:13:20Z"
@@ -1127,7 +1268,7 @@ struct World: Sendable {
     /// `during` stands for what the provider login does outside its home;
     /// with `background` the Terminal launch returns while the login runs.
     func runner(
-        _ http: StubHTTP, keychain: FakeKeychain, background: Bool = false,
+        _ http: StubHTTP, keychain: any KeychainLister, background: Bool = false,
         during: @escaping @Sendable () throws -> Void = {}
     ) throws -> LoginRunner {
         var shellEnv = env

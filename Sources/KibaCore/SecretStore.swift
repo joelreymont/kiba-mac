@@ -45,9 +45,12 @@ public final class MemorySecret: SecretStore {
     public func remove() throws { bytes.withLock { $0 = nil } }
 }
 
-/// A generic password in the login Keychain, driven through `/usr/bin/security`:
+/// A generic password in the login Keychain, driven through `/usr/bin/security`.
 /// Claude Code creates its item with that tool, so the tool is on the item's
-/// access list and no call ever raises a Keychain prompt.
+/// access list: while the keychain is unlocked and the list is as Claude Code
+/// left it, no call raises a prompt. Otherwise macOS asks the user: for the
+/// keychain password when it is locked, for permission when the list lacks
+/// the tool. The call waits for the answer, however long; a refusal is `tool`.
 public struct KeychainItem: SecretStore {
     public let service: String
     public let account: String
@@ -156,13 +159,27 @@ public struct KeychainItem: SecretStore {
 }
 
 /// The live Claude Code credential store, chosen by what exists rather than by
-/// platform: a `.credentials.json` in the config dir wins, else the Keychain item.
+/// platform, afresh at every access: a `.credentials.json` in the config dir
+/// wins, else the Keychain item. Only a file that is not there selects the
+/// Keychain; one that cannot be inspected is an error, never another store.
 public enum ClaudeSecrets {
     public static func live(paths: Paths, root: URL?) -> SecretStore {
-        let file = paths.claudeCredsFile(root: root)
-        guard PrivateFS.exists(file) else {
-            return KeychainItem(service: paths.keychainService, account: paths.username)
-        }
-        return FileSecret(url: file)
+        LiveSecret(
+            file: FileSecret(url: paths.claudeCredsFile(root: root)),
+            item: KeychainItem(service: paths.keychainService, account: paths.username))
+    }
+}
+
+/// A secret in `file` when that is a regular file, else in `item`.
+struct LiveSecret: SecretStore {
+    let file: FileSecret
+    let item: KeychainItem
+
+    func read() throws -> Data? { try chosen().read() }
+    func write(_ data: Data) throws { try chosen().write(data) }
+    func remove() throws { try chosen().remove() }
+
+    func chosen() throws -> any SecretStore {
+        try PrivateFS.isFile(file.url) ? file : item
     }
 }

@@ -132,7 +132,8 @@ public enum PrivateFS {
   public static func ensurePrivateDir(_ url: URL) throws     // recursive mkdir 0700; existing dirs untouched
   public static func removeTree(_ url: URL) throws
   public static func writeTarget(_ url: URL) throws -> URL   // follows ≤ 8 symlink hops; throws unsafePath if still a link
-  public static func exists(_ url: URL) -> Bool              // regular file
+  public static func isFile(_ url: URL) throws -> Bool       // regular file; false only for ENOENT/ENOTDIR, else io
+  public static func exists(_ url: URL) -> Bool              // regular file; uninspectable reads as absent (PATH search)
   public static func isDir(_ url: URL) -> Bool
 }
 ```
@@ -164,15 +165,21 @@ public struct JSONDoc {
   public func objectSpan(_ key: String) -> Range<Int>?                // same, only when the value is an object
   public func valueSpan(_ key1: String, _ key2: String) -> Range<Int>? // one level down
   public func closingBrace() -> (index: Int, hasMembers: Bool)
+  public func closingBrace(_ key: String) -> (index: Int, hasMembers: Bool)?  // of the object at top-level key
   public func replacing(_ span: Range<Int>, with: Data) throws -> JSONDoc   // badJSON when the result does not scan, capacity over 4 MiB
   public var data: Data
 }
 ```
 
-Parsing must skip strings with escapes correctly and nest arbitrarily deep.
-Values are located, never decoded. Reading fields (`string(key)`,
-`string(key1,key2)`, `int(...)`) is done via `JSONSerialization` on the same
-bytes; `JSONDoc` only locates spans for writes.
+Construction checks the whole document as RFC 8259 JSON in one iterative
+pass that nests arbitrarily deep: valid UTF-8, matched brackets, only JSON's
+string escapes and no raw control byte in a string, JSON number grammar
+(however large), and `true`/`false`/`null` spelled out; anything else is
+`badJSON`. An escaped lone surrogate is valid JSON and passes. Values are
+located, never decoded. Reading fields (`JSONFields`: `str`, `obj`, `num`,
+`int`, …) runs the same scan over the same bytes and builds a tree whose
+numbers keep their spelling, read as `Decimal` without a binary
+floating-point step; `JSONDoc` only locates spans for writes.
 
 ### Identity
 
@@ -220,7 +227,11 @@ public final class MemorySecret: SecretStore { public init(_ data: Data?) }
 ```
 
 `KeychainItem` drives `/usr/bin/security`, the same tool Claude Code uses, so
-its ACL always admits us and the app never triggers a Keychain prompt:
+the item's ACL admits it: while the login keychain is unlocked and the ACL is
+as Claude Code left it, no call triggers a Keychain prompt. A locked keychain
+makes macOS ask for its password, and an ACL without the tool makes it ask to
+allow access (`setsid` does not stop either dialog); the call waits for the
+answer with no bound, and a refusal is `tool`:
 
 - read: `security find-generic-password -a <account> -s <service> -w`;
   exit 44 (`errSecItemNotFound`) → nil; other non-zero → `tool`.
@@ -239,7 +250,9 @@ The live Claude credential store is chosen by existence, never by platform:
 public enum ClaudeSecrets {
   public static func live(paths: Paths, root: URL?) -> SecretStore
   // FileSecret(<configDir>/.credentials.json) when that file exists,
-  // else KeychainItem(paths.keychainService, paths.username)
+  // else KeychainItem(paths.keychainService, paths.username); chosen again
+  // at every read and write. Only a missing file (ENOENT, ENOTDIR) selects
+  // the Keychain; one that cannot be inspected (EACCES, ELOOP, …) is io.
 }
 ```
 
@@ -442,7 +455,8 @@ public struct UsageRecord: Codable, Equatable, Sendable {
 before limit resets were read decodes with `resets == nil`.
 
 `percent` is the whole number USED (0…100+). Percent rounding: decode the
-JSON number as `Decimal` and round with `NSDecimalRound(.plain, scale 0)`.
+JSON number's spelling as `Decimal`, never through `Double`, and round with
+`NSDecimalRound(.plain, scale 0)`.
 Labels: `Session (5-hour)`, `Weekly (7-day)`, `<Model> Weekly` /
 `<Model> Session` / `<Model>` for scoped windows. `resetsAt` is ISO 8601 or
 "". The `usage` column is written through `JSONEncoder` (sorted keys);
@@ -499,7 +513,8 @@ Claude:
    `{grant_type:"refresh_token", refresh_token, client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`.
    200 → splice `accessToken`, `refreshToken` (if returned), `expiresAt =
    (now+expires_in)*1000`, `refreshTokenExpiresAt` (if
-   `refresh_token_expires_in`) into the doc. 400/401 → `expired` "…the refresh
+   `refresh_token_expires_in`) into `claudeAiOauth`, each added at the end of
+   that object when the doc lacks it. 400/401 → `expired` "…the refresh
    was refused; log in again". Anything else / unreachable → `error`
    "Anthropic's token endpoint answered <code>" / "…could not be reached".
 2. GET `https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1`
@@ -543,10 +558,11 @@ Codex:
    `{client_id:"app_EMoamEEZ73f0CkXaXp7hrann", grant_type:"refresh_token", refresh_token}`;
    200 → splice `tokens.access_token`, `tokens.refresh_token`,
    `tokens.id_token` (each if returned), top-level `last_refresh` = ISO now
-   into the doc; then GET again (200 → ok, else the 401/429/other
-   notes below). Refresh refused (400/401): revokedFlag → `.revoked(note:
-   "login revoked by a later `codex login`")`; else `expired` "access token
-   rejected and the refresh was refused; log in again". Refresh other →
+   into the doc, each added at the end of its object when absent; then GET
+   again (200 → ok, else the 401/429/other notes below). Refresh refused
+   (400/401): revokedFlag → `.revoked(note: "login revoked by a later
+   `codex login`")`; else `expired` "access token rejected and the refresh
+   was refused; log in again". Refresh other →
    `error` "OpenAI's token endpoint answered <code>". 429 → `error` "OpenAI
    is rate limiting usage checks; try again later". Other → `error` "OpenAI's
    usage endpoint answered <code>".
@@ -714,11 +730,13 @@ public actor LoginRunner {
 
 Production: `TerminalApp` runs `/usr/bin/open -a Terminal <script>`;
 `KeychainTool` lists `security dump-keychain` service names (attributes
-only, never secret data) and hands back `KeychainItem`s. `searchPath` is the
-PATH searched for the CLIs; `CoreBackend` takes it from the user's login
-shell (`$SHELL -lc`, PATH printed between markers so profile output cannot
-pollute it), because an app started from Finder or a login item inherits
-only the system default PATH, which lacks the CLIs.
+only, never secret data), each read in full from either form the tool
+prints, quoted text or `0x` hex when a byte is not printable ASCII or is
+`\`, before the prefix filter, and hands back `KeychainItem`s.
+`searchPath` is the PATH searched for the CLIs; `CoreBackend` takes it from
+the user's login shell (`$SHELL -lc`, PATH printed between markers so
+profile output cannot pollute it), because an app started from Finder or a
+login item inherits only the system default PATH, which lacks the CLIs.
 
 `init` undoes an add the app did not live to finish before anything reads
 the live login: when `store.adding(.claude)` holds a record, it stops that
@@ -1030,7 +1048,8 @@ are written by `PrivateFS` temp + rename.
 ## Decisions and their reasons
 
 - `/usr/bin/security` over the Security framework: Claude Code creates the
-  item with `security`, so `security` is on its ACL and never prompts; a
+  item with `security`, so `security` is on its ACL and, while the
+  keychain is unlocked, does not prompt; a
   differently signed app would prompt on every rebuild and after every
   fresh login. The secret goes in on stdin under `setsid` whenever it fits
   the tool's line buffer, and in argv only beyond that, matching Claude

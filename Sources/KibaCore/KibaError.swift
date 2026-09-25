@@ -33,7 +33,7 @@ extension KibaError {
         case .badName(let name):
             return "account name has unsafe characters: \(name)"
         case .badJSON(let what):
-            return "a login file is missing an expected field: \(what)"
+            return "a login document lacks a field or is not valid JSON: \(what)"
         case .loginFailed(let status):
             return "the provider login did not complete (exit \(status))"
         case .loginProducedNothing(let p):

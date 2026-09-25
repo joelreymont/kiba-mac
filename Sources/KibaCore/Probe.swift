@@ -141,17 +141,26 @@ extension HTTPClient {
 }
 
 extension JSONDoc {
-    /// The document with member `key2` of the object at `key1` set to the JSON
-    /// bytes `value`; unchanged when that member is absent (kiba `CFG-REPLACE2`).
+    /// The document with member `key2` of the object at root member `key1` set
+    /// to the JSON bytes `value`, added at the end of that object when absent;
+    /// `badJSON` when `key1` holds no object.
     func setting(_ key1: String, _ key2: String, to value: Data) throws -> JSONDoc {
-        guard let span = valueSpan(key1, key2) else { return self }
-        return try replacing(span, with: value)
+        if let span = valueSpan(key1, key2) { return try replacing(span, with: value) }
+        guard let brace = closingBrace(key1) else { throw KibaError.badJSON(key1) }
+        return try adding(key2, value, at: brace.index, after: brace.hasMembers)
     }
 
-    /// The same for the root member `key` (kiba `CFG-REPLACE`).
+    /// The same for the root member `key`.
     func setting(_ key: String, to value: Data) throws -> JSONDoc {
-        guard let span = valueSpan(key) else { return self }
-        return try replacing(span, with: value)
+        if let span = valueSpan(key) { return try replacing(span, with: value) }
+        let brace = closingBrace()
+        return try adding(key, value, at: brace.index, after: brace.hasMembers)
+    }
+
+    /// The document with the member `"key":value` inserted at the closing brace
+    /// `brace`, after a comma when its object already has members.
+    private func adding(_ key: String, _ value: Data, at brace: Int, after members: Bool) throws -> JSONDoc {
+        try replacing(brace ..< brace, with: (members ? Data(",".utf8) : Data()) + jsonString(key) + Data(":".utf8) + value)
     }
 }
 

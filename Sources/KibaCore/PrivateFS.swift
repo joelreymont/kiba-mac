@@ -110,11 +110,23 @@ public enum PrivateFS {
         }
     }
 
-    /// Whether `url` is a regular file, following links.
-    public static func exists(_ url: URL) -> Bool { mode(url.path) == S_IFREG }
+    /// Whether `url` is a regular file, following links. Only nothing there
+    /// (`ENOENT`, `ENOTDIR`) is false; any other failure, such as a link loop
+    /// or a directory on the way that cannot be searched, is `io`.
+    public static func isFile(_ url: URL) throws -> Bool {
+        var st = stat()
+        guard stat(url.path, &st) == 0 else {
+            guard errno == ENOENT || errno == ENOTDIR else { throw KibaError.io(failure("stat", url.path)) }
+            return false
+        }
+        return st.st_mode & S_IFMT == S_IFREG
+    }
 
-    /// Whether `url` is a directory, following links.
-    public static func isDir(_ url: URL) -> Bool { mode(url.path) == S_IFDIR }
+    /// Whether `url` can be seen to be a regular file, following links; a path
+    /// that cannot be inspected reads as absent. Only for lookups where such a
+    /// path is simply no candidate, such as a `PATH` search; a choice between
+    /// stores uses `isFile`.
+    public static func exists(_ url: URL) -> Bool { mode(url.path) == S_IFREG }
 
     /// `op path: reason` for the system call that just failed with `code`.
     static func failure(_ op: String, _ path: String, _ code: Int32 = errno) -> String {
@@ -160,7 +172,16 @@ public enum PrivateFS {
             return nil
         }
         if let err { return err }
-        return fcntl(fd, F_FULLFSYNC) == 0 ? nil : failure("fsync", tmp)
+        return flush(fd) ? nil : failure("fsync", tmp)
+    }
+
+    /// `F_FULLFSYNC`, which reaches permanent storage, where the filesystem
+    /// offers it; else plain `fsync`, as SQLite falls back, so a network or
+    /// FAT volume still works.
+    static func flush(_ fd: Int32) -> Bool {
+        if fcntl(fd, F_FULLFSYNC) == 0 { return true }
+        guard errno == ENOTSUP || errno == ENOTTY || errno == EINVAL else { return false }
+        return fsync(fd) == 0
     }
 
     /// Flushes the directory `dir` to permanent storage, so a rename in it
@@ -170,7 +191,7 @@ public enum PrivateFS {
         guard fd >= 0 else { throw KibaError.io(failure("open", dir)) }
         // A read-only directory handle holds no data, so closing it cannot fail in a way that matters.
         defer { close(fd) }
-        guard fcntl(fd, F_FULLFSYNC) == 0 else { throw KibaError.io(failure("fsync", dir)) }
+        guard flush(fd) else { throw KibaError.io(failure("fsync", dir)) }
     }
 
     /// The path the link at `path` points to; a relative target is joined to the link's

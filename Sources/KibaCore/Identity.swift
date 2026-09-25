@@ -32,8 +32,8 @@ public enum ClaudeIdentity {
 
     /// The live config's top-level `oauthAccount` object plus the credentials'
     /// plan. Only that object's bytes are decoded: the rest of `.claude.json` is
-    /// Claude Code's and may hold values `JSONSerialization` rejects, and the
-    /// identity must come from the very bytes `ClaudeLive.save` copies.
+    /// Claude Code's, and the identity must come from the very bytes
+    /// `ClaudeLive.save` copies.
     static func fromLive(config: Data, creds: Data) throws -> Identity {
         var id = try fromOAuthAccount(profile(config))
         id.plan = planFromCreds(creds)

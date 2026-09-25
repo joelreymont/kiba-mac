@@ -360,9 +360,13 @@ public struct TerminalApp: TerminalLauncher {
 public struct KeychainTool: KeychainLister {
     public let account: String
 
-    /// How `dump-keychain` prints a printable service attribute.
-    static let serviceMark = #""svce"<blob>=""#
+    /// How `dump-keychain` starts a service attribute. The value follows in
+    /// quotes when every byte is printable ASCII other than `\`; otherwise as
+    /// `0x` and its bytes in hex, then a quoted form with escapes.
+    static let serviceMark = #""svce"<blob>="#
     static let quote = "\""
+    static let hexMark = "0x"
+    static let space: Character = " "
 
     public init(account: String) {
         self.account = account
@@ -378,17 +382,34 @@ public struct KeychainTool: KeychainLister {
         KeychainItem(service: service, account: account)
     }
 
-    /// The printable service names in a dump that start with `prefix`. A name
-    /// with unprintable bytes is dumped as hex and cannot start with a
-    /// printable prefix, so it is passed over.
+    /// The service names in a dump that start with `prefix`, in either form.
     static func services(in dump: Data, prefix: String) -> Set<String> {
         var out: Set<String> = []
         for line in String(decoding: dump, as: UTF8.self).split(separator: "\n") {
-            let text = line.drop { $0 == " " }
-            guard text.hasPrefix(serviceMark), text.hasSuffix(quote), text.count > serviceMark.count else { continue }
-            let name = String(text.dropFirst(serviceMark.count).dropLast())
+            let text = line.drop { $0 == space }
+            guard text.hasPrefix(serviceMark), let name = name(text.dropFirst(serviceMark.count)) else { continue }
             if name.hasPrefix(prefix) { out.insert(name) }
         }
         return out
     }
+
+    /// The name a dumped service value spells: the text between its quotes,
+    /// or the bytes its hex digits spell. Nil for anything else, such as
+    /// `<NULL>`, for bytes that are not UTF-8, and for control bytes: no
+    /// argument can name those, and a NUL would cut the name to another
+    /// item's, maybe the live one.
+    static func name(_ value: Substring) -> String? {
+        if value.hasPrefix(quote), value.hasSuffix(quote), value.count > quote.count {
+            return String(value.dropFirst().dropLast())
+        }
+        guard value.hasPrefix(hexMark),
+              let bytes = KeychainItem.unhex(Data(value.dropFirst(hexMark.count).prefix { $0 != space }.utf8)),
+              !bytes.contains(where: { $0 < printable })
+        else { return nil }
+        let name = String(decoding: bytes, as: UTF8.self)
+        return Data(name.utf8) == bytes ? name : nil
+    }
+
+    /// The first byte that is not a control byte.
+    static let printable: UInt8 = 0x20
 }
