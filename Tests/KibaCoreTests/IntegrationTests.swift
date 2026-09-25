@@ -427,10 +427,8 @@ import os
         // saves the login that revoked it under the same name.
         async let report = w.switcher(http).probeAll(.codex)
         try await http.arrival()
-        let root = w.dir.appending(component: "login")
-        try FileManager.default.createDirectory(at: w.paths.codexHome(root: root), withIntermediateDirectories: true)
-        try fresh.write(to: w.paths.codexAuthFile(root: root))
-        #expect(try w.switcher(StubHTTP([])).importLogin(.codex, root: root, claudeCreds: nil) == name)
+        try w.writeCodex(fresh)
+        #expect(try w.switcher(StubHTTP([])).save(.codex) == name)
         http.release()
 
         #expect(await report.accounts.isEmpty)
@@ -852,34 +850,61 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
-@Test func addPutsLiveItemBackWhateverLoginDoes() async throws {
+@Test func failedLoginPutsLiveItemBack() async throws {
     try await scratch { w in
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         let keychain = FakeKeychain(items: [w.paths.keychainService: MemorySecret(liveCreds)])
         let live = keychain.item(w.paths.keychainService)
-        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
 
         // A login that overwrites the live item and then fails.
         try w.fakeCLI("claude", "exit 3")
-        let failing = try w.runner(http, keychain: keychain) {
+        let failing = try w.runner(StubHTTP([]), keychain: keychain) {
             try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
         }
         await #expect(throws: KibaError.loginFailed(3)) { try await failing.add(.claude, expected: "x@y") }
         #expect(try live.read() == liveCreds)
+        #expect(try w.store.adding(.claude) == nil)
+    }
+}
 
-        // A login that writes a credentials file and overwrites the live item too.
+@Test func addKeepsLiveItemTheCLIRefreshed() async throws {
+    try await scratch { w in
+        // Claude Code refreshes the live item while the login files its own.
+        let live = MemorySecret(claudeCreds("live", plan: "max", expires: Fixed.now))
+        let login = MemorySecret(nil)
+        let keychain = FakeKeychain(items: [w.paths.keychainService: live, w.paths.loginService: login])
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60)),
+                             answer(Status.ok, claudeUsage(session: 30, week: 60))])
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(claudeConfig(profile("n@y", org: "org-n"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
+        let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
+        let itemCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
+        let viaItem = try w.runner(http, keychain: keychain) {
+            try live.write(refreshed)
+            try login.write(itemCreds)
+        }
+        let added = try await viaItem.add(.claude, expected: "n@y")
+        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == itemCreds)
+        #expect(try live.read() == refreshed)
+        #expect(try login.read() == nil)
+
+        // The same beside a login that writes a credentials file.
         let fileCreds = claudeCreds("f", plan: "pro", expires: Fixed.now + Fixed.day)
         try w.fakeCLI("claude", """
             printf '%s' '\(text(fileCreds))' > "$CLAUDE_CONFIG_DIR/.credentials.json"
             printf '%s' '\(text(claudeConfig(profile("f@y", org: "org-f"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
             """)
-        let both = try w.runner(http, keychain: keychain) {
-            try live.write(claudeCreds("k", plan: "pro", expires: Fixed.now + Fixed.day))
-        }
-        let added = try await both.add(.claude, expected: "f@y")
-        #expect(added == AddResult(saved: try slot("f@y"), expected: "f@y", differs: false))
+        let again = claudeCreds("live3", plan: "max", expires: Fixed.now + Fixed.day)
+        let viaFile = try w.runner(http, keychain: keychain) { try live.write(again) }
+        let filed = try await viaFile.add(.claude, expected: "f@y")
+        #expect(filed == AddResult(saved: try slot("f@y"), expected: "f@y", differs: false))
         #expect(try w.store.fetch(.claude, try slot("f@y"))?.login == fileCreds)
-        #expect(try live.read() == liveCreds)
+        #expect(try live.read() == again)
+
+        #expect(try w.store.adding(.claude) == nil)
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-n", "Bearer at-f"])
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.claude).path))
     }
 }
@@ -974,6 +999,48 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(try live.read() == liveCreds)
         #expect(try w.store.adding(.claude) == nil)
         #expect(!FileManager.default.fileExists(atPath: root.path))
+
+        // It died once the login had filed its own item: the live change is
+        // Claude Code's refresh, which stays.
+        let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
+        try live.write(refreshed)
+        let login = MemorySecret(claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day))
+        try w.store.write { try $0.noteAdding(.claude, LiveItem(bytes: liveCreds)) }
+        try FileManager.default.createDirectory(at: w.paths.claudeConfigDir(root: root), withIntermediateDirectories: true)
+
+        _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [
+            w.paths.keychainService: live, w.paths.loginService: login,
+        ]))
+
+        #expect(try live.read() == refreshed)
+        #expect(try w.store.adding(.claude) == nil)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+    }
+}
+
+@Test func staleLoginScriptStaysOutOfNewRoot() async throws {
+    try await scratch { w in
+        let auth = codexAuth("new@y", plan: "pro", account: "acct-n", tag: "n")
+        try w.fakeCLI("codex", "printf '%s' '\(text(auth))' > \"$CODEX_HOME/auth.json\"")
+        let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45)),
+                             answer(Status.ok, codexUsage(session: 20, week: 45))])
+        let root = w.paths.loginRoot(.codex)
+        // Terminal keeps the first add's script, as a window it opens late would.
+        let late = w.dir.appending(component: "late.command")
+        _ = try await w.runner(http, keychain: FakeKeychain(items: [:])) {
+            try FileManager.default.copyItem(at: root.appending(component: "login.command"), to: late)
+        }.add(.codex, expected: nil)
+
+        // That window starts once the next add has made the root again.
+        let terminal = LateTerminal(env: w.shellEnv, late: late) { status in
+            #expect(status == Fixed.staleStatus)
+            #expect(!FileManager.default.fileExists(atPath: root.appending(component: "pid").path))
+        }
+        let runner = try LoginRunner(
+            paths: w.paths, switcher: w.switcher(http), terminal: terminal,
+            keychain: FakeKeychain(items: [:]), searchPath: w.bin.path)
+        let added = try await runner.add(.codex, expected: nil)
+        #expect(added == AddResult(saved: try slot("new@y"), expected: nil, differs: false))
     }
 }
 
@@ -1224,6 +1291,31 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+@Test func addUndoesTheAddBeforeIt() async throws {
+    try await scratch { w in
+        // A stop that failed left the live item as a failed login wrote it,
+        // with the old bytes on record: the next add puts them back first, so
+        // its own snapshot is of the live login, not of the failed one.
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let live = MemorySecret(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
+        let login = MemorySecret(nil)
+        let keychain = FakeKeychain(items: [w.paths.keychainService: live, w.paths.loginService: login])
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(claudeConfig(profile("n@y", org: "org-n"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
+        let itemCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
+        let runner = try w.runner(http, keychain: keychain) { try login.write(itemCreds) }
+        try w.store.write { try $0.noteAdding(.claude, LiveItem(bytes: liveCreds)) }
+
+        let added = try await runner.add(.claude, expected: "n@y")
+        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == itemCreds)
+        #expect(try live.read() == liveCreds)
+        #expect(try w.store.adding(.claude) == nil)
+    }
+}
+
 // MARK: - World
 
 enum Fixed {
@@ -1259,6 +1351,8 @@ enum Fixed {
     static let usageOffline = "OpenAI's usage endpoint could not be reached"
     /// Seconds a fake login waits for a sign-in that never comes.
     static let stall = 10
+    /// Exit status of a login script started in a root that is not its own.
+    static let staleStatus: Int32 = 1
     /// How often a fake login looks for its sign-in.
     static let ticksPerSecond = 10
     static let tickSeconds = 1.0 / Double(ticksPerSecond)
@@ -1377,12 +1471,17 @@ struct World: Sendable {
         _ http: StubHTTP, keychain: any Keychain, background: Bool = false,
         during: @escaping @Sendable () throws -> Void = {}
     ) throws -> LoginRunner {
-        var shellEnv = env
-        shellEnv["PATH"] = "\(bin.path):\(Fixed.systemPath)"
         let terminal: any TerminalLauncher =
             background ? BackgroundTerminal(env: shellEnv, during: during) : ShellTerminal(env: shellEnv, during: during)
         return try LoginRunner(
             paths: paths, switcher: switcher(http), terminal: terminal, keychain: keychain, searchPath: bin.path)
+    }
+
+    /// What the login script runs with: this world, and the system tools on PATH.
+    var shellEnv: [String: String] {
+        var shellEnv = env
+        shellEnv["PATH"] = "\(bin.path):\(Fixed.systemPath)"
+        return shellEnv
     }
 
     func writeClaude(config: Data, creds: Data) throws {
@@ -1502,6 +1601,20 @@ struct BackgroundTerminal: TerminalLauncher {
             }
         }
         try during()
+    }
+}
+
+/// Runs `late` with `/bin/sh` and hands its exit status to `ran`, as a
+/// Terminal window an earlier add opened too late would start it, then runs
+/// the login script as `ShellTerminal` does.
+struct LateTerminal: TerminalLauncher {
+    let env: [String: String]
+    let late: URL
+    let ran: @Sendable (Int32) -> Void
+
+    func open(_ script: URL) throws {
+        ran(try Subprocess.run(Fixed.shell, [late.path], stdin: nil, env: env, setsid: true).status)
+        try ShellTerminal(env: env, during: {}).open(script)
     }
 }
 

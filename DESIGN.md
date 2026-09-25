@@ -648,17 +648,18 @@ public final class Switcher: Sendable {
   public func forget(_ p: Provider, _ n: SlotName) throws
   public func probeAll(_ p: Provider) async -> ProbeReport     // never throws
   public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
-  public func importLogin(_ p: Provider, root: URL, claudeCreds: Data?) throws -> SlotName
 }
 public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [Probed] }   // accounts: only outcomes recorded
 public struct Probed { public let name: SlotName; public let outcome: ProbeOutcome; public let live: Bool }   // live: probed as the live login
 ```
 
 Each provider's operations run one at a time, first come first served:
-`use`, `probeAll`, `redeem`, `save`, `forget`, `importLogin` and the probe
-`LoginRunner` runs after an import each hold the provider's turn from start
-to end, across every network wait, so a probe that is spending a saved
-login's refresh token finishes before a switch can make that login live.
+`use`, `probeAll`, `redeem`, `save`, `forget` and `LoginRunner.add` each
+hold the provider's turn from start to end (`add`: once its CLI is found),
+across every network wait; the import and probe `add` runs are
+`importInTurn` and `probeInTurn`, which take no turn of their own. So a
+probe that is spending a saved login's refresh token finishes before a
+switch can make that login live.
 The async operations suspend while they wait; the synchronous ones block
 their thread. Other processes are held off only by store transactions, so
 every probe outcome and refreshed login is written only while the row still
@@ -702,8 +703,9 @@ replaced or forgotten meanwhile is never updated or removed.
   refreshed, before the result is read (a refresh spends the old grant); a
   failure throws; after a 200, `probe(p, n, live:)` so the
   row's usage and offer show the result, then the outcome.
-- `importLogin`: reads the login once from the throwaway root (Claude:
-  config at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
+- `importInTurn` (internal; only `add` calls it, in its turn): reads the
+  login once from the throwaway root (Claude: config at
+  `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
   `root/.codex/auth.json`), `liveName` and `put`, all inside one
   `store.write`. `noLive` when nothing is there.
 
@@ -794,20 +796,32 @@ login item inherits only the system default PATH, which lacks the CLIs.
 
 `init` undoes an add the app did not live to finish before anything reads
 the live login: when `store.adding(.claude)` holds a record, it stops that
-login if it still runs, puts the live item back as in 5, and removes
-`paths.loginRoot(.claude)`.
+login if it still runs, puts the live item back as in 5 with `before` taken
+as absent (no snapshot of the login's item outlives the app), and removes
+`paths.loginRoot(.claude)`. A Claude `add` does the same first, in its
+turn, so the record a failed stop (4) kept is put back before its own
+snapshot (3) replaces it.
 
 `add` holds a per-provider lease from its first line to its return, across
 every await. Every login of a provider uses the same root, so a second `add`
 for a provider whose login is in flight throws `loginRunning` rather than
-queueing.
+queueing. The lease is per `LoginRunner`, and that is enough: the app makes
+one, and LaunchServices activates a running Kiba rather than launching a
+second, so no other process ever shares a root. Once its CLI is found (1),
+`add` also holds the provider's turn (`switcher.ops(p)`, see Switcher), so no
+`use` installs a login between the snapshot in 3 (Codex: the login) and the
+restore in 5, nor between the import in 7 and its probe, which would then
+refresh a login made live meanwhile. The app is busy for the whole add, so
+the held turn shows nowhere.
 
 1. `claude`/`codex` must be on `searchPath` (`noCLI`); the script runs the
    one found. Root = `paths.loginRoot(p)`:
    remove, create 0700, create `root/.claude` or `root/.codex`.
-2. Write `root/login.command` (0700):
+2. Write `root/nonce`, a UUID fresh for this run, and `root/login.command`
+   (0700):
    ```sh
    #!/bin/sh
+   [ "$(cat '<root>/nonce' 2>/dev/null)" = '<nonce>' ] || exit 1
    printf '%s' "$$" > "<root>/pid.tmp" && ln "<root>/pid.tmp" "<root>/pid" || exit 1
    export CLAUDE_CONFIG_DIR="<root>/.claude"      # or CODEX_HOME="<root>/.codex"
    report() { printf '%s' "$1" > "<root>/exit.tmp" && mv "<root>/exit.tmp" "<root>/exit"; }
@@ -821,7 +835,9 @@ queueing.
    if [ "$rc" -ne 0 ]; then printf '\nPress Enter to close\n'; read -r _; fi
    exit "$rc"
    ```
-   Shell-quote every interpolated value. The hard link publishes the pid
+   Shell-quote every interpolated value. The nonce check keeps a script an
+   earlier add wrote, which Terminal may start only once root was made
+   again, from running in the new root. The hard link publishes the pid
    whole and fails when the name exists, so a stop can claim it first.
 3. Claude only: snapshot `before`, the bytes of the login's item
    (`keychain.item(paths.loginService)`, nil when absent), and `old`, the
@@ -830,25 +846,33 @@ queueing.
 4. `terminal.open(script)`, then wait for `root/exit` (directory watch via
    `DispatchSource`, plus a 1 s poll as belt and braces). A wait that ends
    without a status (the task was cancelled, the file is unreadable) or a
-   failed open stops the login, then rethrows.
-5. Claude only, whatever 4 ended in: put the live item back. Bytes that
-   differ from `old` are kept as `written`, and `old` is written back
-   (the item removed when `old` is nil); then `tx.clearAdding`. A restore
-   that fails leaves the record for the next start. Then a non-zero status
-   → `loginFailed`.
+   failed open stops the login; its error is thrown after 5. A stop that
+   fails throws at once: the login may still run, so root and the `adding`
+   record stay for the next start or Claude `add`.
+5. Claude only, whatever 4 ended in: put the live item back when the login
+   wrote it, which it did only when it filed its credentials nowhere in its
+   own home (6a and 6b find nothing). Then live bytes that differ from
+   `old` are kept as `written`, and `old` is written back (the item removed
+   when `old` is nil). Otherwise a changed live item is Claude Code's own
+   refresh and stays: with `CLAUDE_CONFIG_DIR` set, 2.1.282 files a login
+   under `paths.loginService` and never writes the live item, and stale
+   tokens written over a refresh could end the live login. Then
+   `tx.clearAdding`. A restore that fails leaves the record for the next
+   start. Then a non-zero status → `loginFailed`.
 6. Locate the new credentials (Claude), reading only, first hit wins:
    a. `root/.claude/.credentials.json` exists → its bytes.
    b. the login's item holds bytes that differ from `before` → those
       bytes; the item is the source. Content, not existence: the login
       home's fixed path always names the same item, and an earlier add
       killed before its removal leaves that item behind.
-   c. `written` → the login overwrote the live item.
+   c. `written` → the login wrote the live item and nothing else (5).
    d. → `loginProducedNothing`.
-7. `switcher.importLogin(p, root, claudeCreds)`. Only once it has committed
+7. `switcher.importInTurn(p, root, claudeCreds)`. Only once it has committed
    are the source item (6b) deleted and root removed: a failed import leaves
    both in place and throws its error. Then probe the new account
-   (`live: false`) and `write` its usage. `differs` = expected email given
-   and `saved.email != expected`. Any failure before 7 removes root.
+   (`probeInTurn`, `live: false`) and `write` its usage. `differs` =
+   expected email given and `saved.email != expected`. Any failure before 7
+   removes root, except a stop that fails (4).
 
 Stopping a login: claim `root/pid` by an exclusive create. When that
 succeeds the script has not filed its pid and, its link failing, exits
@@ -861,10 +885,12 @@ after 5 s.
 
 The live login is never read by the provider's login command and never
 revoked: the throwaway home guarantees that on Codex; on Claude the restore
-in 5 covers a Keychain-writing login on every outcome, and the `adding`
-record carries it across a crash to the next start. Credentials a login
-wrote only over the live item (6c) are lost when the import fails: the live
-login comes first.
+in 5 covers a login that writes the live item on every outcome, and the
+`adding` record carries it across a crash to the next start. Credentials a
+login wrote only over the live item (6c) are lost when the import fails: the
+live login comes first. Keeping them is not worth more machinery: only an
+old CLI writes there, and what such a failure loses is the new login, which
+another add redoes, never the live one.
 
 ## KibaApp
 

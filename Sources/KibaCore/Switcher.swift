@@ -111,11 +111,9 @@ public final class Switcher: Sendable {
 
     /// Saves the login a provider login left in the throwaway home `root`
     /// (Claude: `root/.claude/.claude.json` plus `claudeCreds`; Codex:
-    /// `root/.codex/auth.json`) under the name it belongs to. `noLive` when
-    /// nothing is there.
-    public func importLogin(_ p: Provider, root: URL, claudeCreds: Data?) throws -> SlotName {
-        ops(p).enterBlocking()
-        defer { ops(p).leave() }
+    /// `root/.codex/auth.json`) under the name it belongs to, for an add that
+    /// holds `p`'s turn. `noLive` when nothing is there.
+    func importInTurn(_ p: Provider, root: URL, claudeCreds: Data?) throws -> SlotName {
         let files: any LiveFiles
         switch p {
         case .claude: files = ClaudeLive(paths: paths, store: store, secrets: MemorySecret(claudeCreds), root: root)
@@ -150,16 +148,8 @@ public final class Switcher: Sendable {
         return outcome
     }
 
-    /// Probes the saved login `n` and records the outcome, in `p`'s turn;
-    /// `noAccount` when there is no such login.
-    @discardableResult
-    func probe(_ p: Provider, _ n: SlotName, live: Bool) async throws -> ProbeOutcome {
-        await ops(p).enter()
-        defer { ops(p).leave() }
-        return try await probeInTurn(p, n, live: live)
-    }
-
-    /// `probe` for an operation that already holds `p`'s turn.
+    /// Probes the saved login `n` and records the outcome, for an operation
+    /// that holds `p`'s turn; `noAccount` when there is no such login.
     @discardableResult
     func probeInTurn(_ p: Provider, _ n: SlotName, live: Bool) async throws -> ProbeOutcome {
         guard let row = try store.fetch(p, n) else { throw KibaError.noAccount(p, n.raw) }
