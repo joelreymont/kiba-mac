@@ -921,8 +921,11 @@ test needs a read in flight.
 
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
 `refreshing`, `busy`, `message`, `note`, `error`, `lastProbe: ProbeRun?`
-(epoch the latest probe of every account started, and `complete`: every
-account probed and recorded), `panelOpen`, `autoProbed`, `now`
+(epoch the latest probe of every account started, `clean`: nothing failed
+or waited and every provider was probed, and the usage it recorded per
+account; `complete(snapshot)`: clean, and every row the snapshot shows
+holds the usage the run recorded, so a row it missed or one added since
+leaves it partial after the read that shows it), `panelOpen`, `autoProbed`, `now`
 (ticks every 30 s while open), `cursor: ActionKey?`, `confirming: Choice?`
 (kind `forget` | `reset`, provider, name), `refreshIntervalSec` (UserDefaults,
 default 120, min 15).
@@ -938,14 +941,18 @@ default 120, min 15).
 - Notices. Each action returns an `Outcome` (text, `held`, errors). A plain
   confirmation shows in `message` and fades after 4 s. A held result goes
   to `note` and every error to the action error; both stay until Dismiss
-  (`dismiss()`) or the next action the user starts supersedes them. The
-  probe that opening the panel starts supersedes nothing: its held lines
-  and errors join what is shown, skipping lines already there. Held: "Added
-  <x>, not <y>" and a probe that missed accounts; plain: every other result.
+  (`dismiss()`) or the next action the user starts supersedes them. An
+  error reported while an action runs (`report`) joins that action's
+  errors when it finishes. The probe that opening the panel starts
+  supersedes nothing: its held lines, errors and gauge faults join what is
+  shown, skipping lines already there. Held: "Added <x>, not <y>" and a
+  probe that missed accounts; plain: every other result.
   `announce` (set by the status item to post
   `NSAccessibility` `.announcementRequested`, high priority) speaks each
-  action's result and errors as it finishes, and each reported error. The
-  status error is separate: set by a failed read, cleared by the next good one.
+  action's result and errors as it finishes, and each reported error; the
+  opening probe speaks only the lines it adds, so a held note is spoken
+  once and an open does not repeat it. The status error is separate: set
+  by a failed read, cleared by the next good one.
 - Actions (`busy` guards all):
   `use(p, name)` — a dead row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
@@ -953,15 +960,19 @@ default 120, min 15).
   provider answered: record `ok` or `unknown`), waiting (record `expired`
   on a row probed as live: its CLI refreshes the token, kiba never does),
   failed (record `expired` on a saved row, `error` or `revoked`: no fresh
-  usage) and removed (`.revoked`). Wording: nothing saved "No saved
+  usage), removed (`.revoked`) and not probed (a row shown with no
+  outcome: its provider could not be probed, or its login changed before
+  its usage was recorded). Each row shown when the probe ends and each
+  account a report names counts once, so a provider that fails whole
+  still counts its rows. Wording: nothing saved "No saved
   accounts to refresh"; all refreshed "Usage refreshed for 2 accounts";
-  some "Usage refreshed for 1 of 3 accounts: 1 failed, 1 removed" or
-  "…: 1 live login waiting for its CLI"; none "Usage not refreshed: 2
+  some "Usage refreshed for 1 of 3 accounts: 1 failed, 1 removed",
+  "…: 1 live login waiting for its CLI" or "Usage refreshed for 2 of 4
+  accounts: 2 not probed"; none "Usage not refreshed: 2
   failed"; a failed or removed account adds "<Provider>: <name>: <note>" or
   "<Provider>: removed <name>, <note>", and save-back and provider errors
-  become the action error. A result with a failed or removed account is
-  held, every other is plain; `lastProbe` records the run, complete when
-  nothing failed or waited and every provider was probed. `forget(p, name)`;
+  become errors, each line once. A result that missed any account is
+  held, every other is plain; `lastProbe` records the run. `forget(p, name)`;
   `redeem(p, name)` — "Resetting
   limit for <name>…", `Backend.redeem`, then one sentence per outcome:
   reset "Limit reset for <name>", notLimited "<name> is not at a limit;
@@ -1143,9 +1154,10 @@ min ago" (it missed accounts) | "Oldest usage from 40 min ago" (no probe
 yet: the oldest record shown) | "Saved logins" (no records) |
 "Unavailable"; the Refresh usage row's detail is the latest probe's age, and
 each row's tooltip and VoiceOver value carry its own record's age. "Not
-logged in" under a provider without a live login; "Retry" row when status
-failed; error, held note and message below the title (error in `out`, note
-in `ink`, message in `idle`, max 3 lines each), with a Dismiss button (an
+logged in" under a provider without a live login, or the provider's error,
+up to 3 lines; "Retry" row when status failed; error, held note and
+message below the title (error in `out`, note in `ink`, message
+in `idle`, each shown whole: the panel scrolls), with a Dismiss button (an
 `xmark`, "Dismiss notice") at their right while a note or action error is
 held. Action names stay the same through the flow: "Save the current
 login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →

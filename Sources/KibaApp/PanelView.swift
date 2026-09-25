@@ -84,12 +84,12 @@ struct PanelView: View {
         }
     }
 
+    /// Shown whole, however many lines it holds: the panel scrolls.
     @ViewBuilder private func noticeLine(_ text: String, color: Color) -> some View {
         if !text.isEmpty {
             Text(text)
                 .font(Theme.meta)
                 .foregroundStyle(color)
-                .lineLimit(Theme.noticeLines)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -135,7 +135,7 @@ struct PanelView: View {
         Text(text)
             .font(Theme.meta)
             .foregroundStyle(color)
-            .lineLimit(Theme.noticeLines)
+            .lineLimit(Theme.statusLines)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, Theme.inset)
             .padding(.bottom, Theme.eyebrowBottom)

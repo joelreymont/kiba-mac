@@ -90,8 +90,18 @@ struct Gauge: Equatable, Sendable {
 struct ProbeRun: Equatable, Sendable {
     /// Epoch seconds the probe started; every record it wrote is as new.
     var at: Int
-    /// Every account was probed and its usage recorded.
-    var complete: Bool
+    /// Nothing failed or waited, and every provider was probed.
+    var clean: Bool
+    /// The usage it recorded, by provider and account.
+    var records: [Provider: [SlotName: UsageRecord]]
+
+    /// Clean, and every row `s` shows holds the usage this run recorded: a
+    /// row it did not record, or one added since, leaves it partial.
+    func complete(_ s: Snapshot) -> Bool {
+        clean && s.providers.allSatisfy { p in
+            p.accounts.allSatisfy { a in a.usage != nil && a.usage == records[p.provider]?[a.name] }
+        }
+    }
 }
 
 /// What an action came to. A plain confirmation fades; a held result (an
@@ -116,7 +126,7 @@ final class AppModel {
     /// The running action's label, then its plain confirmation, which fades.
     private(set) var message = ""
     /// A result that needs attention, kept until dismissed or superseded:
-    /// what the last user action came to, then what the latest probe missed.
+    /// what the last user action came to, then what the probes since missed.
     var note: String { Self.lines(actionNote, probeNote) }
     /// The latest probe of every saved account; nil until one has run.
     private(set) var lastProbe: ProbeRun?
@@ -142,8 +152,9 @@ final class AppModel {
     /// or superseded by the next action the user starts.
     private var actionNote = ""
     private var actionError = ""
-    /// The latest probe's held result, its save-back and provider failures
-    /// and the providers they concern; each probe replaces the last probe's.
+    /// The probes' held results, their save-back and provider failures and
+    /// the providers those concern: a probe the user starts replaces them,
+    /// the one opening the panel starts adds to them.
     private var probeNote = ""
     private var probeError = ""
     private var probeFaults: Set<Provider> = []
@@ -218,7 +229,7 @@ final class AppModel {
         if refreshing { return Copy.refreshing }
         guard availability == .ready else { return Copy.unavailable }
         if let run = lastProbe {
-            return (run.complete ? Copy.probedAll : Copy.probedSome) + Rows.age(run.at, now: now)
+            return (run.complete(snapshot) ? Copy.probedAll : Copy.probedSome) + Rows.age(run.at, now: now)
         }
         let times = snapshot.providers.flatMap(\.accounts).compactMap(\.usage?.fetchedAt).filter { $0 > 0 }
         guard let oldest = times.min() else { return Copy.saved }
@@ -524,14 +535,14 @@ final class AppModel {
         probe(.probe)
     }
 
-    /// `.autoProbe` is the probe that opening the panel starts: it must not
-    /// wipe the report of an action that failed while the panel was closed.
-    /// Nothing saved leaves no probe to date.
+    /// `.autoProbe` is the probe that opening the panel starts: it adds to
+    /// what is held, so the report of an action that failed while the panel
+    /// was closed stays. Nothing saved leaves no probe to date.
     private func probe(_ scope: Scope) {
         let start = Int(Date().timeIntervalSince1970)
-        run(Copy.probing, scope: scope) { [weak self] b in
-            let t = Tally(await Self.probe(b))
-            self?.lastProbe = t.total == 0 ? nil : ProbeRun(at: start, complete: t.complete)
+        run(Copy.probing, scope: scope) { [self] b in
+            let t = Tally(await Self.probe(b), shown: snapshot)
+            lastProbe = t.total == 0 ? nil : ProbeRun(at: start, clean: t.clean, records: t.records)
             return t.outcome
         }
     }
@@ -596,7 +607,7 @@ final class AppModel {
     /// result or its error, and rereads the status either way; stays busy
     /// until the reread has applied, so no control acts on the rows from
     /// before the action. What the user starts supersedes everything held;
-    /// the probe the panel starts on opening supersedes the last probe's only.
+    /// the probe the panel starts on opening supersedes nothing.
     private func run(
         _ label: String, scope: Scope = .action, _ work: @escaping @MainActor (any Backend) async throws -> Outcome
     ) {
@@ -622,30 +633,38 @@ final class AppModel {
         }
     }
 
-    /// Shows what an action came to and speaks it; the probe the panel
-    /// starts on opening is spoken only when what it holds has changed, so
-    /// an open does not repeat the same note over the popover.
+    /// Shows what an action came to and speaks it. The probe the panel
+    /// starts on opening adds the held lines and errors not shown yet and
+    /// speaks only those, so an open does not repeat a note over the popover.
     private func show(_ o: Outcome, _ scope: Scope) {
         let held = o.held ? o.text : ""
-        let errors = o.errors.joined(separator: Copy.lineBreak)
-        let changed = (probeNote, probeError) != (held, errors)
+        var said = [o.text] + o.errors
         switch scope {
         case .action:
             actionNote = held
-            actionError = errors
+            // A failure reported while the action ran stays beside its result.
+            actionError = Self.merge(actionError, o.errors)
             // Rows an action probed, added or removed outdate the last full probe.
             lastProbe = nil
-        case .probe, .autoProbe:
+        case .probe:
             probeNote = held
-            probeError = errors
+            probeError = o.errors.joined(separator: Copy.lineBreak)
             probeFaults = o.faults
+        case .autoProbe:
+            let shown = Set([actionNote, probeNote, actionError, probeError].flatMap(Self.split))
+            let note = Self.split(held).filter { !shown.contains($0) }
+            let errors = o.errors.filter { !shown.contains($0) }
+            probeNote = Self.merge(probeNote, note)
+            probeError = Self.merge(probeError, errors)
+            probeFaults.formUnion(o.faults)
+            said = note + errors
         }
         if o.held {
             message = ""
         } else {
             flash(o.text)
         }
-        if scope != .autoProbe || changed { announce(([o.text] + o.errors).joined(separator: Copy.lineBreak)) }
+        if !said.isEmpty { announce(said.joined(separator: Copy.lineBreak)) }
     }
 
     private func clearProbe() {
@@ -660,20 +679,25 @@ final class AppModel {
     }
 
     /// What a result supersedes: the user's action or probe, everything
-    /// held; the probe the panel starts on opening, the last probe's only.
+    /// held; the probe the panel starts on opening, nothing.
     private enum Scope { case action, probe, autoProbe }
 
     private func fail(_ reason: String) {
-        actionError = Self.merge(actionError, reason)
+        actionError = Self.merge(actionError, Self.split(reason))
         announce(reason)
     }
 
     /// `old` followed by the lines of `new` it lacks, so a failure reported
     /// from outside an action joins the one held instead of replacing it.
-    private static func merge(_ old: String, _ new: String) -> String {
-        var lines = old.isEmpty ? [] : old.components(separatedBy: Copy.lineBreak)
-        for l in new.components(separatedBy: Copy.lineBreak) where !lines.contains(l) { lines.append(l) }
+    private static func merge(_ old: String, _ new: [String]) -> String {
+        var lines = split(old)
+        for l in new where !lines.contains(l) { lines.append(l) }
         return lines.joined(separator: Copy.lineBreak)
+    }
+
+    /// The lines of `text`; none when it is empty.
+    private static func split(_ text: String) -> [String] {
+        text.isEmpty ? [] : text.components(separatedBy: Copy.lineBreak)
     }
 
     private func flash(_ text: String) {
@@ -726,13 +750,16 @@ final class AppModel {
 
     /// What probing every provider came to, counted per account: refreshed
     /// (the provider answered), failed (no fresh usage), removed (a later
-    /// login revoked it), and waiting (the live login's token has expired;
-    /// its CLI refreshes it on its next run, kiba never does).
+    /// login revoked it), waiting (the live login's token has expired; its
+    /// CLI refreshes it on its next run, kiba never does), and skipped (a
+    /// row shown that no outcome covers: its provider could not be probed,
+    /// or its login changed before its usage was recorded).
     private struct Tally {
         var refreshed = 0
         var failed = 0
         var removed = 0
         var waiting = 0
+        var skipped = 0
         /// A provider could not be probed, or an account's usage not recorded.
         var unprobed = false
         /// One line per failed or removed account.
@@ -740,12 +767,20 @@ final class AppModel {
         /// Save-back and provider failures, and the providers they concern.
         var errors: [String] = []
         var faults: Set<Provider> = []
+        /// The usage each account's probe came back with.
+        var records: [Provider: [SlotName: UsageRecord]] = [:]
 
-        init(_ reports: [(Provider, ProbeReport)]) {
+        /// Counts each account once: every row `shown` lists, and every
+        /// account a report names.
+        init(_ reports: [(Provider, ProbeReport)], shown: Snapshot) {
             for (p, r) in reports {
+                let probed = Set(r.accounts.map(\.name))
+                let rows = shown.providers.first { $0.provider == p }?.accounts ?? []
+                skipped += rows.count(where: { !probed.contains($0.name) })
                 for a in r.accounts {
                     switch a.outcome {
                     case .record(let u, _):
+                        records[p, default: [:]][a.name] = u
                         switch u.state {
                         case .ok, .unknown:
                             refreshed += 1
@@ -760,27 +795,28 @@ final class AppModel {
                         lines.append("\(p.title): removed \(a.name.raw), \(note)")
                     }
                 }
-                if let e = r.saveBackError { errors.append("\(p.title): \(e)") }
-                if let e = r.providerError {
-                    unprobed = true
-                    errors.append("\(p.title): \(e)")
-                }
-                if r.saveBackError != nil || r.providerError != nil { faults.insert(p) }
+                // Claude credentials without a config fail the save-back and the
+                // probe for one reason: it shows once.
+                let fails = [r.saveBackError, r.providerError].compactMap { $0.map { "\(p.title): \($0)" } }
+                for e in fails where !errors.contains(e) { errors.append(e) }
+                if !fails.isEmpty { faults.insert(p) }
+                if r.providerError != nil { unprobed = true }
             }
         }
 
-        var complete: Bool { failed == 0 && waiting == 0 && !unprobed }
-        var total: Int { refreshed + failed + removed + waiting }
+        var clean: Bool { failed == 0 && waiting == 0 && !unprobed }
+        var total: Int { refreshed + failed + removed + waiting + skipped }
 
-        /// Complete success, nothing to probe and a live login waiting for
-        /// its CLI are plain; a failed or removed account is held with one
-        /// line per account.
+        /// Every account refreshed, or nothing to probe, is plain; a probe
+        /// that missed any account is held, with one line per failed or
+        /// removed account.
         var outcome: Outcome {
             let missed = total - refreshed
             var misses: [String] = []
             if failed > 0 { misses.append("\(failed) failed") }
             if removed > 0 { misses.append("\(removed) removed") }
             if waiting > 0 { misses.append(Copy.waiting(waiting)) }
+            if skipped > 0 { misses.append("\(skipped) not probed") }
             let tail = misses.joined(separator: Copy.listSep)
             let head: String
             if total == 0 {
@@ -793,7 +829,7 @@ final class AppModel {
                 head = "Usage refreshed for \(refreshed) of \(Copy.accounts(total)): \(tail)"
             }
             return Outcome(
-                text: ([head] + lines).joined(separator: Copy.lineBreak), held: failed + removed > 0,
+                text: ([head] + lines).joined(separator: Copy.lineBreak), held: missed > 0,
                 errors: errors, faults: faults)
         }
     }

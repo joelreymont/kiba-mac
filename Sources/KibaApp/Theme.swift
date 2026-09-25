@@ -96,7 +96,9 @@ enum Theme {
     static let eyebrowTop: CGFloat = 8
     static let eyebrowBottom: CGFloat = 4
     static let blockGap: CGFloat = 6
-    static let noticeLines = 3
+    /// A provider's status line, its error or "Not logged in", wraps to
+    /// at most this many lines.
+    static let statusLines = 3
 
     // MARK: Reservoir
 

@@ -2012,11 +2012,11 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(model.probeAge == "just now")
 
     // The live login's token has expired: codex refreshes it on its next
-    // run, kiba never does, so that is routine, not a failure to hold.
+    // run, kiba never does, so that is no failure, but its usage is missed.
     model.probeUsage()
     try await settle(model)
-    #expect(model.note == "")
-    #expect(model.message == "Usage refreshed for 1 of 2 accounts: 1 live login waiting for its CLI")
+    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 live login waiting for its CLI")
+    #expect(model.message == "")
     #expect(model.meta == "Some usage probed just now")
 }
 
@@ -2102,7 +2102,8 @@ func members(_ body: Data?) throws -> [String: String] {
     try await settle(model)
     model.probeUsage()
     try await settle(model)
-    #expect(model.message == "Usage not refreshed")
+    #expect(model.note == "Usage not refreshed: 2 not probed")
+    #expect(model.message == "")
     let title = Provider.claude.title
     #expect(model.error == "\(title): \(KibaError.mixed.reason)\n\(title): \(unrepaired.reason)")
     #expect(http.requests.isEmpty)
@@ -2110,7 +2111,7 @@ func members(_ body: Data?) throws -> [String: String] {
 }
 
 /// A revoked login whose removal the store refused is still saved: the
-/// probe names it as not recorded and counts nothing removed.
+/// probe names it as not recorded and counts it as not probed, not removed.
 @MainActor @Test func appModelCountsOnlyRecordedRemovals() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
@@ -2133,8 +2134,8 @@ func members(_ body: Data?) throws -> [String: String] {
     try await settle(model)
     model.probeUsage()
     try await settle(model)
-    #expect(model.note == "")
-    #expect(model.message == "Usage refreshed for 1 account")
+    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 not probed")
+    #expect(model.message == "")
     #expect(model.error == "\(Provider.codex.title): \(unrecorded)")
 }
 
@@ -2176,6 +2177,157 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(model.gauge == Gauge(cells: [.unknown, .spent], alert: false, dim: false))
 }
 
+/// A provider that could not be probed still counts its rows: the notice
+/// says how many were missed and holds, and the header marks the probe partial.
+@MainActor @Test func appModelCountsRowsOfAnUnprobedProvider() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, _) = try codexPair(w)
+    let creds = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+    for (email, org) in [("a@x", "org-a"), ("b@x", "org-b")] {
+        try w.seed(.claude, try slot(email), Identity(email: email, plan: "max", org: org),
+                   login: creds, profile: profile(email, org: org))
+    }
+    // Claude credentials without a config: no Claude account can be probed.
+    try creds.write(to: w.paths.claudeCredsFile(root: nil))
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    let orphan = KibaError.orphanLive(w.paths.claudeConfigFile(root: nil)).reason
+    #expect(model.note == "Usage refreshed for 2 of 4 accounts: 2 not probed")
+    #expect(model.error == "Claude Code: \(orphan)")
+    #expect(model.meta == "Some usage probed just now")
+}
+
+/// A probe is complete only while every row shown holds the usage it
+/// recorded: a login saved again while the probe runs, or an account saved
+/// after it, leaves that row unprobed.
+@MainActor @Test func appModelProbeCoversEveryRowShown() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, http, _, by) = try heldCodexPair(w)
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    // Another Kiba saves b@y again while the probe waits on a@y.
+    model.probeUsage()
+    try await http.arrival()
+    try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
+               login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb2"), profile: nil)
+    http.release()
+    try await settle(model)
+    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 not probed")
+    #expect(model.meta == "Some usage probed just now")
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.meta == "All usage probed just now")
+
+    try w.seed(.codex, try slot("c@y"), Identity(email: "c@y", plan: "pro", org: "acct-c"),
+               login: codexAuth("c@y", plan: "pro", account: "acct-c", tag: "yc"), profile: nil)
+    model.refresh(force: true)
+    try await settle(model)
+    #expect(model.meta == "Some usage probed just now")
+}
+
+/// The probe the panel starts on opening adds to what is held and takes
+/// nothing away: a removed account's line and a provider's error and fault
+/// stay, and the open says nothing it did not find new.
+@MainActor @Test func appModelOpeningKeepsHeldNotes() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, _) = try codexPair(w, [
+        answer(Status.ok, codexUsage(session: 20, week: 45)),
+        answer(Status.unauthorized, #"{"error":{"code":"token_revoked","message":"Token revoked"}}"#),
+        answer(Status.unauthorized, #"{"error":"invalid_grant"}"#),
+        answer(Status.ok, codexUsage(session: 20, week: 45)),
+    ])
+    let orphanCreds = w.paths.claudeCredsFile(root: nil)
+    try claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day).write(to: orphanCreds)
+    let model = AppModel(connect: { core })
+    var spoken: [String] = []
+    model.announce = { spoken.append($0) }
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    let held = "Usage refreshed for 1 of 2 accounts: 1 removed\n"
+        + "Codex: removed b@y, login revoked by a later `codex login`"
+    let why = "Claude Code: " + KibaError.orphanLive(w.paths.claudeConfigFile(root: nil)).reason
+    #expect(model.note == held)
+    #expect(model.error == why)
+    #expect(spoken == [held + "\n" + why])
+
+    try FileManager.default.removeItem(at: orphanCreds)
+    model.opened()
+    try await settle(model)
+    model.closed()
+    #expect(model.note == held)
+    #expect(model.error == why)
+    #expect(model.gauge.cells.first == .fault)
+    #expect(spoken == [held + "\n" + why])
+}
+
+/// A live login waiting for its CLI is news the first time a probe finds
+/// it: spoken once and held, and not spoken again by the next open, until
+/// an action the user starts supersedes it.
+@MainActor @Test func appModelAnnouncesAWaitingLoginOnce() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, _) = try codexPair(w, [
+        answer(Status.unauthorized, "{}"), answer(Status.ok, codexUsage(session: 15, week: 25)),
+        answer(Status.unauthorized, "{}"), answer(Status.ok, codexUsage(session: 15, week: 25)),
+        answer(Status.ok, codexUsage(session: 20, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
+    ])
+    let model = AppModel(connect: { core })
+    var spoken: [String] = []
+    model.announce = { spoken.append($0) }
+    model.start()
+    try await settle(model)
+
+    let waiting = "Usage refreshed for 1 of 2 accounts: 1 live login waiting for its CLI"
+    for _ in 0..<2 {
+        model.opened()
+        try await settle(model)
+        model.closed()
+        #expect(model.note == waiting)
+        #expect(spoken == [waiting])
+    }
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "")
+    #expect(model.message == "Usage refreshed for 2 accounts")
+}
+
+/// An error reported while an action runs (the status menu's login item)
+/// stays when the action finishes, beside its result.
+@MainActor @Test func appModelKeepsErrorsReportedDuringAnAction() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, http, _, by) = try heldCodexPair(w)
+    let model = AppModel(connect: { core })
+    var spoken: [String] = []
+    model.announce = { spoken.append($0) }
+    model.start()
+    try await settle(model)
+
+    model.use(.codex, by)
+    try await http.arrival()
+    let failure = KibaError.loginItem(Fixed.offline)
+    model.report(failure)
+    http.release()
+    try await settle(model)
+    #expect(model.message == "Codex: now b@y")
+    #expect(model.error == failure.reason)
+    #expect(spoken == [failure.reason, "Codex: now b@y"])
+}
+
 /// A Codex world where a@y is live and saved and b@y is saved, and the
 /// `CoreBackend` over it; a switch probes both accounts once, and so does
 /// a probe, which reaches a@y first. `answers` are the usage answers, in turn.
@@ -2195,6 +2347,19 @@ func codexPair(
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
         runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
     return (backend, ay, by)
+}
+
+/// `codexPair`'s world, whose usage requests all get one answer, none
+/// before the test calls `release()`.
+func heldCodexPair(_ w: World) throws -> (CoreBackend, HeldHTTP, SlotName, SlotName) {
+    let (_, ay, by) = try codexPair(w)
+    let http = HeldHTTP(held: Endpoint.codexUsage, answers: [
+        Endpoint.codexUsage: answer(Status.ok, codexUsage(session: 20, week: 45)),
+    ])
+    let backend = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:])))
+    return (backend, http, ay, by)
 }
 
 /// A Codex world where a@y is live and saved with no limit reset left and
