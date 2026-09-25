@@ -19,13 +19,18 @@ public enum PrivateFS {
     static let readChunk = 1 << 16
     /// Directories are walked without following links.
     static let dirFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+    /// The directory a file was renamed in is opened, through links, to flush it.
+    static let flushFlags = O_RDONLY | O_DIRECTORY | O_CLOEXEC
     /// The entries every directory lists for itself and its parent.
     static let dotName = Array(".".utf8)
     static let dotDotName = Array("..".utf8)
 
-    /// Replaces the file behind `url` (after its symlink chain) with `data`, mode 0600.
-    /// The temp beside the target has a random name, so concurrent writers never
-    /// share one.
+    /// Replaces the file behind `url` (after its symlink chain) with `data`, mode 0600,
+    /// and returns once the new file and its name are on permanent storage. The
+    /// temp beside the target has a random name, so concurrent writers never share
+    /// one. A failure before the rename leaves the target as it was; a failure to
+    /// flush the directory after it leaves the new file in place, not known to
+    /// survive a power loss.
     public static func writePrivate(_ data: Data, to url: URL) throws {
         let target = try writeTarget(url).path
         let tmp = "\(target).\(String(UInt64.random(in: .min ... .max), radix: tmpRadix))\(tmpSuffix)"
@@ -39,6 +44,7 @@ public enum PrivateFS {
             if unlink(tmp) != 0 { errs.append(failure("unlink", tmp)) }
             throw KibaError.io(errs.joined(separator: "; "))
         }
+        try flushDir(URL(fileURLWithPath: target, isDirectory: false).deletingLastPathComponent().path)
     }
 
     /// Creates `url` and any missing ancestors with mode 0700; existing directories,
@@ -137,7 +143,8 @@ public enum PrivateFS {
     }
 
     /// Writes all of `data` to the fresh temp `fd`, forces mode 0600 whatever the umask,
-    /// and flushes it to disk. Returns the failure, or nil.
+    /// and flushes it to permanent storage: `fsync` leaves it in the drive's cache,
+    /// `F_FULLFSYNC` does not. Returns the failure, or nil.
     static func fill(_ fd: Int32, _ data: Data, _ tmp: String) -> String? {
         guard fchmod(fd, fileMode) == 0 else { return failure("chmod", tmp) }
         let err: String? = data.withUnsafeBytes { raw in
@@ -153,7 +160,17 @@ public enum PrivateFS {
             return nil
         }
         if let err { return err }
-        return fsync(fd) == 0 ? nil : failure("fsync", tmp)
+        return fcntl(fd, F_FULLFSYNC) == 0 ? nil : failure("fsync", tmp)
+    }
+
+    /// Flushes the directory `dir` to permanent storage, so a rename in it
+    /// survives a power loss.
+    static func flushDir(_ dir: String) throws {
+        let fd = open(dir, flushFlags)
+        guard fd >= 0 else { throw KibaError.io(failure("open", dir)) }
+        // A read-only directory handle holds no data, so closing it cannot fail in a way that matters.
+        defer { close(fd) }
+        guard fcntl(fd, F_FULLFSYNC) == 0 else { throw KibaError.io(failure("fsync", dir)) }
     }
 
     /// The path the link at `path` points to; a relative target is joined to the link's

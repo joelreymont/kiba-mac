@@ -60,6 +60,7 @@ public enum KibaError: Error, Equatable {
   case noCLI(String)                 // claude/codex not on PATH
   case mismatch(Provider, String)    // saved row names another account than its name
   case mixed                         // live Claude config and tokens name different accounts
+  case superseded                    // another Claude install noted its own pending marker first
   case orphanLive(URL)               // Claude creds exist but the config naming their account is missing
   case capacity(String)              // >9 logins under one email, doc over 4 MiB
   case unsafePath(URL)               // symlink chain longer than 8 hops or ends in a link
@@ -139,9 +140,15 @@ public enum PrivateFS {
 `writePrivate`: resolve the write target through the symlink chain (a live
 file that is a symlink stays a symlink; the file behind it is replaced), open
 a uniquely named temp (`<target>.<random>.tmp`, `O_EXCL`) in the same
-directory, mode 0600, write all bytes, `fsync`, `rename` over the target; two
-concurrent writers can never disturb each other's temp. Any failure removes the temp file and
-rethrows. Never `Data.write(options: .atomic)`: it does not control the mode.
+directory, mode 0600, write all bytes, `F_FULLFSYNC` it, `rename` over the
+target, then open the target's directory (following links) and
+`F_FULLFSYNC` it, so the call returns only once the new file and its name
+are on permanent storage (`fsync` alone leaves them in the drive's cache);
+two concurrent writers can never disturb each other's temp. Any failure
+before the rename removes the temp file and rethrows, leaving the target as
+it was; a failed directory flush throws with the new file in place, not
+known to survive a power loss. Never `Data.write(options: .atomic)`: it does
+not control the mode.
 
 ### JSONDoc — byte-exact splicing
 
@@ -256,7 +263,7 @@ no slot directories, no markers: a write transaction is the mutex and every
 row is whole or absent.
 
 ```sql
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 CREATE TABLE IF NOT EXISTS account (
   provider TEXT NOT NULL,          -- "claude" | "codex"
   name     TEXT NOT NULL,          -- SlotName.raw
@@ -274,7 +281,8 @@ CREATE TABLE IF NOT EXISTS live (
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pending (
   provider TEXT PRIMARY KEY,       -- row absent: no install in flight
-  name     TEXT NOT NULL           -- name an unfinished install was writing
+  name     TEXT NOT NULL,          -- name an unfinished install was writing
+  owner    TEXT                    -- the claim of the install that noted it; NULL: noted by version 1
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS adding (
   provider TEXT PRIMARY KEY,       -- row absent: no add in flight
@@ -303,14 +311,16 @@ public struct Store: Sendable {
   public func adding(_ p: Provider) throws -> LiveItem?          // nil when no add is in flight
   public func write<T>(_ body: (Tx) throws -> T) throws -> T   // BEGIN IMMEDIATE … COMMIT; any throw rolls back and rethrows
 }
-public struct Tx {                                  // only inside `write`
+public struct Claim: Equatable, Sendable { let owner: String }   // one install's hold on the pending marker
+public final class Tx {                             // only inside `write`: closed when `body` ends
   public func put(_ p: Provider, _ s: SavedLogin) throws        // upsert; an existing row keeps its usage when s.usage is nil
   public func setLogin(_ p: Provider, _ n: SlotName, _ doc: Data) throws   // noAccount when absent
   public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws
   public func remove(_ p: Provider, _ n: SlotName) throws        // no-op when absent
   public func noteInstalled(_ p: Provider, _ n: SlotName) throws // upsert into live
-  public func notePending(_ p: Provider, _ n: SlotName) throws   // upsert into pending
-  public func clearPending(_ p: Provider) throws                 // no-op when absent
+  public func notePending(_ p: Provider, _ n: SlotName) throws -> Claim   // upsert into pending under a new owner (UUID)
+  public func owns(_ p: Provider, _ c: Claim) throws -> Bool     // the marker is still c's
+  public func clearPending(_ p: Provider, _ c: Claim) throws     // deletes c's marker; no-op once another replaced it
   public func noteAdding(_ p: Provider, _ i: LiveItem) throws    // upsert into adding
   public func clearAdding(_ p: Provider) throws                  // no-op when absent
 }
@@ -328,6 +338,14 @@ A `usage` column that fails to decode yields
 `UsageRecord(fetchedAt: 0, state: .unknown, note: "usage record is unreadable; refresh usage", limits: [])`.
 `write` bodies may do file and Keychain work: the transaction is the
 cross-process mutex for a switch, held only for the duration of the body.
+The `Tx` ends with the body, committed or rolled back: kept past it, every
+call throws `db("<op>: transaction is closed")` instead of running outside
+the transaction.
+
+`init` applies the schema in one `write`. A version 1 store (its `pending`
+table has no `owner`: `pragma_table_info` finds none) gains the column by
+`ALTER TABLE pending ADD COLUMN owner TEXT`; every row is kept, and a marker
+it holds, owned by no install, stays until an install replaces it.
 
 `liveName` (kiba `LIVE-NAME`): candidates `email`, `email #2` … `email #9`.
 For each: no row → first free candidate remembered; row exists and its org
@@ -353,16 +371,26 @@ else `mismatch`; login must be an object with a `claudeAiOauth` object else
 `oauthAccount` value replaced by the profile bytes (any value kind,
 including `null`), or inserted before the closing brace (with a comma when
 the object has members), or a new `{"oauthAccount":…}` when the file does not
-exist. The checks, the read of the previous config bytes and the splice run
-in one `store.write` that ends with `tx.notePending(n)`, committed before
-either live file changes. Then, in a second `store.write`: write config →
-`secrets.write(login)` → `tx.noteInstalled(n)` → `tx.clearPending`. When
+exist. The checks, the read of the previous config and credential bytes and
+of whether an install was pending, and the splice run in one `store.write`
+that ends with `claim = tx.notePending(n)`, committed before either live
+file changes. Then, in a second `store.write`: `tx.owns(claim)` else
+`superseded` (another install noted its own marker since; this one writes
+nothing and its preparation is dropped) → write config →
+`secrets.write(login)` → `tx.noteInstalled(n)` → `tx.clearPending(claim)`.
+Each file write returns only once it is on permanent storage (`PrivateFS`),
+so the marker is never cleared ahead of the files it vouches for. When
 either live write fails, the previous config bytes go back (the file is
-removed when there was none) and `clearPending` commits; the write's error
-is thrown. A config that cannot go back leaves the install pending. A crash
-between the two live writes also leaves it pending, and a pending install
-is mixed whatever the tokens are, so a refresh by Claude Code cannot make
-the next save-back file one account's tokens under another's name.
+removed when there was none) and the write's error is thrown. The marker is
+cleared only when the live files are known to be the pair from before: the
+config went back, the credentials read back as the bytes read before (a
+failed write may still have replaced them), and no install was pending
+before. Otherwise it stays: a config that cannot go back, credentials that
+changed or cannot be read, or a repair of files an earlier install left
+pending, which still disagree. A crash between the two live writes also
+leaves it pending, and a pending install is mixed whatever the tokens are,
+so a refresh by Claude Code cannot make the next save-back file one
+account's tokens under another's name.
 
 `isMixed` (kiba `CLAUDE-MIXED?`): a pending install → true. Else `installed`
 names row S and S exists and the live identity reads and the live config
@@ -457,8 +485,10 @@ public struct CodexProbe  { same }
 ```
 
 A probe never writes: a refreshed document comes back in `.record(_, doc:)`
-and the Switcher persists it. One app process serialises probes, so no lock
-guards a refresh.
+and the Switcher persists it. The Switcher runs one operation per provider
+at a time, so a refresh is never overtaken by a switch that makes the login
+live; and it writes an outcome only while the row still holds the bytes the
+probe read.
 
 Claude:
 1. Expired = `claudeAiOauth.expiresAt/1000 < now + 60`. If expired: live →
@@ -572,6 +602,17 @@ public final class Switcher: Sendable {
 public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [(SlotName, ProbeOutcome)] }
 ```
 
+Each provider's operations run one at a time, first come first served:
+`use`, `probeAll`, `redeem`, `save`, `forget`, `importLogin` and the probe
+`LoginRunner` runs after an import each hold the provider's turn from start
+to end, across every network wait, so a probe that is spending a saved
+login's refresh token finishes before a switch can make that login live.
+The async operations suspend while they wait; the synchronous ones block
+their thread. Other processes are held off only by store transactions, so
+every probe outcome and refreshed login is written only while the row still
+holds the login bytes it was read with (compared inside the `write`); a row
+replaced or forgotten meanwhile is never updated or removed.
+
 - `save`: `isMixed` → `mixed`; identity nil → nil; else `liveName` and the
   provider's `save(to:)` inside one `store.write`.
 - `use`: save-back (skip when mixed; save when a live identity exists),
@@ -587,15 +628,17 @@ public struct ProbeReport { public var saveBackError: String?; public var provid
   Claude credentials without a config stop it here: `orphanLive` is both
   `saveBackError` and `providerError`, no account is probed. Then
   for every saved account: probe (`live` = name == live name, or, while
-  the Claude files are mixed, the installed name); `write`:
-  `setUsage`, `setLogin` when the doc changed, or on `.revoked` for a
-  non-live account `remove`. The live account is never refreshed and never
-  removed.
+  the Claude files are mixed, the installed name); `write`, when the row
+  still holds the probed login: `setUsage`, `setLogin` when the doc
+  changed, or on `.revoked` for a non-live account `remove`. The live
+  account is never refreshed and never removed. An outcome whose row was
+  replaced or forgotten meanwhile is not written and not in `accounts`.
 - `redeem`: `noAccount` without the row; `noResets` unless its
   `usage.resets.count > 0`. `live` = `n` in `liveNames(p, mixed:
   isMixed(p))`, as `probeAll` decides it. The provider's `redeem`; a changed
-  doc is stored with `setLogin` before the result is read (a refresh spends
-  the old grant); a failure throws; after a 200, `probe(p, n, live:)` so the
+  doc is stored with `setLogin`, while the row still holds the login it
+  refreshed, before the result is read (a refresh spends the old grant); a
+  failure throws; after a 200, `probe(p, n, live:)` so the
   row's usage and offer show the result, then the outcome.
 - `importLogin`: reads the identity from the throwaway root (Claude: config
   at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:

@@ -46,34 +46,50 @@ public struct ClaudeLive {
 
     /// kiba `CLAUDE-INSTALL`. The row must exist (`noAccount`), its profile
     /// must name an email `n` belongs to (`mismatch`), its login must hold a
-    /// `claudeAiOauth` object (`badJSON`); then `n` is noted as pending and
-    /// committed, so a crash between the two live writes leaves a pending
-    /// install, which `isMixed` reports. A second transaction gives the config
-    /// the profile and the credentials the login, notes `n` as installed and
-    /// clears the pending install. When a live write fails, the previous
-    /// config goes back and the pending install is cleared; the write's error
-    /// is thrown.
+    /// `claudeAiOauth` object (`badJSON`); then `n` is noted as pending under
+    /// a new claim and committed, so a crash between the two live writes
+    /// leaves a pending install, which `isMixed` reports. A second
+    /// transaction first checks the marker is still this install's
+    /// (`superseded`, nothing written, when another install has noted its
+    /// own since), then gives the config the profile and the credentials the
+    /// login, notes `n` as installed and clears its own marker. When a live
+    /// write fails, the previous config goes back and the write's error is
+    /// thrown; the marker stays unless the live files are known to be the
+    /// pair from before, which no install had left pending.
     public func install(_ n: SlotName) throws {
-        let change = try store.write { tx in
+        let (change, claim) = try store.write { tx in
             let change = try prepare(n)
-            try tx.notePending(.claude, n)
-            return change
+            let claim = try tx.notePending(.claude, n)
+            return (change, claim)
         }
         let failure = try store.write { tx -> (any Error)? in
+            guard try tx.owns(.claude, claim) else { throw KibaError.superseded }
             do {
                 try putConfig(change.after)
                 try secrets.write(change.login)
             } catch {
-                // The credentials were not replaced. A config that cannot go
-                // back keeps the install pending: the files read as mixed.
-                if (try? putConfig(change.before)) != nil { try tx.clearPending(.claude) }
+                if restored(change) { try tx.clearPending(.claude, claim) }
                 return error
             }
             try tx.noteInstalled(.claude, n)
-            try tx.clearPending(.claude)
+            try tx.clearPending(.claude, claim)
             return nil
         }
         if let failure { throw failure }
+    }
+
+    /// After a failed live write: puts the previous config back, then says
+    /// whether the live files are known to be the pair from before the
+    /// install and no install was pending then. The credentials are read
+    /// back: a write that failed may still have replaced them. A config that
+    /// cannot go back, or credentials that cannot be read, leave it unknown.
+    func restored(_ c: Change) -> Bool {
+        guard (try? putConfig(c.config)) != nil, c.settled else { return false }
+        do {
+            return try secrets.read() == c.creds
+        } catch {
+            return false
+        }
     }
 
     /// kiba `CLAUDE-MIXED?`, plus an unfinished install: an install is pending,
@@ -102,9 +118,20 @@ public struct ClaudeLive {
         return (config, creds)
     }
 
-    /// What installing `n` writes, checked: the live config now and with the
-    /// row's profile spliced in, and the row's login.
-    func prepare(_ n: SlotName) throws -> (before: Data?, after: Data, login: Data) {
+    /// What an install writes, and the live state it replaces.
+    struct Change {
+        /// The live config and credentials before; nil where there were none.
+        let config: Data?
+        let creds: Data?
+        /// No install was pending before, so no marker says those two disagree.
+        let settled: Bool
+        /// The config with the row's profile spliced in, and the row's login.
+        let after: Data
+        let login: Data
+    }
+
+    /// What installing `n` writes, checked, and the live state it replaces.
+    func prepare(_ n: SlotName) throws -> Change {
         guard let row = try store.fetch(.claude, n) else { throw KibaError.noAccount(.claude, n.raw) }
         guard let profile = row.profile, n.belongs(to: try ClaudeIdentity.fromOAuthAccount(profile).email) else {
             throw KibaError.mismatch(.claude, n.raw)
@@ -112,8 +139,10 @@ public struct ClaudeLive {
         guard try JSONDoc(row.login).objectSpan(ClaudeIdentity.Key.oauth) != nil else {
             throw KibaError.badJSON(ClaudeIdentity.Key.oauth)
         }
-        let before = try PrivateFS.read(configFile)
-        return (before, try spliced(before, profile), row.login)
+        let config = try PrivateFS.read(configFile)
+        return Change(
+            config: config, creds: try secrets.read(), settled: try store.pending(.claude) == nil,
+            after: try spliced(config, profile), login: row.login)
     }
 
     /// Makes the live config `doc`; nil removes the file a write would replace.

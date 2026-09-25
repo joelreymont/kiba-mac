@@ -2,6 +2,7 @@ import Foundation
 import KibaCore
 import SQLite3
 import Testing
+import os
 
 @testable import KibaApp
 
@@ -137,7 +138,7 @@ import Testing
 
         // A crash between the two live writes of an install of b@x, then a
         // refresh: the tokens match no saved row, and still nothing saves them.
-        try w.store.write { try $0.notePending(.claude, bx) }
+        _ = try w.store.write { try $0.notePending(.claude, bx) }
         try claudeConfig(profB).write(to: config)
         try claudeCreds("xa4", plan: "max", expires: Fixed.now + Fixed.day).write(to: creds)
         #expect(throws: KibaError.mixed) { try sw.save(.claude) }
@@ -154,6 +155,118 @@ import Testing
         #expect(await later.probeAll(.claude).saveBackError == KibaError.mixed.reason)
         #expect(!http.requests.contains { $0.url.absoluteString == Endpoint.claudeToken })
         #expect(try w.store.list(.claude).map(\.login) == [refreshed, credsB])
+    }
+}
+
+@Test func failedRepairKeepsTheSwitchPending() async throws {
+    try await scratch { w in
+        let (ax, bx, cx) = (try slot("a@x"), try slot("b@x"), try slot("c@x"))
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b"), profC = profile("c@x", org: "org-c")
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
+                   login: claudeCreds("xa1", plan: "max", expires: Fixed.now + Fixed.day), profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB)
+        try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"),
+                   login: claudeCreds("xc", plan: "pro", expires: Fixed.now + Fixed.day), profile: profC)
+        // A crash inside a switch from a@x to b@x left b@x's config over
+        // a@x's tokens, which Claude Code has refreshed since. The live
+        // credentials link into a directory no file can be created in.
+        let locked = w.dir.appending(component: "locked")
+        let creds = locked.appending(component: "creds.json")
+        let config = w.paths.claudeConfigFile(root: nil)
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+        try claudeCreds("xa2", plan: "max", expires: Fixed.now + Fixed.day).write(to: creds)
+        try claudeConfig(profB).write(to: config)
+        try FileManager.default.createSymbolicLink(at: w.paths.claudeCredsFile(root: nil), withDestinationURL: creds)
+        try w.store.write { try $0.noteInstalled(.claude, ax) }
+        _ = try w.store.write { try $0.notePending(.claude, bx) }
+        try FileManager.default.setAttributes([.posixPermissions: Fixed.lockedMode], ofItemAtPath: locked.path)
+        defer { chmod(locked.path, mode_t(Fixed.openMode)) }
+        let sw = w.switcher(StubHTTP([]))
+
+        // The repair fails at the credentials and puts the config back: the
+        // files are still mixed, so nothing may save them.
+        await #expect(throws: KibaError.self) { try await sw.use(.claude, cx) }
+        #expect(w.read(config) == claudeConfig(profB))
+        #expect(throws: KibaError.mixed) { try sw.save(.claude) }
+        #expect(try w.store.fetch(.claude, bx)?.login == credsB)
+    }
+}
+
+@Test func unconfirmedSwitchStaysPending() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        try w.writeClaude(config: claudeConfig(profA), creds: credsA)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"),
+                   login: claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day), profile: profB)
+        // The live directory takes new files, but cannot be opened to flush
+        // a rename in it to disk.
+        let dir = w.paths.claudeConfigDir(root: nil)
+        try FileManager.default.setAttributes([.posixPermissions: Fixed.writeOnlyMode], ofItemAtPath: dir.path)
+        defer { chmod(dir.path, mode_t(Fixed.openMode)) }
+        let sw = w.switcher(StubHTTP([]))
+
+        await #expect(throws: KibaError.io("open \(dir.path): Permission denied")) { try await sw.use(.claude, bx) }
+        #expect(throws: KibaError.mixed) { try sw.save(.claude) }
+    }
+}
+
+@Test func storeFromBeforeOwnedInstallsKeepsWorking() async throws {
+    try await scratch { w in
+        let bx = try slot("b@x")
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        // An older kiba-mac crashed inside a switch from a@x to b@x.
+        try w.writeClaude(config: claudeConfig(profB), creds: credsA)
+        try w.oldStore(Fixed.storeV1 + """
+            INSERT INTO account VALUES ('claude', 'a@x', 'a@x', 'org-a', 'max', \(sqlBlob(credsA)), \(sqlBlob(profA)), NULL);
+            INSERT INTO account VALUES ('claude', 'b@x', 'b@x', 'org-b', 'pro', \(sqlBlob(credsB)), \(sqlBlob(profB)), NULL);
+            INSERT INTO live VALUES ('claude', 'a@x');
+            INSERT INTO pending VALUES ('claude', 'b@x');
+            """)
+        let store = try Store(paths: w.paths)
+        let sw = Switcher(paths: w.paths, store: store, http: StubHTTP([answer(Status.ok, claudeUsage(session: 10, week: 20))]),
+                          clock: w.clock)
+
+        #expect(throws: KibaError.mixed) { try sw.save(.claude) }
+        try await sw.use(.claude, bx)
+        #expect(try sw.save(.claude) == bx)
+        #expect(try store.list(.claude).map(\.login) == [credsA, credsB])
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsB)
+    }
+}
+
+@Test func switchWaitsForTheProbeRefreshingIt() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        try w.writeClaude(config: claudeConfig(profA), creds: credsA)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"),
+                   login: claudeCreds("xb", plan: "pro", expires: Fixed.now - Fixed.hour), profile: profB)
+        let http = HeldHTTP(held: Endpoint.claudeToken, answers: [
+            Endpoint.claudeUsage: answer(Status.ok, claudeUsage(session: 10, week: 20)),
+            Endpoint.claudeToken: answer(Status.ok, #"{"access_token":"at-xb2","refresh_token":"rt-xb2","expires_in":\#(Fixed.tokenLife)}"#),
+        ])
+        let sw = w.switcher(http)
+
+        // A switch to b@x while a probe is spending b@x's refresh token.
+        async let report = sw.probeAll(.claude)
+        try await http.arrival()
+        async let switched: Void = sw.use(.claude, bx)
+        try await Task.sleep(for: Fixed.overtake)
+        http.release()
+        _ = await report
+        try await switched
+
+        let refreshed = claudeCreds("xb2", plan: "pro", expires: Fixed.now + Fixed.tokenLife)
+        #expect(try w.store.fetch(.claude, bx)?.login == refreshed)
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == refreshed)
     }
 }
 
@@ -282,6 +395,32 @@ import Testing
         #expect(rows.first?.usage?.state == .expired)
         #expect(rows.first?.login == liveAuth)
         #expect(w.read(w.paths.codexAuthFile(root: nil)) == liveAuth)
+    }
+}
+
+@Test func revokedProbeKeepsTheLoginSavedMeanwhile() async throws {
+    try await scratch { w in
+        let name = try slot("b@y")
+        let fresh = codexAuth("b@y", plan: "plus", account: "acct-b", tag: "b2")
+        try w.seed(.codex, name, Identity(email: "b@y", plan: "plus", org: "acct-b"),
+                   login: codexAuth("b@y", plan: "plus", account: "acct-b", tag: "b1"), profile: nil)
+        let http = HeldHTTP(held: Endpoint.codexToken, answers: [
+            Endpoint.codexUsage: answer(Status.unauthorized, #"{"error":{"code":"token_revoked","message":"Token revoked"}}"#),
+            Endpoint.codexToken: answer(Status.unauthorized, #"{"error":"invalid_grant"}"#),
+        ])
+
+        // While the probe learns the old login was revoked, another Kiba
+        // saves the login that revoked it under the same name.
+        async let report = w.switcher(http).probeAll(.codex)
+        try await http.arrival()
+        let root = w.dir.appending(component: "login")
+        try FileManager.default.createDirectory(at: w.paths.codexHome(root: root), withIntermediateDirectories: true)
+        try fresh.write(to: w.paths.codexAuthFile(root: root))
+        #expect(try w.switcher(StubHTTP([])).importLogin(.codex, root: root, claudeCreds: nil) == name)
+        http.release()
+
+        #expect(await report.accounts.isEmpty)
+        #expect(try w.store.list(.codex).map(\.login) == [fresh])
     }
 }
 
@@ -828,6 +967,26 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+@Test func transactionEndsWithItsWrite() async throws {
+    try await scratch { w in
+        let row = SavedLogin(name: try slot("a@x"), identity: Identity(email: "a@x", plan: "max", org: "org-a"),
+                             login: claudeCreds("xa", plan: "max", expires: Fixed.now), profile: profile("a@x", org: "org-a"),
+                             usage: nil)
+        let committed = try w.store.write { $0 }
+        var rolledBack: Tx?
+        #expect(throws: KibaError.mixed) {
+            try w.store.write { tx in
+                rolledBack = tx
+                throw KibaError.mixed
+            }
+        }
+
+        #expect(throws: KibaError.db("put: transaction is closed")) { try committed.put(.claude, row) }
+        #expect(throws: KibaError.db("put: transaction is closed")) { try rolledBack?.put(.claude, row) }
+        #expect(try w.store.list(.claude).isEmpty)
+    }
+}
+
 // MARK: - World
 
 enum Fixed {
@@ -879,6 +1038,24 @@ enum Fixed {
     static let weekResetDays = 4
     /// The Anthropic organization of the Claude login that redeems a reset.
     static let org = "5f1c2a9e-8d3b-4c7a-9e21-0b6d4f3a7c58"
+    /// A directory that takes new files but cannot be opened to list or flush.
+    static let writeOnlyMode = 0o300
+    /// How long a test leaves an operation to overtake one in flight, were it allowed to.
+    static let overtake = Duration.milliseconds(200)
+    /// The database and the files SQLite keeps beside it in WAL mode.
+    static let dbFiles = ["", "-wal", "-shm"]
+    /// The store layout before pending installs had owners.
+    static let storeV1 = """
+        PRAGMA user_version = 1;
+        CREATE TABLE account (
+          provider TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, org TEXT NOT NULL, plan TEXT NOT NULL,
+          login BLOB NOT NULL, profile BLOB, usage TEXT, PRIMARY KEY (provider, name)
+        ) WITHOUT ROWID;
+        CREATE TABLE live (provider TEXT PRIMARY KEY, installed TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE pending (provider TEXT PRIMARY KEY, name TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE adding (provider TEXT PRIMARY KEY, live BLOB) WITHOUT ROWID;
+
+        """
     /// A usage column as kiba stored it before limit resets were read.
     static let preResetUsage = #"{"fetchedAt":\#(now - day),"limits":[{"label":"Session (5-hour)","percent":100,"#
         + #""resetsAt":"\#(sessionReset)"}],"note":"","state":"ok"}"#
@@ -897,6 +1074,7 @@ enum Endpoint {
     static let claudeReset = "https://api.anthropic.com/api/organizations/\(Fixed.org)/reset_rate_limits"
     static let claudeToken = "https://platform.claude.com/v1/oauth/token"
     static let codexUsage = "https://chatgpt.com/backend-api/wham/usage"
+    static let codexToken = "https://auth.openai.com/oauth/token"
     static let codexConsume = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 }
 
@@ -942,7 +1120,7 @@ struct World: Sendable {
         try FileManager.default.removeItem(at: dir)
     }
 
-    func switcher(_ http: StubHTTP) -> Switcher {
+    func switcher(_ http: any HTTPClient) -> Switcher {
         Switcher(paths: paths, store: store, http: http, clock: clock)
     }
 
@@ -1000,6 +1178,16 @@ struct World: Sendable {
         let sql = "UPDATE account SET usage = '\(json)' WHERE provider = '\(p.rawValue)' AND name = '\(n.raw)'"
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, sqlite3_changes(db) == 1 else {
             throw KibaError.db("store usage: \(String(cString: sqlite3_errmsg(db)))")
+        }
+    }
+
+    /// Replaces the store with a database `sql` builds, as an older kiba-mac left it.
+    func oldStore(_ sql: String) throws {
+        for suffix in Fixed.dbFiles { try PrivateFS.removeTree(URL(fileURLWithPath: paths.db.path + suffix)) }
+        var db: OpaquePointer?
+        defer { sqlite3_close(db) }
+        guard sqlite3_open(paths.db.path, &db) == SQLITE_OK, sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+            throw KibaError.db("old store: \(String(cString: sqlite3_errmsg(db)))")
         }
     }
 
@@ -1438,6 +1626,66 @@ func codexOffers(_ w: World, _ answers: [HTTPOutcome]) throws -> (CoreBackend, S
 /// The name of the provider's row the panel marks active.
 @MainActor func activeRow(_ model: AppModel, _ p: Provider) -> SlotName? {
     model.sections.first { $0.id == p }?.accounts.first(where: \.active)?.name
+}
+
+/// `data` as an SQL blob literal.
+func sqlBlob(_ data: Data) -> String {
+    "X'" + data.map { String(format: "%02x", $0) }.joined() + "'"
+}
+
+/// Answers every request with its URL's answer and records it; a request to
+/// `held` waits until `release()`, so a test can act while it is in flight.
+final class HeldHTTP: HTTPClient {
+    let held: String
+    let answers: [String: HTTPOutcome]
+    private let state = OSAllocatedUnfairLock(initialState: Held())
+
+    private struct Held {
+        var sent: [HTTPRequest] = []
+        var open = false
+        var parked: [CheckedContinuation<Void, Never>] = []
+    }
+
+    init(held: String, answers: [String: HTTPOutcome]) {
+        self.held = held
+        self.answers = answers
+    }
+
+    var requests: [HTTPRequest] { state.withLock { $0.sent } }
+
+    func send(_ r: HTTPRequest) async -> HTTPOutcome {
+        let url = r.url.absoluteString
+        state.withLock { $0.sent.append(r) }
+        if url == held {
+            await withCheckedContinuation { c in
+                let open = state.withLock { s in
+                    if !s.open { s.parked.append(c) }
+                    return s.open
+                }
+                if open { c.resume() }
+            }
+        }
+        return answers[url] ?? .unreachable(StubHTTP.unscripted)
+    }
+
+    /// Lets every held request, and each one after, have its answer.
+    func release() {
+        let parked = state.withLock { s in
+            s.open = true
+            defer { s.parked = [] }
+            return s.parked
+        }
+        parked.forEach { $0.resume() }
+    }
+
+    /// Waits until a request to `held` has been sent.
+    func arrival() async throws {
+        let end = ContinuousClock.now + Fixed.settleLimit
+        while !requests.contains(where: { $0.url.absoluteString == held }) {
+            try #require(ContinuousClock.now < end, "timed out waiting for \(held)")
+            try await Task.sleep(for: Fixed.pollStep)
+        }
+    }
 }
 
 /// `CoreBackend` whose status reads wait at `gate`.

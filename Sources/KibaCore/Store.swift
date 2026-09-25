@@ -43,7 +43,7 @@ public struct Store: Sendable {
     static let suffixMark = " #"
     static let columns = "name, email, org, plan, login, profile, usage"
     static let schema = """
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
         CREATE TABLE IF NOT EXISTS account (
           provider TEXT NOT NULL,
           name     TEXT NOT NULL,
@@ -61,20 +61,30 @@ public struct Store: Sendable {
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS pending (
           provider TEXT PRIMARY KEY,
-          name     TEXT NOT NULL
+          name     TEXT NOT NULL,
+          owner    TEXT
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS adding (
           provider TEXT PRIMARY KEY,
           live     BLOB
         ) WITHOUT ROWID;
         """
+    /// A version 1 store's `pending` table lacks the owner column. Its marker
+    /// is owned by no install, so it stays until an install replaces it.
+    static let ownerColumn = "SELECT 1 FROM pragma_table_info('pending') WHERE name = 'owner'"
+    static let addOwner = "ALTER TABLE pending ADD COLUMN owner TEXT"
 
     /// Creates the store directory (0700) and the database (0600) when missing,
-    /// and applies the schema.
+    /// and applies the schema in one transaction, adding what an older store lacks.
     public init(paths: Paths) throws {
         db = paths.db
         try PrivateFS.ensurePrivateDir(paths.store)
-        try Connection(db).exec(Self.schema, "schema")
+        try write { tx in
+            try tx.conn.exec(Self.schema, "schema")
+            var owned = false
+            try tx.conn.query(Self.ownerColumn, "schema", []) { _ in owned = true }
+            if !owned { try tx.conn.exec(Self.addOwner, "schema") }
+        }
     }
 
     /// The provider's saved logins, sorted by name.
@@ -137,12 +147,15 @@ public struct Store: Sendable {
 
     /// Runs `body` in one `BEGIN IMMEDIATE` transaction and commits; any throw
     /// rolls back and rethrows. The body may do file and Keychain work: the
-    /// transaction holds off every other writer until it ends.
+    /// transaction holds off every other writer until it ends. The `Tx` ends
+    /// with it: kept past `body`, it refuses every call.
     public func write<T>(_ body: (Tx) throws -> T) throws -> T {
         let conn = try Connection(db)
         try conn.exec("BEGIN IMMEDIATE", "begin")
+        let tx = Tx(conn: conn)
+        defer { tx.open = false }
         do {
-            let result = try body(Tx(conn: conn))
+            let result = try body(tx)
             try conn.exec("COMMIT", "commit")
             return result
         } catch {
@@ -173,13 +186,28 @@ public struct Store: Sendable {
     }
 }
 
-/// Writes inside one `Store.write` transaction.
-public struct Tx {
+/// An install's hold on its provider's pending marker: the owner it noted.
+public struct Claim: Equatable, Sendable {
+    let owner: String
+}
+
+/// Writes inside one `Store.write` transaction. Once that transaction has
+/// ended, committed or rolled back, every call throws
+/// `db("<op>: transaction is closed")`.
+public final class Tx {
     let conn: Connection
+    /// False once the transaction has ended.
+    var open = true
+
+    static let closed = "transaction is closed"
+
+    init(conn: Connection) {
+        self.conn = conn
+    }
 
     /// Inserts or replaces the row; an existing row keeps its usage when `s.usage` is nil.
     public func put(_ p: Provider, _ s: SavedLogin) throws {
-        try conn.run(
+        try run(
             """
             INSERT INTO account (provider, name, email, org, plan, login, profile, usage)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -194,7 +222,7 @@ public struct Tx {
 
     /// `noAccount` when there is no such row.
     public func setLogin(_ p: Provider, _ n: SlotName, _ doc: Data) throws {
-        let changed = try conn.run(
+        let changed = try run(
             "UPDATE account SET login = ? WHERE provider = ? AND name = ?", "set login",
             [.blob(doc), .text(p.rawValue), .text(n.raw)])
         guard changed > 0 else { throw KibaError.noAccount(p, n.raw) }
@@ -202,7 +230,7 @@ public struct Tx {
 
     /// `noAccount` when there is no such row.
     public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws {
-        let changed = try conn.run(
+        let changed = try run(
             "UPDATE account SET usage = ? WHERE provider = ? AND name = ?", "set usage",
             [.text(Self.usageText(u)), .text(p.rawValue), .text(n.raw)])
         guard changed > 0 else { throw KibaError.noAccount(p, n.raw) }
@@ -210,35 +238,48 @@ public struct Tx {
 
     /// Nothing to do when there is no such row.
     public func remove(_ p: Provider, _ n: SlotName) throws {
-        try conn.run("DELETE FROM account WHERE provider = ? AND name = ?", "remove", [.text(p.rawValue), .text(n.raw)])
+        try run("DELETE FROM account WHERE provider = ? AND name = ?", "remove", [.text(p.rawValue), .text(n.raw)])
     }
 
     public func noteInstalled(_ p: Provider, _ n: SlotName) throws {
-        try conn.run(
+        try run(
             """
             INSERT INTO live (provider, installed) VALUES (?, ?)
             ON CONFLICT (provider) DO UPDATE SET installed = excluded.installed
             """, "note installed", [.text(p.rawValue), .text(n.raw)])
     }
 
-    /// Records an install of `n` as begun; committed before any live file changes.
-    public func notePending(_ p: Provider, _ n: SlotName) throws {
-        try conn.run(
+    /// Records an install of `n` as begun under a new claim, replacing any
+    /// earlier marker; committed before any live file changes.
+    public func notePending(_ p: Provider, _ n: SlotName) throws -> Claim {
+        let claim = Claim(owner: UUID().uuidString)
+        try run(
             """
-            INSERT INTO pending (provider, name) VALUES (?, ?)
-            ON CONFLICT (provider) DO UPDATE SET name = excluded.name
-            """, "note pending", [.text(p.rawValue), .text(n.raw)])
+            INSERT INTO pending (provider, name, owner) VALUES (?, ?, ?)
+            ON CONFLICT (provider) DO UPDATE SET name = excluded.name, owner = excluded.owner
+            """, "note pending", [.text(p.rawValue), .text(n.raw), .text(claim.owner)])
+        return claim
     }
 
-    /// Nothing to do when no install is pending.
-    public func clearPending(_ p: Provider) throws {
-        try conn.run("DELETE FROM pending WHERE provider = ?", "clear pending", [.text(p.rawValue)])
+    /// Whether the pending marker is still the one `c` noted.
+    public func owns(_ p: Provider, _ c: Claim) throws -> Bool {
+        var owned = false
+        try query(
+            "SELECT 1 FROM pending WHERE provider = ? AND owner = ?", "owns pending",
+            [.text(p.rawValue), .text(c.owner)]
+        ) { _ in owned = true }
+        return owned
+    }
+
+    /// Clears the marker `c` noted; nothing to do once another install has replaced it.
+    public func clearPending(_ p: Provider, _ c: Claim) throws {
+        try run("DELETE FROM pending WHERE provider = ? AND owner = ?", "clear pending", [.text(p.rawValue), .text(c.owner)])
     }
 
     /// Records an add's login as begun, with the live item it must leave as
     /// it found; committed before the login is launched.
     public func noteAdding(_ p: Provider, _ item: LiveItem) throws {
-        try conn.run(
+        try run(
             """
             INSERT INTO adding (provider, live) VALUES (?, ?)
             ON CONFLICT (provider) DO UPDATE SET live = excluded.live
@@ -247,7 +288,24 @@ public struct Tx {
 
     /// Nothing to do when no add is in flight.
     public func clearAdding(_ p: Provider) throws {
-        try conn.run("DELETE FROM adding WHERE provider = ?", "clear adding", [.text(p.rawValue)])
+        try run("DELETE FROM adding WHERE provider = ?", "clear adding", [.text(p.rawValue)])
+    }
+
+    /// Runs one statement of this transaction; the number of rows it changed.
+    @discardableResult
+    func run(_ sql: String, _ op: String, _ args: [Value]) throws -> Int {
+        try checked(op).run(sql, op, args)
+    }
+
+    /// Runs one query of this transaction, handing each result row to `row`.
+    func query(_ sql: String, _ op: String, _ args: [Value], row: (Row) throws -> Void) throws {
+        try checked(op).query(sql, op, args, row: row)
+    }
+
+    /// The connection while the transaction is open.
+    func checked(_ op: String) throws -> Connection {
+        guard open else { throw KibaError.db("\(op): \(Self.closed)") }
+        return conn
     }
 
     static func usageText(_ u: UsageRecord) -> String {
