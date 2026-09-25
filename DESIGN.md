@@ -60,6 +60,7 @@ public enum KibaError: Error, Equatable {
   case noCLI(String)                 // claude/codex not on PATH
   case mismatch(Provider, String)    // saved row names another account than its name
   case mixed                         // live Claude config and tokens name different accounts
+  case orphanLive(URL)               // Claude creds exist but the config naming their account is missing
   case capacity(String)              // >9 logins under one email, doc over 4 MiB
   case unsafePath(URL)               // symlink chain longer than 8 hops or ends in a link
   case io(String)                    // any file error, with the path
@@ -338,7 +339,7 @@ return that row's name. Return the first free; none → `capacity`.
 ```swift
 public struct ClaudeLive {
   public init(paths: Paths, store: Store, secrets: SecretStore)   // secrets = ClaudeSecrets.live(...)
-  public func identity() throws -> Identity?     // nil when config or creds missing
+  public func identity() throws -> Identity?     // nil when no creds; orphanLive when creds exist without a config
   public func save(to n: SlotName, _ tx: Tx) throws   // put: login = creds bytes, profile = exact oauthAccount object bytes from config
   public func install(_ n: SlotName) throws
   public func isMixed() throws -> Bool
@@ -368,6 +369,16 @@ names row S and S exists and the live identity reads and the live config
 does NOT name S (email differs, or both orgs known and differ) and the live
 creds bytes equal S's login bytes → true. The next successful install
 clears it.
+
+Reading the live login (`identity`, `save`, `isMixed`): no credentials → no
+live login (nil). Credentials without a config → `orphanLive(config path)`:
+the tokens are some account's, maybe a saved row's refresh token, and
+nothing says whose, so no saved login is refreshed and the live credentials
+are not replaced until the config names them. `Switcher.save`, `use` and
+`redeem` throw it before writing anything; `probeAll` reports it as both
+`saveBackError` and `providerError` and probes nothing; `StatusReader`
+shows it as the provider's error. Codex is unchanged: a missing `auth.json`
+is no credentials.
 
 ### Codex live login
 
@@ -563,7 +574,9 @@ public struct ProbeReport { public var saveBackError: String?; public var provid
   that one as saved and `write` it like `probeAll` does. Its usage came
   from a live probe, which never refreshes, so an expired token would
   otherwise leave it dead ("log in again") once inactive.
-- `probeAll`: save-back (an error becomes `saveBackError`), `list`. Then
+- `probeAll`: save-back (an error becomes `saveBackError`), `list`. Live
+  Claude credentials without a config stop it here: `orphanLive` is both
+  `saveBackError` and `providerError`, no account is probed. Then
   for every saved account: probe (`live` = name == live name, or, while
   the Claude files are mixed, the installed name); `write`:
   `setUsage`, `setLogin` when the doc changed, or on `.revoked` for a

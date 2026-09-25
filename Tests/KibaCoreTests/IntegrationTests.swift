@@ -228,6 +228,36 @@ import Testing
     }
 }
 
+@Test func orphanClaudeCredsStopProbesAndSwitches() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now - Fixed.hour)
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profile("a@x", org: "org-a"))
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profile("b@x", org: "org-b"))
+        // The config is gone but the credentials are still a@x's: refreshing
+        // the saved a@x would spend the refresh grant the live login holds.
+        try credsA.write(to: w.paths.claudeCredsFile(root: nil))
+        let http = StubHTTP([])
+        let sw = w.switcher(http)
+        let orphan = KibaError.orphanLive(w.paths.claudeConfigFile(root: nil))
+
+        let report = await sw.probeAll(.claude)
+
+        #expect(report.saveBackError == orphan.reason)
+        #expect(report.providerError == orphan.reason)
+        #expect(report.accounts.isEmpty)
+        #expect(http.requests.isEmpty)
+        #expect(try w.store.fetch(.claude, ax)?.login == credsA)
+        await #expect(throws: orphan) { try await sw.use(.claude, bx) }
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsA)
+        #expect(w.read(w.paths.claudeConfigFile(root: nil)) == nil)
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        #expect(claude?.error == orphan.reason)
+        #expect(claude?.live == nil)
+    }
+}
+
 @Test func probeRemovesRevokedSavedCodexLogin() async throws {
     try await scratch { w in
         let liveAuth = codexAuth("live@y", plan: "plus", account: "acct-l", tag: "l")

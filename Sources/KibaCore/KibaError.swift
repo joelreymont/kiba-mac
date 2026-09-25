@@ -12,6 +12,7 @@ public enum KibaError: Error, Equatable, Sendable {
     case noCLI(String)
     case mismatch(Provider, String)
     case mixed
+    case orphanLive(URL)
     case capacity(String)
     case unsafePath(URL)
     case io(String)
@@ -44,6 +45,8 @@ extension KibaError {
             return "the saved \(p.title) login \(name) belongs to a different account"
         case .mixed:
             return "the live Claude files name different accounts; switch to an account to repair them"
+        case .orphanLive(let url):
+            return "Claude credentials exist but \(url.path) is missing: nothing is probed or switched until it names their account"
         case .capacity(let what):
             return "too many: \(what)"
         case .unsafePath(let url):

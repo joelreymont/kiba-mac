@@ -25,7 +25,8 @@ public struct ClaudeLive {
 
     var configFile: URL { paths.claudeConfigFile(root: root) }
 
-    /// Nil when the config or the credentials are missing.
+    /// Nil when there are no credentials; `orphanLive` when they exist
+    /// without a config naming their account.
     public func identity() throws -> Identity? {
         guard let (config, creds) = try live() else { return nil }
         return try ClaudeIdentity.fromLive(config: config, creds: creds)
@@ -89,10 +90,15 @@ public struct ClaudeLive {
         return creds == row.login
     }
 
-    /// The live config and credentials; nil when either is missing. The config
-    /// is read first, so a missing one costs no Keychain call.
+    /// The live config and credentials; nil when there are no credentials.
+    /// Credentials without a config are `orphanLive`: they are some account's
+    /// tokens, maybe a saved row's refresh token, and nothing says whose, so
+    /// no saved login is refreshed and the live one is not replaced until the
+    /// config names them.
     func live() throws -> (config: Data, creds: Data)? {
-        guard let config = try PrivateFS.read(configFile), let creds = try secrets.read() else { return nil }
+        let config = try PrivateFS.read(configFile)
+        guard let creds = try secrets.read() else { return nil }
+        guard let config else { throw KibaError.orphanLive(configFile) }
         return (config, creds)
     }
 
