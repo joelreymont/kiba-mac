@@ -154,7 +154,8 @@ public enum Rows {
         return parts.isEmpty ? "" : "(" + parts.joined(separator: Copy.planSep) + ")"
     }
 
-    /// Hover lines: identity, one line per window, probe age, what a click does.
+    /// Hover lines: identity, one line per window, the limit resets on offer,
+    /// probe age, what a click does.
     public static func tooltip(_ p: Provider, _ a: Account, now: Date) -> [String] {
         var head = a.name.raw
         if !a.plan.isEmpty { head += Copy.lineSep + a.plan }
@@ -170,6 +171,8 @@ public enum Rows {
                     lines.append("\(l.label): \(left)\(when)")
                 }
             }
+            let n = resets(u)
+            if n > 0 { lines.append(resetsText(n) + Copy.available) }
             if u.fetchedAt > 0 { lines.append("Probed " + age(u.fetchedAt, now: now)) }
         } else {
             lines.append(Copy.unprobed)
@@ -180,6 +183,16 @@ public enum Rows {
             lines.append("Click to switch \(p.title) to this account")
         }
         return lines
+    }
+
+    /// Limit resets the account can spend now; 0 without an offer.
+    public static func resets(_ u: UsageRecord?) -> Int {
+        u?.resets?.count ?? 0
+    }
+
+    /// `"1 limit reset"` or `"2 limit resets"`.
+    public static func resetsText(_ n: Int) -> String {
+        "\(n) " + (n == 1 ? Copy.reset : Copy.resets)
     }
 
     /// `"20m"`, `"5h"` under 36 hours, else `"2d"`; "" when unparseable.
@@ -273,6 +286,9 @@ public enum Rows {
         static let unprobed = "Usage not probed yet"
         static let noLimits = "No limits reported"
         static let reached = "limit reached"
+        static let reset = "limit reset"
+        static let resets = "limit resets"
+        static let available = " available"
         static let relogin = "Click to log in to this account again"
         static let justNow = "just now"
         static let figureSep = " · "

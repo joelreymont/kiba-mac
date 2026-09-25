@@ -26,8 +26,12 @@ enum Theme {
     /// Empty reservoir; `trackContrast` under Increase Contrast.
     static let track = Color(nsColor: .quaternaryLabelColor)
     static let trackContrast = Color(nsColor: .tertiaryLabelColor)
-    /// The active account's name.
+    /// The active account's name; the limit-reset badge's fill.
     static let accent = Color.accentColor
+    /// Text on an `accent` fill: the badge's count.
+    static let onAccent = Color(nsColor: .alternateSelectedControlTextColor)
+    /// The keyboard focus ring around the badge under the cursor.
+    static let focus = Color(nsColor: .keyboardFocusIndicatorColor)
 
     /// The status dot: `room` when the account can take work, `out` when it
     /// is limited or dead, `idle` while unknown.
@@ -48,6 +52,8 @@ enum Theme {
     static let nameActive = Font.body.bold()
     static let meta = Font.subheadline
     static let figures = Font.subheadline.monospacedDigit()
+    /// The count in the limit-reset badge.
+    static let badge = Font.caption.bold().monospacedDigit()
     static let action = Font.body
 
     // MARK: Layout
@@ -70,8 +76,17 @@ enum Theme {
     /// The status dot before a name.
     static let dot: CGFloat = 8
     static let actionPad: CGFloat = 5
-    /// Between a Forget or Keep label and its cursor fill.
+    /// Between a confirmation's button label and its cursor fill.
     static let choicePad: CGFloat = 6
+    /// Lines a confirmation's question takes before it truncates.
+    static let askLines = 2
+    /// The limit-reset badge's height, and its width for one digit.
+    static let badgeSize: CGFloat = 18
+    /// Between the badge's digits and its ends once they outgrow the circle.
+    static let badgePad: CGFloat = 5
+    /// The focus ring's stroke, and its gap outside the badge.
+    static let ringWidth: CGFloat = 2
+    static let ringGap: CGFloat = 1.5
     /// Between a row's name line and its reservoir.
     static let lineGap: CGFloat = 5
     static let corner: CGFloat = 6

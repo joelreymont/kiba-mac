@@ -614,6 +614,8 @@ public enum Rows {
   static func figuresText(_ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
   static func planText(_ a: Account, now: Date) -> String // "(pro)", "(pro, 5d)", "(pro, log in again)", ""
   static func tooltip(_ p: Provider, _ a: Account, now: Date) -> [String]
+  static func resets(_ u: UsageRecord?) -> Int       // the offer's count; 0 without one
+  static func resetsText(_ n: Int) -> String         // "1 limit reset" | "2 limit resets"
   static func resetShort(_ iso: String, now: Date) -> String  // "20m" | "5h" (<36h) | "2d"; "" unparseable
   static func resetLong(_ iso: String, now: Date) -> String   // "20 min" | "5 h 12 min" (<48h) | "3 days"
   static func age(_ epoch: Int, now: Date) -> String          // "just now" | "12 min ago"
@@ -627,7 +629,7 @@ State: dead → `.dead`; no usage or no limits → `.unknown`; any percent ≥ 1
 weekly with left < 50 → `.tight`; else `.ok`. Tooltip lines: `email · plan ·
 current`; "Usage not probed yet" | note or "No limits reported" | one line
 per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
-"Probed 12 min ago"; then "Click to log in to this account again" (dead) or
+"2 limit resets available" while `resets` > 0; "Probed 12 min ago"; then "Click to log in to this account again" (dead) or
 "Click to switch <title> to this account" (not active).
 
 ### Add account (LoginRunner)
@@ -756,8 +758,9 @@ test needs a read in flight.
 
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
 `refreshing`, `busy`, `message`, `error`, `panelOpen`, `autoProbed`, `now`
-(ticks every 30 s while open), `cursor: ActionKey?`, `refreshIntervalSec`
-(UserDefaults, default 120, min 15).
+(ticks every 30 s while open), `cursor: ActionKey?`, `confirming: Choice?`
+(kind `forget` | `reset`, provider, name), `refreshIntervalSec` (UserDefaults,
+default 120, min 15).
 
 - `refresh(force:)`: skip when the last good read was < 5 s ago unless
   forced; coalesce when one is running; `StatusReader.read()` on a
@@ -770,18 +773,29 @@ State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
 - Actions (`busy` guards all; success message auto-clears after 4 s):
   `use(p, name)` — a dead row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
-  probes every provider; `forget(p, name)` (context menu, confirmed
-  inline: the row turns into "Forget <email>? Forget / Keep", the cursor
-  on Keep; Keep or ⎋ ends it and returns the cursor to the row). Each
+  probes every provider; `forget(p, name)`; `redeem(p, name)` — "Resetting
+  limit for <name>…", `Backend.redeem`, then one sentence per outcome:
+  reset "Limit reset for <name>", notLimited "<name> is not at a limit;
+  nothing was spent", alreadyUsed "That reset was already used", noCredit
+  "No limit resets left for <name>", cooldown "Limit resets are cooling
+  down for <name>; try again later", ineligible "<name> cannot reset its
+  limit", unavailable "Limit resets are unavailable for <name> right now".
+  Forget (context menu) and Reset (the row's badge) ask first through one
+  mechanism: `ask(kind, p, name)` sets `confirming`, the row turns into its
+  confirmation and the cursor goes to Keep; the go button (`confirm`) runs
+  the kind's action; Keep or ⎋ ends it and returns the cursor to the
+  control that asked, the row or its badge. A confirmation ends with the
+  read that shows its row gone or, for a reset, its offer spent. Each
   action ends with a forced status read and stays `busy` until that read,
   and any queued behind it, has applied its snapshot or failed: controls
   re-enable only over rows that show the action's result.
 - `actions: [ActionKey]`, every control a click can reach, in panel
   order: `retry` while the status read has failed and no read runs; per
-  provider `add`, every account row (`use`), then `save` when the provider
-  has a live login, no error and no active row; `usage` at the end. A row
-  confirming a forget contributes its `forget` and `keep` buttons in place
-  of `use`. `trigger(_:)` runs every key; the cursor tracks its key across
+  provider `add`, every account row (`use`), each followed by its badge
+  (`redeem`) while `Rows.resets` > 0, then `save` when the provider has a
+  live login, no error and no active row; `usage` at the end. A confirming
+  row contributes its `confirm` and `keep` buttons in place of `use` and
+  `redeem`. `trigger(_:)` runs every key; the cursor tracks its key across
   refreshes and stays at the same position when its key is gone.
 
 ### Status item and popover
@@ -809,14 +823,17 @@ Tokens (`Theme.swift`):
 | `idle`  | secondary label color   | unknown figures, meta text         |
 | `ink`   | label color             | names                                |
 | `track` | quaternary label color  | empty reservoir                      |
-| accent  | `Color.accentColor`     | the active account's name            |
+| accent  | `Color.accentColor`     | the active account's name; the badge |
+| `onAccent` | alternate selected control text color | the badge's count |
+| `focus` | keyboard focus indicator color | the ring on the badge under the cursor |
 
 Type: system text styles only, the HIG's recommendation for Mac text and
 the one choice that lets the system's weight and legibility settings apply
 where it honours them: title `.title3.bold()`; section headers
 `.headline` in sentence case ("Claude Code", "Codex"), `ink`; names `.body`
 (`.bold()` when active); meta and plan text `.subheadline`, `idle`; figures
-`.subheadline.monospacedDigit()` in `ink`. Text is never colored by usage
+`.subheadline.monospacedDigit()` in `ink`; the badge's count
+`.caption.bold().monospacedDigit()`. Text is never colored by usage
 state: the bars carry the color, and only "limit" and "log in again" (plan
 text and figures of a blocked or dead row) are `out`. Rows and actions are
 `Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
@@ -831,7 +848,8 @@ as its content, capped at the menu bar screen's visible height less 24 pt
 indicators. Each provider's header line carries the add action at its
 right, a standard plus button, `accent` under the keyboard cursor, tooltip
 "Add account"; there is no add row. Cursor order: Retry, then per section
-add, accounts, save, then Refresh usage (`AppModel.actions`).
+add, accounts (each followed by its badge), save, then Refresh usage
+(`AppModel.actions`).
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -840,7 +858,7 @@ add, accounts, save, then Refresh usage (`AppModel.actions`).
 │ Claude Code                                + │  section header · add
 │ ● joel@x.com (max)            72% · 40% · 9% │  dot · name · plan · figures
 │ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir: usable limit left
-│ ● other@x.com (pro, 5d)               limit  │  red dot: limited
+│ ● other@x.com (pro, 5d)            limit (2) │  red dot: limited; 2 resets
 │ ░░░░░░░░░░  ░░░░░░░░░░                       │  drained: nothing usable
 │ Save the current login                       │  action row
 │ Codex                                      + │
@@ -874,16 +892,29 @@ account's headline remaining, outline only when unknown; drawn `out` when
 `error != nil`, at 50 % opacity when unavailable, otherwise the menu bar's
 label color.
 
+The **limit-reset badge** ends the name line, after the figures, of every
+row whose `Rows.resets` > 0, blocked and dead rows included (that is when
+it matters): the macOS badge idiom, the count in `onAccent` on an `accent`
+capsule 18 pt tall, a circle for one digit. It is a `Button` of its own laid
+over the row, not inside the row's button, so clicks, the cursor and
+VoiceOver reach it apart from the row; the name line keeps its place without
+growing. Tooltip "2 limit resets available. Click to use one." (singular
+for 1); VoiceOver reads "2 limit resets", hint "Uses one reset". Under the
+cursor it wears a 2 pt `focus` ring 1.5 pt outside it, inside its hit area,
+and the row does not light; the pointer leaving it for the row hands the
+cursor back to the row. The digits carry it under Differentiate Without
+Color. A click asks first, like Forget.
+
 Rows: no boxes; a row highlights with `ink` at 10 % under the pointer or the
 keyboard cursor, 5 % when active. Name elides in the middle; plan and
 figures always fit. Blocked and dead names are `idle`; blocked figures read
 `limit`; dead plan text carries "log in again". Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
 Keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor (scrolling it into view), ⏎ and
-Space activate the cursor's control, ⎋ backs out of a forget confirmation,
+Space activate the cursor's control, ⎋ backs out of a confirmation,
 else closes; hover moves the cursor without scrolling. On a confirming row
-the cursor stops on Forget and on Keep, each lit with the row fill behind
-its label. The control under the cursor is the accessibility focus, and a
+the cursor stops on its go button (Forget or Reset) and on Keep, each lit
+with the row fill behind its label. The control under the cursor is the accessibility focus, and a
 control VoiceOver focuses takes the cursor, so both always name one
 control. `KeyCatcher` holds first responder while the panel is key; that
 is safe because the panel has no text field or other control that reads
@@ -896,7 +927,11 @@ provider without a live login; "Retry" row when status failed; error and
 message text below the title (error in `out`, message in `idle`, max 3
 lines). Action names stay the same through the flow: "Save the current
 login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
-"Claude Code: now other@x.com".
+"Claude Code: now other@x.com"; "Resetting limit for other@x.com…" →
+"Limit reset for other@x.com". Confirmations, the question up to two lines
+and eliding in the middle: "Forget <email>?" with **Forget** (destructive,
+`out`) and **Keep**; "Use a limit reset on <email>? (2 left)" with
+**Reset** (`accent`, not destructive) and **Keep**.
 
 ## Build, bundle, test
 

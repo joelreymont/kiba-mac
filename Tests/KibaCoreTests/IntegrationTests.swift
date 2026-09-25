@@ -484,6 +484,34 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+/// A probed row's hover lines count the limit resets it offers, after its
+/// windows; a row with none left says nothing about them.
+@Test func rowsTooltipCountsLimitResets() async throws {
+    try await scratch { w in
+        for tag in ["a", "b"] {
+            try w.seed(.codex, try slot("\(tag)@y"), Identity(email: "\(tag)@y", plan: "plus", org: "acct-\(tag)"),
+                       login: codexAuth("\(tag)@y", plan: "plus", account: "acct-\(tag)", tag: tag), profile: nil)
+        }
+        let http = StubHTTP([
+            answer(Status.ok, codexUsage(session: 100, week: 40, credits: 2)),
+            answer(Status.ok, codexUsage(session: 30, week: 40, credits: 0)),
+        ])
+        _ = await w.switcher(http).probeAll(.codex)
+
+        let codex = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .codex }
+        let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
+        let tips = try #require(codex).accounts.map { Rows.tooltip(.codex, $0, now: now) }
+        #expect(tips == [
+            ["a@y · plus", "Session (5-hour): limit reached · resets in 1 h 0 min",
+             "Weekly (7-day): 60% left · resets in 4 days", "2 limit resets available",
+             "Probed just now", "Click to switch Codex to this account"],
+            ["b@y · plus", "Session (5-hour): 70% left · resets in 1 h 0 min",
+             "Weekly (7-day): 60% left · resets in 4 days",
+             "Probed just now", "Click to switch Codex to this account"],
+        ])
+    }
+}
+
 // MARK: - Add account
 
 @Test func addCodexSavesNewLoginAndKeepsLive() async throws {
@@ -1251,19 +1279,90 @@ func members(_ body: Data?) throws -> [String: String] {
     model.start()
     try await settle(model)
 
-    model.askForget(.codex, by)
+    model.ask(.forget, .codex, by)
     #expect(model.cursor == .keep(.codex, by))
     model.activate()
-    #expect(model.forgetting == nil)
+    #expect(model.confirming == nil)
     #expect(model.cursor == .use(.codex, by))
 
-    model.askForget(.codex, by)
+    model.ask(.forget, .codex, by)
     model.move(-1)
-    #expect(model.cursor == .forget(.codex, by))
+    #expect(model.cursor == .confirm(.codex, by))
     model.activate()
     try await settle(model)
     #expect(model.message == "Forgot b@y")
     #expect(model.sections.first { $0.id == .codex }?.accounts.map(\.name) == [ay])
+}
+
+/// A row offering limit resets carries its badge right after it in the
+/// cursor order; a row with none left has no badge.
+@MainActor @Test func appModelListsResetBadgeAfterItsRow() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, ay, by) = try codexOffers(w, [])
+    let model = AppModel(connect: { core })
+
+    model.start()
+    try await settle(model)
+    #expect(model.actions == [.add(.claude), .add(.codex), .use(.codex, ay), .use(.codex, by), .redeem(.codex, by), .usage])
+}
+
+/// The badge asks first: Keep and Escape back out without reaching the
+/// provider; Reset spends one and the row shows the provider's new count.
+@MainActor @Test func appModelConfirmsThenRedeemsAReset() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, http, _, by) = try codexOffers(w, [
+        answer(Status.ok, #"{"code":"reset"}"#),
+        answer(Status.ok, codexUsage(session: 0, week: 45, credits: 1)),
+    ])
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.trigger(.redeem(.codex, by))
+    #expect(model.confirming == Choice(kind: .reset, provider: .codex, name: by))
+    #expect(model.cursor == .keep(.codex, by))
+    model.activate()
+    #expect(model.confirming == nil)
+    #expect(model.cursor == .redeem(.codex, by))
+    model.activate()
+    model.escape()
+    #expect(model.confirming == nil)
+    #expect(http.requests.isEmpty)
+
+    model.activate()
+    model.move(-1)
+    #expect(model.cursor == .confirm(.codex, by))
+    model.activate()
+    #expect(model.message == "Resetting limit for b@y…")
+    try await settle(model)
+    #expect(model.message == "Limit reset for b@y")
+    #expect(model.error == "")
+    #expect(http.requests.map(\.url.absoluteString) == [Endpoint.codexConsume, Endpoint.codexUsage])
+    let row = model.sections.first { $0.id == .codex }?.accounts.first { $0.name == by }
+    #expect(row?.usage == probed(windows(session: 0, week: 45), resets: ResetOffer(count: 1, program: "", grant: "")))
+}
+
+/// A reset the provider refuses spends nothing and says why; the row's
+/// badge goes with the last credit.
+@MainActor @Test func appModelSaysWhyNoResetWasSpent() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, _, by) = try codexOffers(w, [
+        answer(Status.ok, #"{"code":"no_credit"}"#),
+        answer(Status.ok, codexUsage(session: 100, week: 45, credits: 0)),
+    ])
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.trigger(.redeem(.codex, by))
+    model.trigger(.confirm(.codex, by))
+    try await settle(model)
+    #expect(model.message == "No limit resets left for b@y")
+    #expect(model.error == "")
+    #expect(!model.actions.contains(.redeem(.codex, by)))
 }
 
 /// A Codex world where a@y is live and saved and b@y is saved, and the
@@ -1281,6 +1380,25 @@ func codexPair(_ w: World) throws -> (CoreBackend, SlotName, SlotName) {
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
         runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
     return (backend, ay, by)
+}
+
+/// A Codex world where a@y is live and saved with no limit reset left and
+/// b@y is saved at its session limit with two, and the `CoreBackend` over it;
+/// `answers` are what the provider says to a redeem and its re-probe.
+func codexOffers(_ w: World, _ answers: [HTTPOutcome]) throws -> (CoreBackend, StubHTTP, SlotName, SlotName) {
+    let (ay, by) = (try slot("a@y"), try slot("b@y"))
+    let liveAuth = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")
+    try w.writeCodex(liveAuth)
+    try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: liveAuth, profile: nil,
+               usage: probed(windows(session: 20, week: 45), resets: ResetOffer(count: 0, program: "", grant: "")))
+    try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
+               login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb"), profile: nil,
+               usage: probed(windows(session: 100, week: 45), resets: ResetOffer(count: 2, program: "", grant: "")))
+    let http = StubHTTP(answers)
+    let backend = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
+    return (backend, http, ay, by)
 }
 
 /// The name of the provider's row the panel marks active.

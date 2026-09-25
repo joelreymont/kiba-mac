@@ -9,14 +9,41 @@ typealias Connect = @Sendable () throws -> any Backend
 enum ActionKey: Hashable, Sendable {
     /// An account row: switch to it.
     case use(Provider, SlotName)
+    /// A row's limit-reset badge: asks before spending one.
+    case redeem(Provider, SlotName)
     case save(Provider)
     case add(Provider)
-    /// The Forget and Keep buttons of a row confirming a forget.
-    case forget(Provider, SlotName)
+    /// The buttons of a row asking to confirm: go ahead (Forget or Reset),
+    /// and Keep.
+    case confirm(Provider, SlotName)
     case keep(Provider, SlotName)
     /// Read the status again after it failed.
     case retry
     case usage
+}
+
+/// A row asking before an action it cannot take back: "Forget …?" or
+/// "Use a limit reset on …?".
+struct Choice: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case forget
+        case reset
+    }
+
+    var kind: Kind
+    var provider: Provider
+    var name: SlotName
+
+    /// The account row the confirmation stands in for.
+    var row: ActionKey { .use(provider, name) }
+
+    /// The control that asked, where Keep returns the cursor.
+    var origin: ActionKey {
+        switch kind {
+        case .forget: row
+        case .reset: .redeem(provider, name)
+        }
+    }
 }
 
 enum Availability: Equatable {
@@ -66,8 +93,8 @@ final class AppModel {
     /// The clock rows are drawn against; ticks while the panel is open.
     private(set) var now = Date()
     private(set) var cursor: ActionKey?
-    /// The account row (its `use` key) showing "Forget …? Forget / Keep".
-    private(set) var forgetting: ActionKey?
+    /// The row showing a confirmation in place of its name and figures.
+    private(set) var confirming: Choice?
     /// The row a keyboard move asks the view to scroll to; `scrollSerial`
     /// changes on every such move.
     private(set) var scrollKey: ActionKey?
@@ -104,16 +131,22 @@ final class AppModel {
     // MARK: Derived
 
     /// Every control a click can reach, in panel order: Retry while the
-    /// status read has failed; per provider its add, its account rows and
-    /// its save; the usage action last. A row confirming a forget offers its
-    /// Forget and Keep buttons in its place.
+    /// status read has failed; per provider its add, its account rows, each
+    /// followed by its limit-reset badge when it offers one, and its save;
+    /// the usage action last. A row asking to confirm offers its go and Keep
+    /// buttons in place of the row and its badge.
     var actions: [ActionKey] {
         var keys: [ActionKey] = canRetry ? [.retry] : []
         for sec in sections {
             keys.append(.add(sec.id))
             for a in sec.accounts {
                 let row = ActionKey.use(sec.id, a.name)
-                keys += row == forgetting ? [.forget(sec.id, a.name), .keep(sec.id, a.name)] : [row]
+                if confirming?.row == row {
+                    keys += [.confirm(sec.id, a.name), .keep(sec.id, a.name)]
+                } else {
+                    keys.append(row)
+                    if Rows.resets(a.usage) > 0 { keys.append(.redeem(sec.id, a.name)) }
+                }
             }
             if sec.canSave { keys.append(.save(sec.id)) }
         }
@@ -227,7 +260,7 @@ final class AppModel {
             statusError = Self.reason(e)
             apply(Snapshot(providers: []))
         }
-        if case .use(let p, let n)? = forgetting, account(p, n) == nil { forgetting = nil }
+        if let c = confirming, !stands(c) { confirming = nil }
         retain(old)
         if queued { refresh() }
         if !refreshing { release() }
@@ -274,7 +307,7 @@ final class AppModel {
         guard !panelOpen else { return }
         panelOpen = true
         cursor = nil
-        forgetting = nil
+        confirming = nil
         autoProbed = false
         now = Date()
         refreshIntervalSec = max(Timing.minInterval, defaults.object(forKey: Timing.intervalKey) as? Int ?? Timing.interval)
@@ -350,9 +383,9 @@ final class AppModel {
         trigger(c)
     }
 
-    /// Escape: backs out of a forget confirmation, else closes the panel.
+    /// Escape: backs out of a confirmation, else closes the panel.
     func escape() {
-        if forgetting != nil {
+        if confirming != nil {
             keep()
         } else {
             closePanel()
@@ -366,9 +399,10 @@ final class AppModel {
     func trigger(_ k: ActionKey) {
         switch k {
         case .use(let p, let n): use(p, n)
+        case .redeem(let p, let n): ask(.reset, p, n)
         case .save(let p): save(p)
         case .add(let p): add(p, email: nil)
-        case .forget(let p, let n): forget(p, n)
+        case .confirm(let p, let n): confirm(p, n)
         case .keep: keep()
         case .retry: refresh(force: true)
         case .usage: probeUsage()
@@ -440,17 +474,35 @@ final class AppModel {
     }
 
     /// Turns the row into its confirmation, the cursor on Keep.
-    func askForget(_ p: Provider, _ n: SlotName) {
-        guard !busy else { return }
-        forgetting = .use(p, n)
+    func ask(_ kind: Choice.Kind, _ p: Provider, _ n: SlotName) {
+        let c = Choice(kind: kind, provider: p, name: n)
+        guard !busy, stands(c) else { return }
+        confirming = c
         cursor = .keep(p, n)
     }
 
-    /// Ends the confirmation; a cursor on its buttons returns to the row.
+    /// Ends the confirmation; a cursor on its buttons returns to the control
+    /// that asked.
     func keep() {
-        guard let row = forgetting else { return }
-        forgetting = nil
-        if let c = cursor, !actions.contains(c) { cursor = row }
+        guard let c = confirming else { return }
+        confirming = nil
+        if let k = cursor, !actions.contains(k) { cursor = c.origin }
+    }
+
+    /// A confirmation stands while its row exists and, for a reset, still
+    /// offers one.
+    private func stands(_ c: Choice) -> Bool {
+        guard let a = account(c.provider, c.name) else { return false }
+        return c.kind == .forget || Rows.resets(a.usage) > 0
+    }
+
+    /// The confirmation's go button: Forget or Reset.
+    private func confirm(_ p: Provider, _ n: SlotName) {
+        guard let c = confirming, c.row == .use(p, n) else { return }
+        switch c.kind {
+        case .forget: forget(p, n)
+        case .reset: redeem(p, n)
+        }
     }
 
     func forget(_ p: Provider, _ n: SlotName) {
@@ -459,6 +511,16 @@ final class AppModel {
         run("Forgetting \(n.raw)…") { b in
             try await Self.off { try b.forget(p, n) }
             return "Forgot \(n.raw)"
+        }
+    }
+
+    /// Spends one of the row's limit resets; the provider's answer is the
+    /// message, and the reread shows the row's new usage and count.
+    func redeem(_ p: Provider, _ n: SlotName) {
+        guard !busy else { return }
+        keep()
+        run("Resetting limit for \(n.raw)…") { b in
+            Copy.outcome(try await b.redeem(p, n), n.raw)
         }
     }
 
@@ -553,5 +615,18 @@ final class AppModel {
         static let saved = "Saved logins"
         static let iconIdle = "AI accounts"
         static let none = "none"
+
+        /// What a limit-reset request came to, for the account `name`.
+        static func outcome(_ o: ResetOutcome, _ name: String) -> String {
+            switch o {
+            case .reset: "Limit reset for \(name)"
+            case .notLimited: "\(name) is not at a limit; nothing was spent"
+            case .alreadyUsed: "That reset was already used"
+            case .noCredit: "No limit resets left for \(name)"
+            case .cooldown: "Limit resets are cooling down for \(name); try again later"
+            case .ineligible: "\(name) cannot reset its limit"
+            case .unavailable: "Limit resets are unavailable for \(name) right now"
+            }
+        }
     }
 }
