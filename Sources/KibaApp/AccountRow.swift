@@ -29,23 +29,6 @@ struct AccountRow: View {
         return account.active ? Theme.current : 0
     }
 
-    /// Dot, name, plan, figures and badge on one line; the name at its whole
-    /// width, or asking `nameMin` and truncating past it.
-    private func oneLine(_ usable: Bool?, _ red: Bool, wholeName: Bool) -> some View {
-        HStack(spacing: Theme.gap) {
-            dot(usable)
-            if wholeName {
-                name(red).fixedSize()
-            } else {
-                name(red).frame(idealWidth: Theme.nameMin, alignment: .leading)
-            }
-            plan(red)
-            Spacer(minLength: Theme.gap)
-            figures(Rows.figuresText(account.usage), red, wrap: false)
-            badgeSpot
-        }
-    }
-
     private var row: some View {
         let state = Rows.state(account.usage, active: account.active)
         let usable = Rows.usable(state)
@@ -54,25 +37,16 @@ struct AccountRow: View {
             model.trigger(key)
         } label: {
             VStack(alignment: .leading, spacing: Theme.lineGap) {
-                // One line while the name keeps its whole width, else while
-                // it keeps `nameMin`, beside plan and figures; else plan and
-                // labelled figures move to a line of their own under it.
-                ViewThatFits(in: .horizontal) {
-                    oneLine(usable, red, wholeName: true)
-                    oneLine(usable, red, wholeName: false)
-                    VStack(alignment: .leading, spacing: Theme.lineGap) {
-                        HStack(spacing: Theme.gap) {
-                            dot(usable)
-                            name(red)
-                        }
-                        HStack(alignment: .firstTextBaseline, spacing: Theme.gap) {
-                            plan(red)
-                            Spacer(minLength: Theme.gap)
-                            figures(labelled(state), red, wrap: true)
-                            badgeSpot
-                        }
-                        .padding(.leading, Theme.dot + Theme.gap)
-                    }
+                // Plan and figures always fit at their full width: the name
+                // alone gives way, laid out first with every point they leave
+                // and shortened in the middle so both ends still name the account.
+                HStack(spacing: Theme.gap) {
+                    dot(usable)
+                    name(red).layoutPriority(Theme.nameFirst)
+                    plan(red)
+                    Spacer(minLength: Theme.gap)
+                    figures(Rows.figuresText(account.usage), red)
+                    badgeSpot
                 }
                 ReservoirView(figures: Rows.figures(account.usage), drained: red)
             }
@@ -121,19 +95,13 @@ struct AccountRow: View {
         }
     }
 
-    /// On the name line at their full width; under the name, as wide as the
-    /// row allows, wrapping when they must.
-    @ViewBuilder private func figures(_ text: String, _ red: Bool, wrap: Bool) -> some View {
-        let t = Text(text)
+    /// At their full width; the name gives way to them.
+    private func figures(_ text: String, _ red: Bool) -> some View {
+        Text(text)
             .font(Theme.figures)
             .foregroundStyle(red ? Theme.out : Theme.ink)
-        if wrap {
-            t.multilineTextAlignment(.trailing)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            t.lineLimit(1)
-                .fixedSize()
-        }
+            .lineLimit(1)
+            .fixedSize()
     }
 
     /// Keeps the badge's place without raising the line; the badge sits over
@@ -145,13 +113,6 @@ struct AccountRow: View {
                 .frame(height: 0)
                 .anchorPreference(key: BadgeSpot.self, value: .bounds) { $0 }
         }
-    }
-
-    /// The figures with their windows' labels, for the line under the name;
-    /// "limit" while blocked, as on one line.
-    private func labelled(_ state: RowState) -> String {
-        guard state != .blocked else { return Rows.figuresText(account.usage) }
-        return Rows.figures(account.usage).map { "\($0.label) \($0.left)%" }.joined(separator: Copy.figureSep)
     }
 
     /// VoiceOver: provider, full name, and whether it is the current account.

@@ -1044,15 +1044,12 @@ cursor back to the row. The digits carry it under Differentiate Without
 Color. A click asks first, like Forget.
 
 Rows: no boxes; a row highlights with `ink` at 10 % under the pointer or the
-keyboard cursor, 5 % when active. Name elides in the middle. The name line
-stays one line while the name keeps at least `Theme.nameMin` (140 pt, or its
-whole width when shorter) beside plan and figures (`ViewThatFits`, measured
-at ideal sizes); otherwise the name takes the whole line and plan, the
-figures labelled with their windows ("Session (5-hour) 72% · Weekly (7-day)
-40%") and the badge move to a line under it, indented to the name, the
-figures wrapping when plan and figures outgrow the row. So the name is
-bounded below, never squeezed out; plan text and the number of windows are
-not bounded. Blocked and dead names are `idle`; blocked figures read
+keyboard cursor, 5 % when active. One line: dot, name, plan, figures, badge.
+Plan and figures always fit at their full width; the name alone gives way,
+laid out first (`layoutPriority`) with every point they leave and shortened
+in the middle ("nfnht45…leid.com") so both ends still name the account, as
+the original kiba did. The whole name is in the tooltip and the VoiceOver
+label. Blocked and dead names are `idle`; blocked figures read
 `limit`; dead plan text carries "log in again". VoiceOver reads a row as
 one button: label "<Provider>: <name>" plus ", current account"; value the
 plan, the verdict ("has room"; "limit reached, resets in 5 h 12 min";
