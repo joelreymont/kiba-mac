@@ -18,17 +18,14 @@ public struct CodexLive {
 
     /// Nil when `auth.json` is missing.
     public func identity() throws -> Identity? {
-        guard let auth = try PrivateFS.read(authFile) else { return nil }
-        return try CodexIdentity.fromAuth(auth)
+        try login()?.identity
     }
 
-    /// Puts the live `auth.json` bytes under `n`, with the identity read from
-    /// those same bytes. `mismatch` when the live login no longer belongs to `n`.
-    public func save(to n: SlotName, _ tx: Tx) throws {
-        guard let auth = try PrivateFS.read(authFile) else { throw KibaError.noLive(.codex) }
-        let id = try CodexIdentity.fromAuth(auth)
-        guard n.belongs(to: id.email) else { throw KibaError.mismatch(.codex, n.raw) }
-        try tx.put(.codex, SavedLogin(name: n, identity: id, login: auth, profile: nil, usage: nil))
+    /// The login as one read: the live `auth.json` bytes, with the identity
+    /// decoded from those same bytes; no profile. Nil as `identity`.
+    func login() throws -> LoginRead? {
+        guard let auth = try PrivateFS.read(authFile) else { return nil }
+        return LoginRead(identity: try CodexIdentity.fromAuth(auth), login: auth, profile: nil)
     }
 
     /// kiba `CODEX-INSTALL`, in one transaction so the row read is the row

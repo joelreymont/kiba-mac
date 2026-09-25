@@ -30,16 +30,6 @@ public enum ClaudeIdentity {
         try named(JSONFields(obj, what: Key.account))
     }
 
-    /// The live config's top-level `oauthAccount` object plus the credentials'
-    /// plan. Only that object's bytes are decoded: the rest of `.claude.json` is
-    /// Claude Code's, and the identity must come from the very bytes
-    /// `ClaudeLive.save` copies.
-    static func fromLive(config: Data, creds: Data) throws -> Identity {
-        var id = try fromOAuthAccount(profile(config))
-        id.plan = planFromCreds(creds)
-        return id
-    }
-
     /// The exact bytes of the config's top-level `oauthAccount` object.
     static func profile(_ config: Data) throws -> Data {
         let doc = try JSONDoc(config)

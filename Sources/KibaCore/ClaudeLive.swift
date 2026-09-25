@@ -28,20 +28,19 @@ public struct ClaudeLive {
     /// Nil when there are no credentials; `orphanLive` when they exist
     /// without a config naming their account.
     public func identity() throws -> Identity? {
-        guard let (config, creds) = try live() else { return nil }
-        return try ClaudeIdentity.fromLive(config: config, creds: creds)
+        try login()?.identity
     }
 
-    /// Puts the live login under `n`: login = the credentials bytes, profile =
-    /// the exact `oauthAccount` object bytes, identity read from those same
-    /// bytes. `mismatch` when the live login no longer belongs to `n`.
-    public func save(to n: SlotName, _ tx: Tx) throws {
-        guard let (config, creds) = try live() else { throw KibaError.noLive(.claude) }
+    /// The login as one read: login = the credentials bytes, profile = the
+    /// exact `oauthAccount` object bytes, identity decoded from those same
+    /// bytes plus the credentials' plan. Only that object is decoded: the
+    /// rest of `.claude.json` is Claude Code's. Nil as `identity`.
+    func login() throws -> LoginRead? {
+        guard let (config, creds) = try live() else { return nil }
         let profile = try ClaudeIdentity.profile(config)
         var id = try ClaudeIdentity.fromOAuthAccount(profile)
         id.plan = ClaudeIdentity.planFromCreds(creds)
-        guard n.belongs(to: id.email) else { throw KibaError.mismatch(.claude, n.raw) }
-        try tx.put(.claude, SavedLogin(name: n, identity: id, login: creds, profile: profile, usage: nil))
+        return LoginRead(identity: id, login: creds, profile: profile)
     }
 
     /// kiba `CLAUDE-INSTALL`. The row must exist (`noAccount`), its profile
@@ -99,11 +98,11 @@ public struct ClaudeLive {
     public func isMixed() throws -> Bool {
         guard try store.pending(.claude) == nil else { return true }
         guard let name = try store.installed(.claude), let row = try store.fetch(.claude, name),
-              let (config, creds) = try live() else { return false }
-        let id = try ClaudeIdentity.fromLive(config: config, creds: creds)
+              let live = try login() else { return false }
+        let id = live.identity
         let sameOrg = id.org.isEmpty || row.identity.org.isEmpty || id.org == row.identity.org
         guard !(name.belongs(to: id.email) && sameOrg) else { return false }
-        return creds == row.login
+        return live.login == row.login
     }
 
     /// The live config and credentials; nil when there are no credentials.

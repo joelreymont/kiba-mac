@@ -191,12 +191,12 @@ public struct Identity: Equatable, Sendable { public var email: String; public v
 
 public enum ClaudeIdentity {
   static func fromOAuthAccount(_ obj: Data) throws -> Identity        // {emailAddress, organizationUuid}; plan ""
-  static func fromLive(config: Data, creds: Data) throws -> Identity
-  // = fromOAuthAccount(config[JSONDoc(config).objectSpan("oauthAccount")]) with
-  // plan = planFromCreds(creds); no span → badJSON("oauthAccount"). Only the
-  // span is decoded: .claude.json is Claude Code's file and may hold values
-  // (a lone surrogate escape, a huge number) that JSONSerialization rejects, and the
-  // identity must come from the very bytes ClaudeLive.save copies.
+  static func profile(_ config: Data) throws -> Data                  // config[JSONDoc(config).objectSpan("oauthAccount")]; no span → badJSON("oauthAccount")
+  // ClaudeLive.login() = fromOAuthAccount(profile(config)) with plan =
+  // planFromCreds(creds). Only the span is decoded: .claude.json is Claude
+  // Code's file and may hold values (a lone surrogate escape, a huge number)
+  // that JSONSerialization rejects, and the identity must come from the very
+  // bytes ClaudeLive.login copies.
   static func planFromCreds(_ creds: Data) -> String                   // "" when absent
 }
 public enum CodexIdentity {
@@ -374,7 +374,7 @@ return that row's name. Return the first free; none → `capacity`.
 public struct ClaudeLive {
   public init(paths: Paths, store: Store, secrets: SecretStore)   // secrets = ClaudeSecrets.live(...)
   public func identity() throws -> Identity?     // nil when no creds; orphanLive when creds exist without a config
-  public func save(to n: SlotName, _ tx: Tx) throws   // put: login = creds bytes, profile = exact oauthAccount object bytes from config
+  func login() throws -> LoginRead?              // one read: identity, login = creds bytes, profile = exact oauthAccount object bytes; nil as identity
   public func install(_ n: SlotName) throws
   public func isMixed() throws -> Bool
 }
@@ -430,7 +430,7 @@ is no credentials.
 public struct CodexLive {
   public init(paths: Paths, store: Store, root: URL? = nil)
   public func identity() throws -> Identity?     // nil when auth.json missing
-  public func save(to n: SlotName, _ tx: Tx) throws   // put: login = live auth.json bytes, profile nil
+  func login() throws -> LoginRead?              // one read: identity, login = live auth.json bytes, profile nil; nil as identity
   public func install(_ n: SlotName) throws      // fetch (noAccount); email must belong to n else mismatch; inside store.write: write live auth.json, noteInstalled
 }
 ```
@@ -633,8 +633,10 @@ every probe outcome and refreshed login is written only while the row still
 holds the login bytes it was read with (compared inside the `write`); a row
 replaced or forgotten meanwhile is never updated or removed.
 
-- `save`: `isMixed` → `mixed`; identity nil → nil; else `liveName` and the
-  provider's `save(to:)` inside one `store.write`.
+- `save`: `isMixed` → `mixed`; the provider's `login()` nil → nil; else, inside
+  one `store.write`, `liveName` from its identity and `put` of its bytes: one
+  read chooses the slot for the very bytes saved, so a login the CLI rewrites
+  meanwhile cannot land under another account's name.
 - `use`: save-back (skip when mixed; save when a live identity exists),
   then `noteInstalled` the saved-back name, whose login the live files
   hold, so a crash between the install's two live writes leaves a pending
@@ -660,8 +662,8 @@ replaced or forgotten meanwhile is never updated or removed.
   refreshed, before the result is read (a refresh spends the old grant); a
   failure throws; after a 200, `probe(p, n, live:)` so the
   row's usage and offer show the result, then the outcome.
-- `importLogin`: reads the identity from the throwaway root (Claude: config
-  at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
+- `importLogin`: reads the login once from the throwaway root (Claude:
+  config at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
   `root/.codex/auth.json`), `liveName`, `put`. `noLive` when nothing is
   there.
 

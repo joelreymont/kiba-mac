@@ -181,13 +181,15 @@ public final class Switcher: Sendable {
         try put(p, live(p))
     }
 
-    /// Puts the login `files` reads under the name `liveName` gives its
-    /// identity, in one transaction; nil when there is no login.
+    /// Puts the login `files` hold under the name `liveName` gives its
+    /// identity, in one transaction; nil when there is no login. One read
+    /// serves both: the identity chooses the slot for the very bytes saved,
+    /// so a login rewritten meanwhile cannot land under another's name.
     func put(_ p: Provider, _ files: any LiveFiles) throws -> SlotName? {
-        guard let id = try files.identity() else { return nil }
+        guard let live = try files.login() else { return nil }
         return try store.write { tx in
-            let n = try store.liveName(p, live: id)
-            try files.save(to: n, tx)
+            let n = try store.liveName(p, live: live.identity)
+            try tx.put(p, SavedLogin(name: n, identity: live.identity, login: live.login, profile: live.profile, usage: nil))
             return n
         }
     }
@@ -269,8 +271,15 @@ public final class Switcher: Sendable {
 /// home's after `add`.
 protocol LiveFiles {
     func identity() throws -> Identity?
-    func save(to n: SlotName, _ tx: Tx) throws
+    func login() throws -> LoginRead?
     func install(_ n: SlotName) throws
+}
+
+/// A login as one read of its files: what `put` saves, less the name.
+struct LoginRead {
+    let identity: Identity
+    let login: Data
+    let profile: Data?
 }
 
 extension ClaudeLive: LiveFiles {}
