@@ -765,7 +765,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         let leftover = MemorySecret(claudeCreds("old", plan: "pro", expires: Fixed.now))
         let keychain = FakeKeychain(items: [
-            w.paths.keychainService: MemorySecret(liveCreds), "\(w.paths.keychainService)-leftover": leftover,
+            w.paths.keychainService: MemorySecret(liveCreds), w.paths.loginService: leftover,
         ])
         let newCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
         try w.fakeCLI("claude", """
@@ -782,6 +782,47 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(try keychain.item(w.paths.keychainService).read() == liveCreds)
         #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-n"])
         #expect(w.calls() == ["claude auth login --email n@y"])
+    }
+}
+
+@Test func addLeavesOtherProfileItemsAlone() async throws {
+    try await scratch { w in
+        // Another CLAUDE_CONFIG_DIR profile's item refreshes while the login waits.
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let live = MemorySecret(liveCreds)
+        let login = MemorySecret(nil)
+        let other = MemorySecret(claudeCreds("p", plan: "pro", expires: Fixed.now))
+        let keychain = FakeKeychain(items: [
+            w.paths.keychainService: live, w.paths.loginService: login, "\(w.paths.keychainService)-deadbeef": other,
+        ])
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(claudeConfig(profile("n@y", org: "org-n"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
+
+        // Only the other profile's item changes: the login produced nothing.
+        let refreshed = claudeCreds("p1", plan: "pro", expires: Fixed.now + Fixed.day)
+        let idle = try w.runner(StubHTTP([]), keychain: keychain) { try other.write(refreshed) }
+        await #expect(throws: KibaError.loginProducedNothing(.claude)) { try await idle.add(.claude, expected: "n@y") }
+        #expect(try other.read() == refreshed)
+        #expect(try login.read() == nil)
+        #expect(try live.read() == liveCreds)
+        #expect(try w.store.list(.claude).isEmpty)
+
+        // Both change: the login's own item holds the new account.
+        let again = claudeCreds("p2", plan: "pro", expires: Fixed.now + Fixed.day)
+        let newCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
+        let both = try w.runner(http, keychain: keychain) {
+            try other.write(again)
+            try login.write(newCreds)
+        }
+        let added = try await both.add(.claude, expected: "n@y")
+        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == newCreds)
+        #expect(try other.read() == again)
+        #expect(try login.read() == nil)
+        #expect(try live.read() == liveCreds)
+        #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-n"])
     }
 }
 
@@ -887,7 +928,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         let found = MemorySecret(nil)
         let keychain = FakeKeychain(items: [
-            w.paths.keychainService: MemorySecret(liveCreds), "\(w.paths.keychainService)-login": found,
+            w.paths.keychainService: MemorySecret(liveCreds), w.paths.loginService: found,
         ])
         // An account the store cannot name: a name holds no slash.
         let config = claudeConfig(profile("n/x@y", org: "org-n"))
@@ -1096,29 +1137,30 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
-@Test func addFindsKeychainItemDumpedAsHex() async throws {
+@Test func addFindsLoginKeychainItem() async throws {
     try ensureKeychain()
     let service = "\(Fixed.keychainPrefix)\(UUID().uuidString)"
     let live = KeychainItem(service: service, account: Fixed.user)
-    // Not every byte printable: `security dump-keychain` prints the name in hex.
-    let found = KeychainItem(service: "\(service)-é", account: Fixed.user)
-    defer {
-        #expect(throws: Never.self) {
-            try live.remove()
-            try found.remove()
-        }
-    }
+    defer { #expect(throws: Never.self) { try live.remove() } }
     try await scratch(keychainService: service) { w in
+        let found = KeychainItem(service: w.paths.loginService, account: Fixed.user)
+        defer { #expect(throws: Never.self) { try found.remove() } }
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         try live.write(liveCreds)
         let config = claudeConfig(profile("n@x", org: "org-n"))
-        try w.fakeCLI("claude", "printf '%s' '\(text(config))' > \"$CLAUDE_CONFIG_DIR/.claude.json\"")
+        // Claude Code names the item after the SHA-256 of the config dir it was given.
+        let hash = w.dir.appending(component: "hash")
+        try w.fakeCLI("claude", """
+            printf '%s' "$CLAUDE_CONFIG_DIR" | shasum -a 256 | cut -c1-8 | tr -d '\\n' > '\(hash.path)'
+            printf '%s' '\(text(config))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            """)
         let newCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
         let http = StubHTTP([answer(Status.ok, claudeUsage(session: 5, week: 10))])
         let runner = try w.runner(http, keychain: KeychainTool(account: Fixed.user)) { try found.write(newCreds) }
 
         let result = try await runner.add(.claude, expected: nil)
 
+        #expect(w.paths.loginService == "\(service)-\(text(try #require(w.read(hash))))")
         #expect(result.saved == (try slot("n@x")))
         #expect(try w.store.fetch(.claude, slot("n@x"))?.login == newCreds)
         #expect(try found.read() == nil)
@@ -1270,7 +1312,7 @@ struct World: Sendable {
     /// `during` stands for what the provider login does outside its home;
     /// with `background` the Terminal launch returns while the login runs.
     func runner(
-        _ http: StubHTTP, keychain: any KeychainLister, background: Bool = false,
+        _ http: StubHTTP, keychain: any Keychain, background: Bool = false,
         during: @escaping @Sendable () throws -> Void = {}
     ) throws -> LoginRunner {
         var shellEnv = env
@@ -1278,7 +1320,7 @@ struct World: Sendable {
         let terminal: any TerminalLauncher =
             background ? BackgroundTerminal(env: shellEnv, during: during) : ShellTerminal(env: shellEnv, during: during)
         return try LoginRunner(
-            paths: paths, switcher: switcher(http), terminal: terminal, lister: keychain, searchPath: bin.path)
+            paths: paths, switcher: switcher(http), terminal: terminal, keychain: keychain, searchPath: bin.path)
     }
 
     func writeClaude(config: Data, creds: Data) throws {
@@ -1418,12 +1460,8 @@ func finish<T: Sendable>(_ task: Task<T, any Error>) async throws -> T {
 }
 
 /// The Keychain as `add` sees it, one in-memory item per service.
-struct FakeKeychain: KeychainLister {
+struct FakeKeychain: Keychain {
     let items: [String: MemorySecret]
-
-    func services(prefix: String) throws -> Set<String> {
-        Set(try items.filter { try $0.key.hasPrefix(prefix) && $0.value.read() != nil }.keys)
-    }
 
     /// An unknown service is an absent item.
     func item(_ service: String) -> SecretStore {

@@ -5,10 +5,8 @@ public protocol TerminalLauncher: Sendable {
     func open(_ script: URL) throws
 }
 
-/// The Keychain as `add` sees it: the generic-password services under a
-/// prefix, and the item behind one of them.
-public protocol KeychainLister: Sendable {
-    func services(prefix: String) throws -> Set<String>
+/// The Keychain as `add` sees it: the generic-password item of a service.
+public protocol Keychain: Sendable {
     func item(_ service: String) -> SecretStore
 }
 
@@ -22,7 +20,7 @@ public actor LoginRunner {
     let paths: Paths
     let switcher: Switcher
     let terminal: any TerminalLauncher
-    let lister: any KeychainLister
+    let keychain: any Keychain
     /// The `PATH` searched for `claude` and `codex`.
     let searchPath: String
     /// Providers whose login is in flight. Every login of a provider uses the
@@ -31,12 +29,12 @@ public actor LoginRunner {
 
     /// Undoes an unfinished add (`recover`) before anything reads the live login.
     public init(
-        paths: Paths, switcher: Switcher, terminal: any TerminalLauncher, lister: any KeychainLister, searchPath: String
+        paths: Paths, switcher: Switcher, terminal: any TerminalLauncher, keychain: any Keychain, searchPath: String
     ) throws {
         self.paths = paths
         self.switcher = switcher
         self.terminal = terminal
-        self.lister = lister
+        self.keychain = keychain
         self.searchPath = searchPath
         try recover()
     }
@@ -80,7 +78,7 @@ public actor LoginRunner {
             try await run(root)
             return Found(creds: nil, item: nil)
         }
-        let before = try otherItems()
+        let before = try loginItem.read()
         let old = LiveItem(bytes: try liveItem.read())
         try switcher.store.write { try $0.noteAdding(.claude, old) }
         do {
@@ -134,9 +132,12 @@ public actor LoginRunner {
     }
 
     /// The live Claude Keychain item.
-    nonisolated var liveItem: any SecretStore { lister.item(paths.keychainService) }
+    nonisolated var liveItem: any SecretStore { keychain.item(paths.keychainService) }
 
-    /// What a login produced: the Claude credentials, and the non-live
+    /// The Keychain item a Claude login in the throwaway home writes.
+    var loginItem: any SecretStore { keychain.item(paths.loginService) }
+
+    /// What a login produced: the Claude credentials, and the login's own
     /// Keychain item they came from, which goes once the import commits.
     struct Found {
         var creds: Data?
@@ -144,27 +145,16 @@ public actor LoginRunner {
     }
 
     /// Where a Claude login put its credentials, first hit wins: the config
-    /// dir's `.credentials.json`; a non-live Keychain item that is new or
-    /// holds other bytes than before, since the login home's fixed path always
+    /// dir's `.credentials.json`; the login's own Keychain item when it holds
+    /// other bytes than `before`, since the login home's fixed path always
     /// names the same item and an earlier add may have left it behind; the
     /// bytes the login wrote over the live item (`written`, already put back).
-    func claudeCreds(root: URL, before: [String: Data], written: Data?) throws -> Found {
+    /// Items of other config dirs are never read: they refresh on their own.
+    func claudeCreds(root: URL, before: Data?, written: Data?) throws -> Found {
         if let file = try PrivateFS.read(paths.claudeCredsFile(root: root)) { return Found(creds: file, item: nil) }
-        let items = try otherItems().sorted { $0.key < $1.key }
-        if let (service, bytes) = items.first(where: { before[$0.key] != $0.value }) {
-            return Found(creds: bytes, item: lister.item(service))
-        }
+        if let bytes = try loginItem.read(), bytes != before { return Found(creds: bytes, item: loginItem) }
         guard let written else { throw KibaError.loginProducedNothing(.claude) }
         return Found(creds: written, item: nil)
-    }
-
-    /// The bytes of every Keychain item under the Claude prefix but the live one.
-    func otherItems() throws -> [String: Data] {
-        var out: [String: Data] = [:]
-        for service in try lister.services(prefix: paths.keychainService) where service != paths.keychainService {
-            out[service] = try lister.item(service).read()
-        }
-        return out
     }
 
     /// The login script Terminal runs: files its pid, exports the throwaway
@@ -354,62 +344,16 @@ public struct TerminalApp: TerminalLauncher {
     }
 }
 
-/// The login Keychain through `/usr/bin/security`: service names from
-/// `dump-keychain` (attributes only, never secret data), items as
-/// `KeychainItem`s under the user's account.
-public struct KeychainTool: KeychainLister {
+/// The login Keychain through `/usr/bin/security`: items as `KeychainItem`s
+/// under the user's account.
+public struct KeychainTool: Keychain {
     public let account: String
-
-    /// How `dump-keychain` starts a service attribute. The value follows in
-    /// quotes when every byte is printable ASCII other than `\`; otherwise as
-    /// `0x` and its bytes in hex, then a quoted form with escapes.
-    static let serviceMark = #""svce"<blob>="#
-    static let quote = "\""
-    static let hexMark = "0x"
-    static let space: Character = " "
 
     public init(account: String) {
         self.account = account
     }
 
-    public func services(prefix: String) throws -> Set<String> {
-        let r = try Subprocess.run(KeychainItem.tool, ["dump-keychain"], stdin: nil, env: nil, setsid: false)
-        guard r.status == 0 else { throw KeychainItem.failed(r) }
-        return Self.services(in: r.stdout, prefix: prefix)
-    }
-
     public func item(_ service: String) -> SecretStore {
         KeychainItem(service: service, account: account)
     }
-
-    /// The service names in a dump that start with `prefix`, in either form.
-    static func services(in dump: Data, prefix: String) -> Set<String> {
-        var out: Set<String> = []
-        for line in String(decoding: dump, as: UTF8.self).split(separator: "\n") {
-            let text = line.drop { $0 == space }
-            guard text.hasPrefix(serviceMark), let name = name(text.dropFirst(serviceMark.count)) else { continue }
-            if name.hasPrefix(prefix) { out.insert(name) }
-        }
-        return out
-    }
-
-    /// The name a dumped service value spells: the text between its quotes,
-    /// or the bytes its hex digits spell. Nil for anything else, such as
-    /// `<NULL>`, for bytes that are not UTF-8, and for control bytes: no
-    /// argument can name those, and a NUL would cut the name to another
-    /// item's, maybe the live one.
-    static func name(_ value: Substring) -> String? {
-        if value.hasPrefix(quote), value.hasSuffix(quote), value.count > quote.count {
-            return String(value.dropFirst().dropLast())
-        }
-        guard value.hasPrefix(hexMark),
-              let bytes = KeychainItem.unhex(Data(value.dropFirst(hexMark.count).prefix { $0 != space }.utf8)),
-              !bytes.contains(where: { $0 < printable })
-        else { return nil }
-        let name = String(decoding: bytes, as: UTF8.self)
-        return Data(name.utf8) == bytes ? name : nil
-    }
-
-    /// The first byte that is not a control byte.
-    static let printable: UInt8 = 0x20
 }

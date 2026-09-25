@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Every location kiba-mac reads or writes, resolved once from the environment.
@@ -38,6 +39,16 @@ public struct Paths: Sendable {
 
     /// Throwaway home for a provider login run by `add`.
     public func loginRoot(_ p: Provider) -> URL { Self.child(probe, Name.loginPrefix + p.rawValue) }
+
+    /// Keychain service of the Claude login `add` runs. That login exports its
+    /// config dir as `CLAUDE_CONFIG_DIR`, so Claude Code (2.1.282) files its
+    /// credentials under `keychainService`, `-`, and the first hex digits of
+    /// the SHA-256 of that path in NFC.
+    public var loginService: String {
+        let dir = claudeConfigDir(root: loginRoot(.claude)).path.precomposedStringWithCanonicalMapping
+        let hex = KeychainItem.hex(Data(SHA256.hash(data: Data(dir.utf8))))
+        return keychainService + Name.serviceSeparator + String(decoding: hex.prefix(Name.serviceHashDigits), as: UTF8.self)
+    }
 
     /// `root/.claude`, else `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
     public func claudeConfigDir(root: URL?) -> URL {
@@ -96,5 +107,7 @@ public struct Paths: Sendable {
         static let claudeCreds = ".credentials.json"
         static let codexDir = ".codex"
         static let codexAuth = "auth.json"
+        static let serviceSeparator = "-"
+        static let serviceHashDigits = 8
     }
 }

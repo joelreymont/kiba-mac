@@ -31,7 +31,7 @@ scratch directory with no network and no real Keychain:
 | subprocess        | `Subprocess.run`     | posix_spawn                        | real, on throwaway inputs |
 | clock             | `Clock` (`() -> Date`) | `Date.init`                      | frozen                    |
 | terminal          | `TerminalLauncher`   | `open -a Terminal <file.command>`  | fake that runs the script |
-| keychain listing  | `KeychainLister`     | `security dump-keychain` names     | fake                      |
+| keychain items    | `Keychain`     | `KeychainTool` (`security`)        | fake                      |
 
 ## KibaCore
 
@@ -100,6 +100,8 @@ public struct Paths: Sendable {
   public func codexAuthFile(root: URL?) -> URL     // <home>/auth.json
   public let username: String                      // Keychain account attribute
   public let keychainService: String               // Paths.claudeService = "Claude Code-credentials", tests pass their own
+  public var loginService: String                  // keychainService + "-" + first 8 hex digits of
+                                                   // SHA-256(NFC claudeConfigDir(root: loginRoot(.claude)).path)
 }
 ```
 
@@ -723,22 +725,27 @@ per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
 
 ```swift
 public protocol TerminalLauncher: Sendable { func open(_ script: URL) throws }
-public protocol KeychainLister: Sendable {
-  func services(prefix: String) throws -> Set<String>   // generic-password service names under prefix
-  func item(_ service: String) -> SecretStore            // the item behind one of them
+public protocol Keychain: Sendable {
+  func item(_ service: String) -> SecretStore            // the generic-password item of a service
 }
 public struct AddResult: Equatable { public var saved: SlotName; public var expected: String?; public var differs: Bool }
 public actor LoginRunner {
-  public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, lister: KeychainLister, searchPath: String) throws
+  public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, keychain: Keychain, searchPath: String) throws
   public func add(_ p: Provider, expected email: String?) async throws -> AddResult
 }
 ```
 
 Production: `TerminalApp` runs `/usr/bin/open -a Terminal <script>`;
-`KeychainTool` lists `security dump-keychain` service names (attributes
-only, never secret data), each read in full from either form the tool
-prints, quoted text or `0x` hex when a byte is not printable ASCII or is
-`\`, before the prefix filter, and hands back `KeychainItem`s.
+`KeychainTool` hands back `KeychainItem`s under the user's account.
+The item of `add`'s Claude login is named, never searched for. Claude Code 2.1.282
+derives its service from the config dir:
+`dir = ($CLAUDE_CONFIG_DIR ?? ~/.claude)` in NFC; the service is
+`Claude Code-credentials`, plus `-` and the first 8 lowercase hex digits of
+SHA-256 of `dir`'s UTF-8 bytes when `CLAUDE_CONFIG_DIR` is set and non-empty;
+the account is `$USER`, else the login name. The login script exports
+`claudeConfigDir(root: loginRoot(.claude)).path`, so `paths.loginService`
+names that item (`keychainService` stands in for the base service). Items
+of other config dirs, which refresh on their own, are never read.
 `searchPath` is the PATH searched for the CLIs; `CoreBackend` takes it from
 the user's login shell (`$SHELL -lc`, PATH printed between markers so
 profile output cannot pollute it), because an app started from Finder or a
@@ -775,9 +782,9 @@ queueing.
    ```
    Shell-quote every interpolated value. The hard link publishes the pid
    whole and fails when the name exists, so a stop can claim it first.
-3. Claude only: snapshot `before`, the bytes of every item in
-   `lister.services(prefix: keychainService)` but the live one, and `old`,
-   the live item's bytes (`KeychainItem.read()`). Commit
+3. Claude only: snapshot `before`, the bytes of the login's item
+   (`keychain.item(paths.loginService)`, nil when absent), and `old`, the
+   live item's bytes (`KeychainItem.read()`). Commit
    `tx.noteAdding(.claude, LiveItem(bytes: old))` before the launch.
 4. `terminal.open(script)`, then wait for `root/exit` (directory watch via
    `DispatchSource`, plus a 1 s poll as belt and braces). A wait that ends
@@ -790,10 +797,10 @@ queueing.
    → `loginFailed`.
 6. Locate the new credentials (Claude), reading only, first hit wins:
    a. `root/.claude/.credentials.json` exists → its bytes.
-   b. a non-live prefixed item that is new or whose bytes differ from
-      `before` → its bytes; the item is the source. Content, not name
-      novelty: the login home's fixed path always names the same item, and
-      an earlier add killed before its removal leaves that item behind.
+   b. the login's item holds bytes that differ from `before` → those
+      bytes; the item is the source. Content, not existence: the login
+      home's fixed path always names the same item, and an earlier add
+      killed before its removal leaves that item behind.
    c. `written` → the login overwrote the live item.
    d. → `loginProducedNothing`.
 7. `switcher.importLogin(p, root, claudeCreds)`. Only once it has committed
