@@ -386,8 +386,8 @@ import os
 
         let report = await w.switcher(http).probeAll(.codex)
 
-        #expect(report.accounts.map(\.0.raw) == ["gone@y", "live@y"])
-        #expect(report.accounts.first?.1 == .revoked(note: "login revoked by a later `codex login`"))
+        #expect(report.accounts.map(\.name.raw) == ["gone@y", "live@y"])
+        #expect(report.accounts.first?.outcome == .revoked(note: "login revoked by a later `codex login`"))
         #expect(http.requests.map(\.method) == ["GET", "POST", "GET"])
         #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-g", nil, "Bearer at-l"])
         let rows = try w.store.list(.codex)
@@ -1154,6 +1154,8 @@ enum Fixed {
     static let pollStep = Duration.milliseconds(10)
     /// Why the store cannot be opened while a test holds the app offline.
     static let offline = "store offline"
+    /// A usage record's note when ChatGPT's usage endpoint cannot be reached.
+    static let usageOffline = "OpenAI's usage endpoint could not be reached"
     /// Seconds a fake login waits for a sign-in that never comes.
     static let stall = 10
     /// How often a fake login looks for its sign-in.
@@ -1728,17 +1730,172 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(!model.actions.contains(.redeem(.codex, by)))
 }
 
+/// With nothing saved there is nothing to probe, and the notice says so
+/// instead of counting zero accounts.
+@MainActor @Test func appModelSaysNothingToRefresh() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let http = StubHTTP([])
+    let core = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.message == "No saved accounts to refresh")
+    #expect(model.error == "")
+    #expect(http.requests.isEmpty)
+}
+
+/// A probe's notice counts refreshed and failed accounts apart and holds a
+/// miss with its reasons; the header says whose age it shows and marks a
+/// probe that missed accounts.
+@MainActor @Test func appModelCountsProbeResults() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let offline = HTTPOutcome.unreachable(Fixed.offline)
+    let (core, _, _) = try codexPair(w, [
+        answer(Status.ok, codexUsage(session: 20, week: 45)), offline,
+        offline, offline,
+        answer(Status.ok, codexUsage(session: 20, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
+        answer(Status.unauthorized, "{}"), answer(Status.ok, codexUsage(session: 15, week: 25)),
+    ])
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+    #expect(model.meta == "Saved logins")
+
+    model.probeUsage()
+    try await settle(model)
+    let missA = "Codex: a@y: \(Fixed.usageOffline)", missB = "Codex: b@y: \(Fixed.usageOffline)"
+    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 failed\n" + missB)
+    #expect(model.message == "")
+    #expect(model.meta == "Some usage probed just now")
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "Usage not refreshed: 2 failed\n\(missA)\n\(missB)")
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "")
+    #expect(model.message == "Usage refreshed for 2 accounts")
+    #expect(model.meta == "All usage probed just now")
+    #expect(model.probeAge == "just now")
+
+    // The live login's token has expired: codex refreshes it on its next
+    // run, kiba never does, so that is routine, not a failure to hold.
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "")
+    #expect(model.message == "Usage refreshed for 1 of 2 accounts: 1 live login waiting for its CLI")
+    #expect(model.meta == "Some usage probed just now")
+}
+
+/// A result that needs attention stays through the probe the panel starts
+/// on opening, which is not spoken again while it finds the same, and
+/// through closing, until dismissed or until a later probe finds otherwise.
+@MainActor @Test func appModelHoldsResultsUntilDismissed() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let offline = HTTPOutcome.unreachable(Fixed.offline)
+    let (core, _, _) = try codexPair(w, [
+        answer(Status.ok, codexUsage(session: 20, week: 45)), offline,
+        answer(Status.ok, codexUsage(session: 20, week: 45)), offline,
+        answer(Status.ok, codexUsage(session: 20, week: 45)), offline,
+        answer(Status.ok, codexUsage(session: 20, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
+    ])
+    let model = AppModel(connect: { core })
+    var spoken: [String] = []
+    model.announce = { spoken.append($0) }
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    let held = "Usage refreshed for 1 of 2 accounts: 1 failed\nCodex: b@y: \(Fixed.usageOffline)"
+    #expect(model.note == held)
+    #expect(model.actions.first == .dismiss)
+
+    model.opened()
+    try await settle(model)
+    #expect(model.message == "")
+    #expect(model.note == held)
+    model.closed()
+    #expect(model.note == held)
+    #expect(spoken == [held])
+
+    model.trigger(.dismiss)
+    #expect(model.note == "")
+    #expect(!model.actions.contains(.dismiss))
+
+    // Still failing: held again. Recovered: the stale report goes.
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == held)
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "")
+    #expect(model.message == "Usage refreshed for 2 accounts")
+    #expect(spoken == [held, held, "Usage refreshed for 2 accounts"])
+}
+
+/// The menu bar gauge tells unknown, room left, nothing left and an error
+/// apart, and its accessibility value names each provider's state and the
+/// error until it is dismissed.
+@MainActor @Test func appModelDrawsGaugeStates() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, _) = try codexPair(w, [
+        answer(Status.ok, codexUsage(session: 20, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
+        answer(Status.ok, codexUsage(session: 100, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
+    ])
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+    #expect(model.gauge == Gauge(cells: [.unknown, .unknown], alert: false, dim: false))
+    #expect(model.iconValue == "Claude Code: usage unknown; Codex: usage unknown")
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.gauge.cells == [.unknown, .level(80)])
+    #expect(model.iconValue == "Claude Code: usage unknown; Codex: 80% left")
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.gauge.cells == [.unknown, .spent])
+    #expect(model.iconValue == "Claude Code: usage unknown; Codex: none left")
+
+    model.forget(.codex, try slot("c@y"))
+    try await settle(model)
+    let why = KibaError.noAccount(.codex, "c@y").reason
+    #expect(model.error == why)
+    #expect(model.gauge == Gauge(cells: [.fault, .fault], alert: true, dim: false))
+    #expect(model.iconValue == "Claude Code: error; Codex: error; " + why)
+
+    model.trigger(.dismiss)
+    #expect(model.error == "")
+    #expect(model.gauge == Gauge(cells: [.unknown, .spent], alert: false, dim: false))
+}
+
 /// A Codex world where a@y is live and saved and b@y is saved, and the
-/// `CoreBackend` over it; a switch probes both accounts once.
-func codexPair(_ w: World) throws -> (CoreBackend, SlotName, SlotName) {
+/// `CoreBackend` over it; a switch probes both accounts once, and so does
+/// a probe, which reaches a@y first. `answers` are the usage answers, in turn.
+func codexPair(
+    _ w: World,
+    _ answers: [HTTPOutcome] = [answer(Status.ok, codexUsage(session: 20, week: 45)),
+                                answer(Status.ok, codexUsage(session: 15, week: 25))]
+) throws -> (CoreBackend, SlotName, SlotName) {
     let (ay, by) = (try slot("a@y"), try slot("b@y"))
     let liveAuth = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")
     try w.writeCodex(liveAuth)
     try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: liveAuth, profile: nil)
     try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
                login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb"), profile: nil)
-    let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45)),
-                         answer(Status.ok, codexUsage(session: 15, week: 25))])
+    let http = StubHTTP(answers)
     let backend = CoreBackend(
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
         runner: try w.runner(http, keychain: FakeKeychain(items: [:])))

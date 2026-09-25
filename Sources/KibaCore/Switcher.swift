@@ -92,7 +92,7 @@ public final class Switcher: Sendable {
         } catch {
             return ProbeReport(saveBackError: backError, providerError: StatusReader.reason(error), accounts: [])
         }
-        var accounts: [(SlotName, ProbeOutcome)] = []
+        var accounts: [Probed] = []
         var unrecorded: [String] = []
         for row in rows {
             let isLive = live.contains(row.name)
@@ -102,7 +102,7 @@ public final class Switcher: Sendable {
             } catch {
                 unrecorded.append("\(row.name.raw): usage not recorded: \(StatusReader.reason(error))")
             }
-            accounts.append((row.name, outcome))
+            accounts.append(Probed(name: row.name, outcome: outcome, live: isLive))
         }
         let providerError = unrecorded.isEmpty ? nil : unrecorded.joined(separator: Self.joiner)
         return ProbeReport(saveBackError: backError, providerError: providerError, accounts: accounts)

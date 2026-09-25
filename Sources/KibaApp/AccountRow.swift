@@ -29,43 +29,49 @@ struct AccountRow: View {
         return account.active ? Theme.current : 0
     }
 
+    /// Dot, name, plan, figures and badge on one line; the name at its whole
+    /// width, or asking `nameMin` and truncating past it.
+    private func oneLine(_ usable: Bool?, _ red: Bool, wholeName: Bool) -> some View {
+        HStack(spacing: Theme.gap) {
+            dot(usable)
+            if wholeName {
+                name(red).fixedSize()
+            } else {
+                name(red).frame(idealWidth: Theme.nameMin, alignment: .leading)
+            }
+            plan(red)
+            Spacer(minLength: Theme.gap)
+            figures(Rows.figuresText(account.usage), red, wrap: false)
+            badgeSpot
+        }
+    }
+
     private var row: some View {
         let state = Rows.state(account.usage, active: account.active)
         let usable = Rows.usable(state)
         let red = usable == false
-        let plan = Rows.planText(account, now: model.now)
         return Button {
             model.trigger(key)
         } label: {
             VStack(alignment: .leading, spacing: Theme.lineGap) {
-                HStack(spacing: Theme.gap) {
-                    dot(usable)
-                    Text(account.name.raw)
-                        .font(account.active ? Theme.nameActive : Theme.name)
-                        .foregroundStyle(account.active ? Theme.accent : red ? Theme.idle : Theme.ink)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if !plan.isEmpty {
-                        Text(plan)
-                            .font(Theme.meta)
-                            .foregroundStyle(red ? Theme.out : Theme.idle)
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                    Spacer(minLength: Theme.gap)
-                    Text(Rows.figuresText(account.usage))
-                        .font(Theme.figures)
-                        .foregroundStyle(red ? Theme.out : Theme.ink)
-                        .lineLimit(1)
-                        .fixedSize()
-                    if offer > 0 {
-                        // Keeps the badge's place without raising the line;
-                        // the badge sits over the row, not in its button, so
-                        // it stays a control of its own.
-                        Badge(count: offer)
-                            .hidden()
-                            .frame(height: 0)
-                            .anchorPreference(key: BadgeSpot.self, value: .bounds) { $0 }
+                // One line while the name keeps its whole width, else while
+                // it keeps `nameMin`, beside plan and figures; else plan and
+                // labelled figures move to a line of their own under it.
+                ViewThatFits(in: .horizontal) {
+                    oneLine(usable, red, wholeName: true)
+                    oneLine(usable, red, wholeName: false)
+                    VStack(alignment: .leading, spacing: Theme.lineGap) {
+                        HStack(spacing: Theme.gap) {
+                            dot(usable)
+                            name(red)
+                        }
+                        HStack(alignment: .firstTextBaseline, spacing: Theme.gap) {
+                            plan(red)
+                            Spacer(minLength: Theme.gap)
+                            figures(labelled(state), red, wrap: true)
+                            badgeSpot
+                        }
+                        .padding(.leading, Theme.dot + Theme.gap)
                     }
                 }
                 ReservoirView(figures: Rows.figures(account.usage), drained: red)
@@ -79,7 +85,12 @@ struct AccountRow: View {
             Button("Forget…") { model.ask(.forget, provider, account.name) }
                 .disabled(model.busy)
         }
+        // The dot and the reservoir are drawn only; the label and value
+        // carry what they show, window by window.
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(speechLabel)
+        .accessibilityValue(speechValue(state))
+        .accessibilityHint(speechHint(state))
         .cursorTarget(model, key)
         .overlayPreferenceValue(BadgeSpot.self) { spot in
             if let spot {
@@ -89,6 +100,99 @@ struct AccountRow: View {
                 }
             }
         }
+    }
+
+    private func name(_ red: Bool) -> some View {
+        Text(account.name.raw)
+            .font(account.active ? Theme.nameActive : Theme.name)
+            .foregroundStyle(account.active ? Theme.accent : red ? Theme.idle : Theme.ink)
+            .lineLimit(1)
+            .truncationMode(.middle)
+    }
+
+    @ViewBuilder private func plan(_ red: Bool) -> some View {
+        let text = Rows.planText(account, now: model.now)
+        if !text.isEmpty {
+            Text(text)
+                .font(Theme.meta)
+                .foregroundStyle(red ? Theme.out : Theme.idle)
+                .lineLimit(1)
+                .fixedSize()
+        }
+    }
+
+    /// On the name line at their full width; under the name, as wide as the
+    /// row allows, wrapping when they must.
+    @ViewBuilder private func figures(_ text: String, _ red: Bool, wrap: Bool) -> some View {
+        let t = Text(text)
+            .font(Theme.figures)
+            .foregroundStyle(red ? Theme.out : Theme.ink)
+        if wrap {
+            t.multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            t.lineLimit(1)
+                .fixedSize()
+        }
+    }
+
+    /// Keeps the badge's place without raising the line; the badge sits over
+    /// the row, not in its button, so it stays a control of its own.
+    @ViewBuilder private var badgeSpot: some View {
+        if offer > 0 {
+            Badge(count: offer)
+                .hidden()
+                .frame(height: 0)
+                .anchorPreference(key: BadgeSpot.self, value: .bounds) { $0 }
+        }
+    }
+
+    /// The figures with their windows' labels, for the line under the name;
+    /// "limit" while blocked, as on one line.
+    private func labelled(_ state: RowState) -> String {
+        guard state != .blocked else { return Rows.figuresText(account.usage) }
+        return Rows.figures(account.usage).map { "\($0.label) \($0.left)%" }.joined(separator: Copy.figureSep)
+    }
+
+    /// VoiceOver: provider, full name, and whether it is the current account.
+    private var speechLabel: String {
+        let who = "\(provider.title): \(account.name.raw)"
+        return account.active ? who + Copy.sep + Copy.current : who
+    }
+
+    /// VoiceOver: plan, verdict, each window's allowance left, and the age
+    /// of the numbers.
+    private func speechValue(_ state: RowState) -> String {
+        let u = account.usage
+        var parts: [String] = []
+        if !account.plan.isEmpty { parts.append(account.plan + Copy.planWord) }
+        parts.append(verdict(state))
+        parts += Rows.figures(u).map { "\($0.label): \(max($0.left, 0))\(Copy.left)" }
+        if let at = u?.fetchedAt, at > 0 { parts.append(Copy.probed + Rows.age(at, now: model.now)) }
+        return parts.joined(separator: Copy.sep)
+    }
+
+    /// What the status dot shows, in words: room, a limit and when it
+    /// lifts, a login to repeat, or why the usage is unknown.
+    private func verdict(_ state: RowState) -> String {
+        let u = account.usage
+        switch state {
+        case .ok, .tight:
+            return Copy.room
+        case .blocked:
+            let when = Rows.blocking(u).map { Rows.resetLong($0.resetsAt, now: model.now) } ?? ""
+            return when.isEmpty ? Copy.limited : Copy.limited + Copy.sep + Copy.resetsIn + when
+        case .dead:
+            return Copy.relogin
+        case .unknown:
+            guard let u else { return Copy.unprobed }
+            return u.note.isEmpty ? Copy.noLimits : u.note
+        }
+    }
+
+    private func speechHint(_ state: RowState) -> String {
+        if state == .dead { return Copy.loginHint }
+        return account.active ? "" : "Switches \(provider.title) to this account"
     }
 
     /// The count of limit resets on offer; a click asks before spending one.
@@ -131,7 +235,6 @@ struct AccountRow: View {
         }
         .foregroundStyle(Theme.dot(usable))
         .frame(width: Theme.dot, height: Theme.dot)
-        .accessibilityLabel(Copy.dot(usable))
     }
 
     private enum Symbol {
@@ -149,6 +252,19 @@ struct AccountRow: View {
         static let reset = "Reset"
         static let keep = "Keep"
         static let badgeHint = "Uses one reset"
+        static let figureSep = " · "
+        static let sep = ", "
+        static let current = "current account"
+        static let planWord = " plan"
+        static let room = "has room"
+        static let limited = "limit reached"
+        static let resetsIn = "resets in "
+        static let relogin = "login required, log in again"
+        static let unprobed = "usage not probed yet"
+        static let noLimits = "no limits reported"
+        static let left = "% left"
+        static let probed = "probed "
+        static let loginHint = "Logs in to this account again"
 
         static func forgetAsk(_ name: String) -> String {
             "Forget \(name)?"
@@ -162,13 +278,6 @@ struct AccountRow: View {
             "\(Rows.resetsText(n)) available. Click to use one."
         }
 
-        static func dot(_ usable: Bool?) -> String {
-            switch usable {
-            case true?: return "has room"
-            case false?: return "limited"
-            case nil: return "not probed"
-            }
-        }
     }
 
     /// The row's padding, full width, highlight and hit shape, applied inside

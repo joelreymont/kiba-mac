@@ -69,6 +69,7 @@ public enum KibaError: Error, Equatable {
   case tool(String, Int32, String)   // subprocess name, exit status, stderr
   case noResets(Provider, String)    // redeem: the account's last probe offered no limit reset
   case remote(String)                // redeem: a provider endpoint refused or failed; the note is the reason
+  case loginItem(String)             // Start at login: SMAppService refused, or cannot find the app
 }
 extension KibaError { public var reason: String }   // one-line, user-facing, no code
 ```
@@ -144,7 +145,9 @@ a uniquely named temp (`<target>.<random>.tmp`, `O_EXCL`) in the same
 directory, mode 0600, write all bytes, `F_FULLFSYNC` it, `rename` over the
 target, then open the target's directory (following links) and
 `F_FULLFSYNC` it, so the call returns only once the new file and its name
-are on permanent storage (`fsync` alone leaves them in the drive's cache);
+are on permanent storage (`fsync` alone leaves them in the drive's cache;
+where the filesystem has no `F_FULLFSYNC`, `ENOTSUP`, `ENOTTY` or `EINVAL`,
+plain `fsync` is the barrier, as SQLite falls back);
 two concurrent writers can never disturb each other's temp. Any failure
 before the rename removes the temp file and rethrows, leaving the target as
 it was; a failed directory flush throws with the new file in place, not
@@ -615,7 +618,8 @@ public final class Switcher: Sendable {
   public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
   public func importLogin(_ p: Provider, root: URL, claudeCreds: Data?) throws -> SlotName
 }
-public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [(SlotName, ProbeOutcome)] }
+public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [Probed] }
+public struct Probed { public let name: SlotName; public let outcome: ProbeOutcome; public let live: Bool }   // live: probed as the live login
 ```
 
 Each provider's operations run one at a time, first come first served:
@@ -840,7 +844,9 @@ the same `CoreBackend`, wrapped to hold its status reads at a gate when a
 test needs a read in flight.
 
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
-`refreshing`, `busy`, `message`, `error`, `panelOpen`, `autoProbed`, `now`
+`refreshing`, `busy`, `message`, `note`, `error`, `lastProbe: ProbeRun?`
+(epoch the latest probe of every account started, and `complete`: every
+account probed and recorded), `panelOpen`, `autoProbed`, `now`
 (ticks every 30 s while open), `cursor: ActionKey?`, `confirming: Choice?`
 (kind `forget` | `reset`, provider, name), `refreshIntervalSec` (UserDefaults,
 default 120, min 15).
@@ -852,11 +858,35 @@ default 120, min 15).
 - Opening the panel: reset cursor, `autoProbed = false`, `refresh()`, then
   `maybeAutoProbe()` (once per open when any provider has saved accounts and
   nothing is busy); start the interval refresh and the clock tick. Closing
-  stops both and clears `error`.
-- Actions (`busy` guards all; success message auto-clears after 4 s):
+  stops both; it clears no notice.
+- Notices. Each action returns an `Outcome` (text, `held`, errors). A plain
+  confirmation shows in `message` and fades after 4 s. A held result goes
+  to `note` and every error to the action error; both stay until Dismiss
+  (`dismiss()`) or the next action the user starts supersedes them. The
+  probe that opening the panel starts supersedes nothing: its held lines
+  and errors join what is shown, skipping lines already there. Held: "Added
+  <x>, not <y>" and a probe that missed accounts; plain: every other result.
+  `announce` (set by the status item to post
+  `NSAccessibility` `.announcementRequested`, high priority) speaks each
+  action's result and errors as it finishes, and each reported error. The
+  status error is separate: set by a failed read, cleared by the next good one.
+- Actions (`busy` guards all):
   `use(p, name)` — a dead row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
-  probes every provider; `forget(p, name)`; `redeem(p, name)` — "Resetting
+  probes every provider and counts accounts per outcome: refreshed (the
+  provider answered: record `ok` or `unknown`), waiting (record `expired`
+  on a row probed as live: its CLI refreshes the token, kiba never does),
+  failed (record `expired` on a saved row, `error` or `revoked`: no fresh
+  usage) and removed (`.revoked`). Wording: nothing saved "No saved
+  accounts to refresh"; all refreshed "Usage refreshed for 2 accounts";
+  some "Usage refreshed for 1 of 3 accounts: 1 failed, 1 removed" or
+  "…: 1 live login waiting for its CLI"; none "Usage not refreshed: 2
+  failed"; a failed or removed account adds "<Provider>: <name>: <note>" or
+  "<Provider>: removed <name>, <note>", and save-back and provider errors
+  become the action error. A result with a failed or removed account is
+  held, every other is plain; `lastProbe` records the run, complete when
+  nothing failed or waited and every provider was probed. `forget(p, name)`;
+  `redeem(p, name)` — "Resetting
   limit for <name>…", `Backend.redeem`, then one sentence per outcome:
   reset "Limit reset for <name>", notLimited "<name> is not at a limit;
   nothing was spent", alreadyUsed "That reset was already used", noCredit
@@ -873,7 +903,8 @@ default 120, min 15).
   and any queued behind it, has applied its snapshot or failed: controls
   re-enable only over rows that show the action's result.
 - `actions: [ActionKey]`, every control a click can reach, in panel
-  order: `retry` while the status read has failed and no read runs; per
+  order: `dismiss` while a result or a shown action error is held; `retry`
+  while the status read has failed and no read runs; per
   provider `add`, every account row (`use`), each followed by its badge
   (`redeem`) while `Rows.resets` > 0, then `save` when the provider has a
   live login, no error and no active row; `usage` at the end. A confirming
@@ -886,9 +917,19 @@ default 120, min 15).
 `NSStatusItem` with a custom 18×18 image drawn by `GaugeIcon`. Left click
 toggles an `NSPopover` (`.transient`, `NSVisualEffectView` `.popover`
 material) hosting `PanelView`; right click shows a menu: Refresh usage,
-Start at login (SMAppService toggle), Quit. `LSUIElement` true. The icon
+Start at login, Quit. `LSUIElement` true. The icon
 tooltip lists `<title>: <live email or none>` per provider, or "AI accounts"
-while unavailable.
+while unavailable. The button's accessibility value (`AppModel.iconValue`)
+names each provider's cell ("Codex: 80% left", "none left", "usage
+unknown", "error"), then each provider error and the error showing.
+
+Start at login follows `SMAppService.mainApp.status`: `.enabled` shows on
+and a click unregisters; `.notRegistered` shows off and a click registers,
+then opens Login Items settings if macOS asks for approval;
+`.requiresApproval` shows mixed, titled "Start at login (needs approval in
+Login Items)", and a click opens Login Items settings; `.notFound` shows off
+and a click reports `KibaError.loginItem`. A register or unregister failure
+is reported the same way.
 
 ### Visual design
 
@@ -916,12 +957,13 @@ where it honours them: title `.title3.bold()`; section headers
 `.headline` in sentence case ("Claude Code", "Codex"), `ink`; names `.body`
 (`.bold()` when active); meta and plan text `.subheadline`, `idle`; figures
 `.subheadline.monospacedDigit()` in `ink`; the badge's count
-`.caption.bold().monospacedDigit()`. Text is never colored by usage
+`.caption.bold().monospacedDigit()`. Section headers are accessibility
+headings. Text is never colored by usage
 state: the bars carry the color, and only "limit" and "log in again" (plan
 text and figures of a blocked or dead row) are `out`. Rows and actions are
 `Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
-is `Button("Add account", systemImage: "plus")`, `.iconOnly`,
-`.accessoryBar` style. Reduce Transparency swaps the popover material for
+is `Button("Add Claude Code account", systemImage: "plus")` (the
+provider's title), `.iconOnly`, `.accessoryBar` style. Reduce Transparency swaps the popover material for
 the window background; Increase Contrast lifts the empty track to
 `tertiaryLabelColor`; Reduce Motion stops the fill animation.
 
@@ -930,9 +972,9 @@ as its content, capped at the menu bar screen's visible height less 24 pt
 (measured before each show); taller content scrolls with no scroll
 indicators. Each provider's header line carries the add action at its
 right, a standard plus button, `accent` under the keyboard cursor, tooltip
-"Add account"; there is no add row. Cursor order: Retry, then per section
-add, accounts (each followed by its badge), save, then Refresh usage
-(`AppModel.actions`).
+its label, "Add Codex account"; there is no add row. Cursor order: Dismiss,
+Retry, then per section add, accounts (each followed by its badge), save,
+then Refresh usage (`AppModel.actions`).
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -967,13 +1009,17 @@ the **status dot** before the name (8 pt): `room` green when the account
 can take work (ok or tight), `out` red when it is limited or dead, `idle`
 grey while unknown;
 under Differentiate Without Color it is a check, cross, or question mark
-symbol, and VoiceOver reads "has room", "limited", or "not probed". The
+symbol. The
 verdict also lives in the sort order and the plan text. The reset countdown
 lives in the plan text `(pro, 5d)`. The menu bar icon is the same
-idea at 18 px: one thin vertical cell per provider, filled to the active
-account's headline remaining, outline only when unknown; drawn `out` when
-`error != nil`, at 50 % opacity when unavailable, otherwise the menu bar's
-label color.
+idea at 18 px: one thin vertical cell per provider (`Gauge.Cell`), each
+state its own shape: filled from the bottom to the active account's
+headline remaining (`level`); outline only when unknown or no account is
+current (`unknown`); struck through corner to corner when nothing usable is
+left, at a limit or logged out (`spent`); an exclamation mark, bar over
+dot, on an error (`fault`: that provider's status error, or every cell
+while an error is showing). Drawn `out` while an error is showing, at 50 %
+opacity when unavailable, otherwise the menu bar's label color.
 
 The **limit-reset badge** ends the name line, after the figures, of every
 row whose `Rows.resets` > 0, blocked and dead rows included (that is when
@@ -989,9 +1035,23 @@ cursor back to the row. The digits carry it under Differentiate Without
 Color. A click asks first, like Forget.
 
 Rows: no boxes; a row highlights with `ink` at 10 % under the pointer or the
-keyboard cursor, 5 % when active. Name elides in the middle; plan and
-figures always fit. Blocked and dead names are `idle`; blocked figures read
-`limit`; dead plan text carries "log in again". Motion: reservoir fills animate `easeOut(0.35)` on data change,
+keyboard cursor, 5 % when active. Name elides in the middle. The name line
+stays one line while the name keeps at least `Theme.nameMin` (140 pt, or its
+whole width when shorter) beside plan and figures (`ViewThatFits`, measured
+at ideal sizes); otherwise the name takes the whole line and plan, the
+figures labelled with their windows ("Session (5-hour) 72% · Weekly (7-day)
+40%") and the badge move to a line under it, indented to the name, the
+figures wrapping when plan and figures outgrow the row. So the name is
+bounded below, never squeezed out; plan text and the number of windows are
+not bounded. Blocked and dead names are `idle`; blocked figures read
+`limit`; dead plan text carries "log in again". VoiceOver reads a row as
+one button: label "<Provider>: <name>" plus ", current account"; value the
+plan, the verdict ("has room"; "limit reached, resets in 5 h 12 min";
+"login required, log in again"; "usage not probed yet", the record's note,
+or "no limits reported"), each window "<label>: 72% left", and "probed 12
+min ago"; hint "Switches <Provider> to this account" or "Logs in to this
+account again". The dot and reservoir are hidden from it: the value says
+what they show. Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
 Keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor (scrolling it into view), ⏎ and
 Space activate the cursor's control, ⎋ backs out of a confirmation,
@@ -1004,11 +1064,17 @@ is safe because the panel has no text field or other control that reads
 keys, and the cursor reaches every control a click can, so it replaces the
 key-view loop rather than hiding a control from it.
 
-Copy: "Room to work" (title), meta = "Working…" | "Refreshing…" | "Usage
-probed 2 min ago" | "Saved logins" | "Unavailable"; "Not logged in" under a
-provider without a live login; "Retry" row when status failed; error and
-message text below the title (error in `out`, message in `idle`, max 3
-lines). Action names stay the same through the flow: "Save the current
+Copy: "Room to work" (title), meta = "Working…" | "Refreshing…" | "All
+usage probed 2 min ago" (the latest probe, complete) | "Some usage probed 2
+min ago" (it missed accounts) | "Oldest usage from 40 min ago" (no probe
+yet: the oldest record shown) | "Saved logins" (no records) |
+"Unavailable"; the Refresh usage row's detail is the latest probe's age, and
+each row's tooltip and VoiceOver value carry its own record's age. "Not
+logged in" under a provider without a live login; "Retry" row when status
+failed; error, held note and message below the title (error in `out`, note
+in `ink`, message in `idle`, max 3 lines each), with a Dismiss button (an
+`xmark`, "Dismiss notice") at their right while a note or action error is
+held. Action names stay the same through the flow: "Save the current
 login" → "Saved joel@x.com"; "Switching Claude Code to other@x.com…" →
 "Claude Code: now other@x.com"; "Resetting limit for other@x.com…" →
 "Limit reset for other@x.com". Confirmations, the question up to two lines

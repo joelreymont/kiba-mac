@@ -38,12 +38,18 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         model.closePanel = { [weak self] in self?.popover.performClose(nil) }
+        model.announce = { text in
+            NSAccessibility.post(
+                element: NSApp as Any, notification: .announcementRequested,
+                userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        }
         track()
     }
 
     // MARK: Icon
 
-    /// Redraws the icon and its tooltip whenever what they show changes.
+    /// Redraws the icon, its tooltip and its accessibility value whenever
+    /// what they show changes.
     private func track() {
         withObservationTracking {
             render()
@@ -59,6 +65,7 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
             drawn = g
         }
         item.button?.toolTip = model.iconTip
+        item.button?.setAccessibilityValue(model.iconValue)
     }
 
     // MARK: Clicks
@@ -116,9 +123,18 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
 
     // MARK: NSMenuDelegate
 
+    /// Start at login shows on when registered, mixed and titled as
+    /// waiting while macOS needs the user's approval, else off.
     func menuWillOpen(_ menu: NSMenu) {
         usageItem.isEnabled = model.availability == .ready && !model.busy
-        loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let status = SMAppService.mainApp.status
+        loginItem.title = status == .requiresApproval ? Copy.loginApproval : Copy.login
+        switch status {
+        case .enabled: loginItem.state = .on
+        case .requiresApproval: loginItem.state = .mixed
+        case .notRegistered, .notFound: loginItem.state = .off
+        @unknown default: loginItem.state = .off
+        }
     }
 
     // MARK: Menu actions
@@ -127,21 +143,30 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
         model.probeUsage()
     }
 
+    /// Registered: unregister. Not registered, or not found (macOS has no
+    /// record of the bundle before its first registration): register, then
+    /// open Login Items when macOS asks the user to approve it. Waiting for
+    /// approval: open Login Items.
     @objc private func toggleLogin() {
         let app = SMAppService.mainApp
-        do {
-            switch app.status {
-            case .enabled: try app.unregister()
-            case .requiresApproval: break
-            default: try app.register()
+        switch app.status {
+        case .enabled:
+            do {
+                try app.unregister()
+            } catch {
+                model.report(.loginItem(error.localizedDescription))
             }
-        } catch {
-            model.report("Start at login: \(error.localizedDescription)")
-            return
-        }
-        if app.status == .requiresApproval {
-            model.say(Copy.approve)
+        case .notRegistered, .notFound:
+            do {
+                try app.register()
+            } catch {
+                model.report(.loginItem(error.localizedDescription))
+            }
+            if app.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        case .requiresApproval:
             SMAppService.openSystemSettingsLoginItems()
+        @unknown default:
+            model.report(.loginItem(Copy.unknownStatus))
         }
     }
 
@@ -152,7 +177,8 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
     private enum Copy {
         static let usage = "Refresh usage"
         static let login = "Start at login"
+        static let loginApproval = "Start at login (needs approval in Login Items)"
         static let quit = "Quit"
-        static let approve = "Allow Kiba under Login Items in System Settings to start it at login"
+        static let unknownStatus = "macOS reports a login item status Kiba does not know"
     }
 }

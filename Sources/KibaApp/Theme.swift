@@ -75,6 +75,9 @@ enum Theme {
     static let rowPad: CGFloat = 6
     /// The status dot before a name.
     static let dot: CGFloat = 8
+    /// The least width the name keeps beside plan and figures on one line,
+    /// about 20 characters; when they would leave it less, they move under it.
+    static let nameMin: CGFloat = 140
     static let actionPad: CGFloat = 5
     /// Between a confirmation's button label and its cursor fill.
     static let choicePad: CGFloat = 6

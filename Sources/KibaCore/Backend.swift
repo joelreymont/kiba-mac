@@ -49,12 +49,26 @@ public struct ProbeReport: Sendable {
     public var saveBackError: String?
     /// The provider could not be probed at all.
     public var providerError: String?
-    public var accounts: [(SlotName, ProbeOutcome)]
+    public var accounts: [Probed]
 
-    public init(saveBackError: String?, providerError: String?, accounts: [(SlotName, ProbeOutcome)]) {
+    public init(saveBackError: String?, providerError: String?, accounts: [Probed]) {
         self.saveBackError = saveBackError
         self.providerError = providerError
         self.accounts = accounts
+    }
+}
+
+/// One saved login's probe: its outcome, and whether it was probed as the
+/// live login, whose token is never refreshed, so its `expired` is routine.
+public struct Probed: Sendable {
+    public let name: SlotName
+    public let outcome: ProbeOutcome
+    public let live: Bool
+
+    public init(name: SlotName, outcome: ProbeOutcome, live: Bool) {
+        self.name = name
+        self.outcome = outcome
+        self.live = live
     }
 }
 

@@ -39,7 +39,7 @@ struct PanelView: View {
                     block(sec)
                 }
                 rule
-                ActionRow(model: model, key: .usage, label: Copy.usage, detail: model.usageAge)
+                ActionRow(model: model, key: .usage, label: Copy.usage, detail: model.probeAge)
                     .id(ActionKey.usage)
             }
         }
@@ -62,11 +62,26 @@ struct PanelView: View {
         .padding(.bottom, Theme.blockGap)
     }
 
-    /// The action error in `out` and the passing message in `idle`, each
-    /// shown while it is set.
+    /// The error in `out`, the held result in `ink` and the passing message
+    /// in `idle`, each shown while it is set; Dismiss at the right while a
+    /// result or an action error is held.
     @ViewBuilder private var notice: some View {
-        noticeLine(model.error, color: Theme.out)
-        noticeLine(model.message, color: Theme.idle)
+        if !(model.error.isEmpty && model.note.isEmpty && model.message.isEmpty) {
+            HStack(alignment: .top, spacing: Theme.gap) {
+                VStack(alignment: .leading, spacing: Theme.blockGap) {
+                    noticeLine(model.error, color: Theme.out)
+                    noticeLine(model.note, color: Theme.ink)
+                    noticeLine(model.message, color: Theme.idle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if model.canDismiss {
+                    DismissButton(model: model)
+                        .id(ActionKey.dismiss)
+                }
+            }
+            .padding(.horizontal, Theme.inset)
+            .padding(.bottom, Theme.blockGap)
+        }
     }
 
     @ViewBuilder private func noticeLine(_ text: String, color: Color) -> some View {
@@ -76,8 +91,6 @@ struct PanelView: View {
                 .foregroundStyle(color)
                 .lineLimit(Theme.noticeLines)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, Theme.inset)
-                .padding(.bottom, Theme.blockGap)
         }
     }
 
@@ -94,6 +107,7 @@ struct PanelView: View {
                 Text(p.title)
                     .font(Theme.section)
                     .foregroundStyle(Theme.ink)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer(minLength: Theme.gap)
                 AddButton(model: model, provider: p)
             }
@@ -137,20 +151,22 @@ struct PanelView: View {
 }
 
 /// The plus at the right of a provider's header: the add action as a
-/// standard accessory-bar button, tinted `accent` under the keyboard cursor.
+/// standard accessory-bar button, tinted `accent` under the keyboard cursor,
+/// named for its provider ("Add Codex account") wherever VoiceOver meets it.
 private struct AddButton: View {
     let model: AppModel
     let provider: Provider
 
     private var key: ActionKey { .add(provider) }
+    private var label: String { "\(Copy.add) \(provider.title) \(Copy.account)" }
 
     var body: some View {
-        Button("\(Copy.add) \(provider.title) \(Copy.account)", systemImage: Symbol.plus) { model.trigger(key) }
+        Button(label, systemImage: Symbol.plus) { model.trigger(key) }
             .labelStyle(.iconOnly)
             .buttonStyle(.accessoryBar)
             .foregroundStyle(model.cursor == key ? Theme.accent : Theme.idle)
             .disabled(model.busy)
-            .help("\(Copy.add) \(Copy.account)")
+            .help(label)
             .cursorTarget(model, key)
     }
 
@@ -161,6 +177,29 @@ private struct AddButton: View {
     private enum Copy {
         static let add = "Add"
         static let account = "account"
+    }
+}
+
+/// The cross beside a held notice: acknowledges it. It stays enabled while
+/// an action runs, since it only clears what is shown.
+private struct DismissButton: View {
+    let model: AppModel
+
+    var body: some View {
+        Button(Copy.dismiss, systemImage: Symbol.cross) { model.trigger(.dismiss) }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.accessoryBar)
+            .foregroundStyle(model.cursor == .dismiss ? Theme.accent : Theme.idle)
+            .help(Copy.dismiss)
+            .cursorTarget(model, .dismiss)
+    }
+
+    private enum Symbol {
+        static let cross = "xmark"
+    }
+
+    private enum Copy {
+        static let dismiss = "Dismiss notice"
     }
 }
 

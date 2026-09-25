@@ -21,6 +21,7 @@ public enum KibaError: Error, Equatable, Sendable {
     case tool(String, Int32, String)
     case noResets(Provider, String)
     case remote(String)
+    case loginItem(String)
 }
 
 extension KibaError {
@@ -66,6 +67,8 @@ extension KibaError {
             return "no limit resets are available for \(name)"
         case .remote(let note):
             return note
+        case .loginItem(let what):
+            return "Start at login: \(what)"
         }
     }
 }
