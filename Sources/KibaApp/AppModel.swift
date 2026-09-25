@@ -5,11 +5,17 @@ import Observation
 /// Builds the backend; a failure leaves the panel unavailable until Retry.
 typealias Connect = @Sendable () throws -> any Backend
 
-/// One row the cursor can rest on, in panel order.
+/// One control the cursor can rest on; `trigger(_:)` runs each.
 enum ActionKey: Hashable, Sendable {
+    /// An account row: switch to it.
     case use(Provider, SlotName)
     case save(Provider)
     case add(Provider)
+    /// The Forget and Keep buttons of a row confirming a forget.
+    case forget(Provider, SlotName)
+    case keep(Provider, SlotName)
+    /// Read the status again after it failed.
+    case retry
     case usage
 }
 
@@ -48,7 +54,6 @@ struct Gauge: Equatable, Sendable {
 final class AppModel {
     private(set) var snapshot = Snapshot(providers: [])
     private(set) var sections: [Section] = []
-    private(set) var actions: [ActionKey] = []
     private(set) var availability = Availability.checking
     private(set) var refreshing = false
     private(set) var busy = false
@@ -61,7 +66,7 @@ final class AppModel {
     /// The clock rows are drawn against; ticks while the panel is open.
     private(set) var now = Date()
     private(set) var cursor: ActionKey?
-    /// The account row showing "Forget …? Forget / Keep".
+    /// The account row (its `use` key) showing "Forget …? Forget / Keep".
     private(set) var forgetting: ActionKey?
     /// The row a keyboard move asks the view to scroll to; `scrollSerial`
     /// changes on every such move.
@@ -85,6 +90,8 @@ final class AppModel {
     @ObservationIgnored private var lastRead: Date?
     @ObservationIgnored private var queued = false
     @ObservationIgnored private var queuedForce = false
+    /// Actions waiting for the status read that follows them.
+    @ObservationIgnored private var waiting: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var poller: Task<Void, Never>?
     @ObservationIgnored private var ticker: Task<Void, Never>?
     @ObservationIgnored private var clearer: Task<Void, Never>?
@@ -95,6 +102,30 @@ final class AppModel {
     }
 
     // MARK: Derived
+
+    /// Every control a click can reach, in panel order: Retry while the
+    /// status read has failed; per provider its add, its account rows and
+    /// its save; the usage action last. A row confirming a forget offers its
+    /// Forget and Keep buttons in its place.
+    var actions: [ActionKey] {
+        var keys: [ActionKey] = canRetry ? [.retry] : []
+        for sec in sections {
+            keys.append(.add(sec.id))
+            for a in sec.accounts {
+                let row = ActionKey.use(sec.id, a.name)
+                keys += row == forgetting ? [.forget(sec.id, a.name), .keep(sec.id, a.name)] : [row]
+            }
+            if sec.canSave { keys.append(.save(sec.id)) }
+        }
+        if !sections.isEmpty { keys.append(.usage) }
+        return keys
+    }
+
+    /// The Retry row shows while the status is unavailable and no read runs.
+    var canRetry: Bool {
+        guard case .failed = availability else { return false }
+        return !refreshing
+    }
 
     /// Header meta line.
     var meta: String {
@@ -179,7 +210,10 @@ final class AppModel {
         }
     }
 
+    /// Applies a read. Actions waiting for it resume once no read runs or
+    /// is queued, so the snapshot they see postdates their work.
     private func finish(_ result: Result<(any Backend, Snapshot), any Error>) {
+        let old = actions
         refreshing = false
         switch result {
         case .success(let (b, s)):
@@ -193,13 +227,15 @@ final class AppModel {
             statusError = Self.reason(e)
             apply(Snapshot(providers: []))
         }
+        if case .use(let p, let n)? = forgetting, account(p, n) == nil { forgetting = nil }
+        retain(old)
         if queued { refresh() }
+        if !refreshing { release() }
         maybeAutoProbe()
     }
 
     private func apply(_ s: Snapshot) {
         guard s != snapshot else { return }
-        let old = actions
         snapshot = s
         sections = s.providers.map { p in
             Section(
@@ -207,16 +243,21 @@ final class AppModel {
                 accounts: Rows.sorted(p.accounts),
                 canSave: p.live != nil && p.error == nil && !p.accounts.contains(where: \.active))
         }
-        var keys: [ActionKey] = []
-        for sec in sections {
-            keys.append(.add(sec.id))
-            keys += sec.accounts.map { .use(sec.id, $0.name) }
-            if sec.canSave { keys.append(.save(sec.id)) }
+    }
+
+    /// Forces a read; returns once it, and any read queued behind it, has
+    /// applied its snapshot or failed.
+    private func reread() async {
+        await withCheckedContinuation { done in
+            waiting.append(done)
+            refresh(force: true)
         }
-        if !sections.isEmpty { keys.append(.usage) }
-        actions = keys
-        retain(old)
-        if let f = forgetting, !actions.contains(f) { forgetting = nil }
+    }
+
+    private func release() {
+        let done = waiting
+        waiting = []
+        for d in done { d.resume() }
     }
 
     /// Keeps the cursor on its row across refreshes; when the row is gone the
@@ -251,7 +292,7 @@ final class AppModel {
         poller = nil
         ticker = nil
         actionError = ""
-        forgetting = nil
+        keep()
     }
 
     /// Stale numbers cannot say which account to switch to, so each open
@@ -279,17 +320,17 @@ final class AppModel {
 
     // MARK: Cursor
 
-    /// Hover: moves the cursor without scrolling.
     /// Caps the panel at `height` points.
     func fit(height: CGFloat) {
         heightLimit = height
     }
 
+    /// Hover and VoiceOver focus: moves the cursor without scrolling.
     func point(_ k: ActionKey) {
         cursor = k
     }
 
-    /// Keyboard: moves the cursor one row and scrolls it into view.
+    /// Keyboard: moves the cursor one control and scrolls it into view.
     func move(_ delta: Int) {
         guard !actions.isEmpty else { return }
         let next: Int
@@ -303,17 +344,16 @@ final class AppModel {
         scrollSerial &+= 1
     }
 
-    /// Return on the cursor row. A row asking to be forgotten takes only its
-    /// own buttons, so Return never forgets or switches by accident.
+    /// Return or Space on the cursor's control.
     func activate() {
-        guard let c = cursor, c != forgetting else { return }
+        guard let c = cursor, actions.contains(c) else { return }
         trigger(c)
     }
 
     /// Escape: backs out of a forget confirmation, else closes the panel.
     func escape() {
         if forgetting != nil {
-            forgetting = nil
+            keep()
         } else {
             closePanel()
         }
@@ -321,12 +361,16 @@ final class AppModel {
 
     // MARK: Actions
 
+    /// Runs the control `k` names. Each action refuses while one runs;
+    /// Keep (it only dismisses) and Retry (it only rereads) always run.
     func trigger(_ k: ActionKey) {
-        guard !busy else { return }
         switch k {
         case .use(let p, let n): use(p, n)
         case .save(let p): save(p)
         case .add(let p): add(p, email: nil)
+        case .forget(let p, let n): forget(p, n)
+        case .keep: keep()
+        case .retry: refresh(force: true)
         case .usage: probeUsage()
         }
     }
@@ -395,18 +439,23 @@ final class AppModel {
         }
     }
 
+    /// Turns the row into its confirmation, the cursor on Keep.
     func askForget(_ p: Provider, _ n: SlotName) {
         guard !busy else { return }
         forgetting = .use(p, n)
-        cursor = forgetting
+        cursor = .keep(p, n)
     }
 
+    /// Ends the confirmation; a cursor on its buttons returns to the row.
     func keep() {
+        guard let row = forgetting else { return }
         forgetting = nil
+        if let c = cursor, !actions.contains(c) { cursor = row }
     }
 
     func forget(_ p: Provider, _ n: SlotName) {
-        forgetting = nil
+        guard !busy else { return }
+        keep()
         run("Forgetting \(n.raw)…") { b in
             try await Self.off { try b.forget(p, n) }
             return "Forgot \(n.raw)"
@@ -424,8 +473,10 @@ final class AppModel {
     }
 
     /// One action at a time: shows `label` while `work` runs, then its
-    /// result or its error, and rereads the status either way. A new action
-    /// clears the last action's error unless `clearing` is false.
+    /// result or its error, and rereads the status either way; stays busy
+    /// until the reread has applied, so no control acts on the rows from
+    /// before the action. A new action clears the last action's error
+    /// unless `clearing` is false.
     private func run(
         _ label: String, clearing: Bool = true, _ work: @escaping @MainActor (any Backend) async throws -> String
     ) {
@@ -441,8 +492,9 @@ final class AppModel {
                 message = ""
                 actionError = Self.reason(error)
             }
+            await reread()
             busy = false
-            refresh(force: true)
+            maybeAutoProbe()
         }
     }
 

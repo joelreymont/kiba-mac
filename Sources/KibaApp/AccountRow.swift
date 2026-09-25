@@ -14,15 +14,10 @@ struct AccountRow: View {
     private var key: ActionKey { .use(provider, account.name) }
 
     var body: some View {
-        Group {
-            if model.forgetting == key {
-                confirm.modifier(Slab(fill: fill))
-            } else {
-                row
-            }
-        }
-        .onHover { inside in
-            if inside { model.point(key) }
+        if model.forgetting == key {
+            confirm.modifier(Slab(fill: fill))
+        } else {
+            row
         }
     }
 
@@ -73,6 +68,7 @@ struct AccountRow: View {
                 .disabled(model.busy)
         }
         .accessibilityElement(children: .combine)
+        .cursorTarget(model, key)
     }
 
     /// Green: the account can take work; red: limited or logged out; grey:
@@ -103,6 +99,9 @@ struct AccountRow: View {
     }
 
     private enum Copy {
+        static let forget = "Forget"
+        static let keep = "Keep"
+
         static func dot(_ usable: Bool?) -> String {
             switch usable {
             case true?: return "has room"
@@ -129,6 +128,8 @@ struct AccountRow: View {
         }
     }
 
+    /// "Forget …? Forget / Keep": each button is a cursor stop and carries
+    /// the cursor fill while the cursor is on it.
     private var confirm: some View {
         HStack(spacing: Theme.gap) {
             Text("Forget \(account.name.raw)?")
@@ -137,14 +138,28 @@ struct AccountRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: Theme.gap)
-            Button("Forget", role: .destructive) { model.forget(provider, account.name) }
+            choice(.forget(provider, account.name), Copy.forget, role: .destructive)
                 .fontWeight(.semibold)
                 .foregroundStyle(Theme.out)
                 .disabled(model.busy)
-            Button("Keep") { model.keep() }
+            choice(.keep(provider, account.name), Copy.keep, role: nil)
                 .foregroundStyle(Theme.accent)
         }
         .font(Theme.name)
         .buttonStyle(.borderless)
+    }
+
+    private func choice(_ k: ActionKey, _ label: String, role: ButtonRole?) -> some View {
+        Button(role: role) {
+            model.trigger(k)
+        } label: {
+            Text(label)
+                .padding(.horizontal, Theme.choicePad)
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.corner)
+                        .fill(Theme.ink.opacity(model.cursor == k ? Theme.hover : 0)))
+        }
+        .cursorTarget(model, k)
+        .id(k)
     }
 }

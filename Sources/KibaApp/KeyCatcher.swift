@@ -1,9 +1,13 @@
 import AppKit
 import SwiftUI
 
-/// Panel keyboard: ↑/↓ move the cursor, ⏎ activates, ⎋ backs out or closes.
-/// An invisible AppKit view that takes first responder whenever the panel's
-/// window becomes key, and reads keys through the standard key bindings.
+/// Panel keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor, ⏎ and Space activate,
+/// ⎋ backs out or closes. An invisible AppKit view that takes first
+/// responder whenever the panel's window becomes key, and reads keys through
+/// the standard key bindings. Holding first responder is safe because the
+/// panel has no text field or other control that reads keys, and the cursor
+/// reaches every control a click can, so it replaces the key-view loop
+/// rather than hiding a control from it.
 struct KeyCatcher: NSViewRepresentable {
     let move: (Int) -> Void
     let activate: () -> Void
@@ -67,11 +71,33 @@ final class KeyView: NSView {
         move(1)
     }
 
+    override func insertTab(_ sender: Any?) {
+        move(1)
+    }
+
+    override func insertBacktab(_ sender: Any?) {
+        move(-1)
+    }
+
     override func insertNewline(_ sender: Any?) {
+        activate()
+    }
+
+    /// Space presses the cursor's control, as it presses a focused button;
+    /// any other typed text keeps the default handling.
+    override func insertText(_ text: Any) {
+        guard text as? String == Key.space else {
+            super.insertText(text)
+            return
+        }
         activate()
     }
 
     override func cancelOperation(_ sender: Any?) {
         escape()
+    }
+
+    private enum Key {
+        static let space = " "
     }
 }

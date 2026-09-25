@@ -29,8 +29,9 @@ struct PanelView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             notice
-            if case .failed = model.availability, !model.refreshing {
-                ActionRow(model: model, key: nil, label: Copy.retry) { model.refresh(force: true) }
+            if model.canRetry {
+                ActionRow(model: model, key: .retry, label: Copy.retry)
+                    .id(ActionKey.retry)
             }
             if !model.sections.isEmpty {
                 rule
@@ -38,10 +39,8 @@ struct PanelView: View {
                     block(sec)
                 }
                 rule
-                ActionRow(model: model, key: .usage, label: Copy.usage, detail: model.usageAge) {
-                    model.trigger(.usage)
-                }
-                .id(ActionKey.usage)
+                ActionRow(model: model, key: .usage, label: Copy.usage, detail: model.usageAge)
+                    .id(ActionKey.usage)
             }
         }
         .padding(.vertical, Theme.pad)
@@ -112,7 +111,7 @@ struct PanelView: View {
                     .id(ActionKey.use(p, a.name))
             }
             if sec.canSave {
-                ActionRow(model: model, key: .save(p), label: Copy.save) { model.trigger(.save(p)) }
+                ActionRow(model: model, key: .save(p), label: Copy.save)
                     .id(ActionKey.save(p))
             }
         }
@@ -137,8 +136,6 @@ struct PanelView: View {
     }
 }
 
-/// Takes its content's height up to `limit`, then hands the content exactly
-/// that height; the scroll view inside scrolls whatever is taller.
 /// The plus at the right of a provider's header: the add action as a
 /// standard accessory-bar button, tinted `accent` under the keyboard cursor.
 private struct AddButton: View {
@@ -154,9 +151,7 @@ private struct AddButton: View {
             .foregroundStyle(model.cursor == key ? Theme.accent : Theme.idle)
             .disabled(model.busy)
             .help("\(Copy.add) \(Copy.account)")
-            .onHover { inside in
-                if inside { model.point(key) }
-            }
+            .cursorTarget(model, key)
     }
 
     private enum Symbol {
@@ -169,6 +164,8 @@ private struct AddButton: View {
     }
 }
 
+/// Takes its content's height up to `limit`, then hands the content exactly
+/// that height; the scroll view inside scrolls whatever is taller.
 private struct CapHeight: Layout {
     let limit: CGFloat
 

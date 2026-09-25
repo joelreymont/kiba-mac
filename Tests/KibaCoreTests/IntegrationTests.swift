@@ -667,6 +667,8 @@ enum Fixed {
     /// How long the app model may take to finish a read or an action.
     static let settleLimit = Duration.seconds(5)
     static let pollStep = Duration.milliseconds(10)
+    /// Why the store cannot be opened while a test holds the app offline.
+    static let offline = "store offline"
     /// Under /private/tmp: the store refuses symlinked paths such as /tmp.
     static let scratchTemplate = "/private/tmp/kiba-it-XXXXXX"
     static let shell = URL(fileURLWithPath: "/bin/sh", isDirectory: false)
@@ -983,17 +985,7 @@ func members(_ body: Data?) throws -> [String: String] {
 @MainActor @Test func appModelListsRowsAndSwitches() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
-    let (ay, by) = (try slot("a@y"), try slot("b@y"))
-    let liveAuth = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")
-    try w.writeCodex(liveAuth)
-    try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: liveAuth, profile: nil)
-    try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
-               login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb"), profile: nil)
-    let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45)),
-                         answer(Status.ok, codexUsage(session: 15, week: 25))])
-    let backend = CoreBackend(
-        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
-        runner: w.runner(http, keychain: FakeKeychain(items: [:])))
+    let (backend, ay, by) = try codexPair(w)
     let model = AppModel(connect: { backend })
 
     model.start()
@@ -1017,12 +1009,185 @@ func members(_ body: Data?) throws -> [String: String] {
     ])
 }
 
+/// Clicking the account a switch left would do nothing while the rows still
+/// mark it active, so the panel stays busy until the reread shows the switch,
+/// also when that reread queues behind a read already in flight.
+@MainActor @Test(arguments: [false, true]) func appModelStaysBusyUntilTheSwitchShows(queued: Bool) async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, ay, by) = try codexPair(w)
+    let gate = Gate(shut: false)
+    let model = AppModel(connect: { GatedBackend(core: core, gate: gate) })
+    model.start()
+    try await settle(model)
+
+    gate.close()
+    if queued {
+        model.refresh(force: true)
+        try await poll("a status read in flight") { gate.held > 0 }
+    }
+    model.use(.codex, by)
+    try await poll("the switch") { model.message == "Codex: now b@y" }
+    #expect(model.busy)
+    #expect(activeRow(model, .codex) == ay)
+
+    gate.open()
+    try await settle(model)
+    #expect(activeRow(model, .codex) == by)
+    #expect(model.message == "Codex: now b@y")
+}
+
+@MainActor @Test func appModelRetriesFromTheKeyboard() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, ay, by) = try codexPair(w)
+    let online = Gate(shut: true)
+    let model = AppModel(connect: {
+        guard online.isOpen else { throw KibaError.io(Fixed.offline) }
+        return core
+    })
+    model.start()
+    try await settle(model)
+    #expect(model.availability == .failed(KibaError.io(Fixed.offline).reason))
+    #expect(model.actions == [.retry])
+
+    model.move(1)
+    #expect(model.cursor == .retry)
+    online.open()
+    model.activate()
+    try await settle(model)
+    #expect(model.availability == .ready)
+    #expect(model.error == "")
+    #expect(model.sections.first { $0.id == .codex }?.accounts.map(\.name) == [ay, by])
+}
+
+@MainActor @Test func appModelConfirmsForgetFromTheKeyboard() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, ay, by) = try codexPair(w)
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.askForget(.codex, by)
+    #expect(model.cursor == .keep(.codex, by))
+    model.activate()
+    #expect(model.forgetting == nil)
+    #expect(model.cursor == .use(.codex, by))
+
+    model.askForget(.codex, by)
+    model.move(-1)
+    #expect(model.cursor == .forget(.codex, by))
+    model.activate()
+    try await settle(model)
+    #expect(model.message == "Forgot b@y")
+    #expect(model.sections.first { $0.id == .codex }?.accounts.map(\.name) == [ay])
+}
+
+/// A Codex world where a@y is live and saved and b@y is saved, and the
+/// `CoreBackend` over it; a switch probes both accounts once.
+func codexPair(_ w: World) throws -> (CoreBackend, SlotName, SlotName) {
+    let (ay, by) = (try slot("a@y"), try slot("b@y"))
+    let liveAuth = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")
+    try w.writeCodex(liveAuth)
+    try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: liveAuth, profile: nil)
+    try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
+               login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb"), profile: nil)
+    let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45)),
+                         answer(Status.ok, codexUsage(session: 15, week: 25))])
+    let backend = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: w.runner(http, keychain: FakeKeychain(items: [:])))
+    return (backend, ay, by)
+}
+
+/// The name of the provider's row the panel marks active.
+@MainActor func activeRow(_ model: AppModel, _ p: Provider) -> SlotName? {
+    model.sections.first { $0.id == p }?.accounts.first(where: \.active)?.name
+}
+
+/// `CoreBackend` whose status reads wait at `gate`.
+struct GatedBackend: Backend {
+    let core: CoreBackend
+    let gate: Gate
+
+    func status() -> Snapshot {
+        gate.pass()
+        return core.status()
+    }
+
+    func use(_ p: Provider, _ n: SlotName) async throws {
+        try await core.use(p, n)
+    }
+
+    func save(_ p: Provider) throws -> SlotName? {
+        try core.save(p)
+    }
+
+    func forget(_ p: Provider, _ n: SlotName) throws {
+        try core.forget(p, n)
+    }
+
+    func probeAll(_ p: Provider) async -> ProbeReport {
+        await core.probeAll(p)
+    }
+
+    func add(_ p: Provider, expected: String?) async throws -> AddResult {
+        try await core.add(p, expected: expected)
+    }
+
+    func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome {
+        try await core.redeem(p, n)
+    }
+}
+
+/// A gate the test opens and shuts while the model's reads run on other
+/// threads: `pass()` blocks while it is shut.
+final class Gate: @unchecked Sendable {
+    private let cond = NSCondition()
+    private var shut: Bool
+    private var waiting = 0
+
+    init(shut: Bool) {
+        self.shut = shut
+    }
+
+    var isOpen: Bool { cond.withLock { !shut } }
+
+    /// Callers blocked in `pass()` now.
+    var held: Int { cond.withLock { waiting } }
+
+    func close() {
+        cond.withLock { shut = true }
+    }
+
+    func open() {
+        cond.withLock {
+            shut = false
+            cond.broadcast()
+        }
+    }
+
+    func pass() {
+        cond.withLock {
+            waiting += 1
+            while shut { cond.wait() }
+            waiting -= 1
+        }
+    }
+}
+
 /// Waits until the model has no read or action in flight.
 @MainActor func settle(_ model: AppModel) async throws {
+    try await poll("the model to settle") { !model.busy && !model.refreshing }
+}
+
+/// Waits until `done` holds, failing after `Fixed.settleLimit`.
+@MainActor func poll(_ what: String, _ done: () -> Bool) async throws {
     let clock = ContinuousClock()
     let end = clock.now + Fixed.settleLimit
-    while model.busy || model.refreshing {
-        try #require(clock.now < end, "the model did not settle")
+    while !done() {
+        try #require(clock.now < end, "timed out waiting for \(what)")
         try await Task.sleep(for: Fixed.pollStep)
     }
 }

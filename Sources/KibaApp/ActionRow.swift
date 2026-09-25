@@ -1,18 +1,17 @@
 import SwiftUI
 
-/// A flat command line ("Add account…") with the account rows' hover and
-/// cursor fill. `key` nil marks a row outside the cursor's reach (Retry).
+/// A flat command line ("Save the current login", "Retry") with the account
+/// rows' cursor fill; it runs the action its `key` names.
 struct ActionRow: View {
     let model: AppModel
-    let key: ActionKey?
+    let key: ActionKey
     let label: String
     var detail = ""
-    let perform: () -> Void
-
-    @State private var hovered = false
 
     var body: some View {
-        Button(action: perform) {
+        Button {
+            model.trigger(key)
+        } label: {
             HStack(spacing: Theme.gap) {
                 Text(label)
                     .font(Theme.action)
@@ -31,20 +30,12 @@ struct ActionRow: View {
             .padding(.vertical, Theme.actionPad)
             .background(
                 RoundedRectangle(cornerRadius: Theme.corner)
-                    .fill(Theme.ink.opacity(lit ? Theme.hover : 0)))
+                    .fill(Theme.ink.opacity(model.cursor == key ? Theme.hover : 0)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(model.busy)
-        .onHover { inside in
-            hovered = inside
-            if inside, let key { model.point(key) }
-        }
         .accessibilityElement(children: .combine)
-    }
-
-    private var lit: Bool {
-        guard let key else { return hovered }
-        return model.cursor == key
+        .cursorTarget(model, key)
     }
 }

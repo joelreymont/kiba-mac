@@ -706,7 +706,8 @@ public enum ResetOutcome: String, Equatable, Sendable {
 `Backend.swift` in KibaCore holds the protocol plus `ProbeOutcome`,
 `ResetOutcome`, `ProbeReport` and `AddResult`; `CoreBackend` (Switcher + StatusReader + LoginRunner) is the
 only production conformer. Tests drive `AppModel` on a scratch HOME through
-the same `CoreBackend`.
+the same `CoreBackend`, wrapped to hold its status reads at a gate when a
+test needs a read in flight.
 
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
 `refreshing`, `busy`, `message`, `error`, `panelOpen`, `autoProbed`, `now`
@@ -721,15 +722,22 @@ State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
   `maybeAutoProbe()` (once per open when any provider has saved accounts and
   nothing is busy); start the interval refresh and the clock tick. Closing
   stops both and clears `error`.
-- Actions (`busy` guards all; each ends with `refresh(force: true)`;
-  success message auto-clears after 4 s): `use(p, name)` — a dead row
-  starts `add(p, name.email)` instead; `save(p)`; `add(p, email?)` closes
-  the panel first; `probeUsage()` probes every provider; `forget(p, name)`
-  (context menu, confirmed inline: the row turns into "Forget <email>?
-  Forget / Keep").
-- `actions: [ActionKey]` in panel order: per provider `add`, every account
-  row (`use`), then `save` when the provider has a live login, no error and
-  no active row; `usage` at the end. The cursor tracks its key across refreshes.
+- Actions (`busy` guards all; success message auto-clears after 4 s):
+  `use(p, name)` — a dead row starts `add(p, name.email)` instead;
+  `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
+  probes every provider; `forget(p, name)` (context menu, confirmed
+  inline: the row turns into "Forget <email>? Forget / Keep", the cursor
+  on Keep; Keep or ⎋ ends it and returns the cursor to the row). Each
+  action ends with a forced status read and stays `busy` until that read,
+  and any queued behind it, has applied its snapshot or failed: controls
+  re-enable only over rows that show the action's result.
+- `actions: [ActionKey]`, every control a click can reach, in panel
+  order: `retry` while the status read has failed and no read runs; per
+  provider `add`, every account row (`use`), then `save` when the provider
+  has a live login, no error and no active row; `usage` at the end. A row
+  confirming a forget contributes its `forget` and `keep` buttons in place
+  of `use`. `trigger(_:)` runs every key; the cursor tracks its key across
+  refreshes and stays at the same position when its key is gone.
 
 ### Status item and popover
 
@@ -777,7 +785,8 @@ as its content, capped at the menu bar screen's visible height less 24 pt
 (measured before each show); taller content scrolls with no scroll
 indicators. Each provider's header line carries the add action at its
 right, a standard plus button, `accent` under the keyboard cursor, tooltip
-"Add account"; there is no add row. Cursor order in a section: add, accounts, save.
+"Add account"; there is no add row. Cursor order: Retry, then per section
+add, accounts, save, then Refresh usage (`AppModel.actions`).
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -825,8 +834,16 @@ keyboard cursor, 5 % when active. Name elides in the middle; plan and
 figures always fit. Blocked and dead names are `idle`; blocked figures read
 `limit`; dead plan text carries "log in again". Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
-Keyboard: ↑/↓ move the cursor (scrolling it into view), ⏎ activates, ⎋
-closes; hover moves the cursor without scrolling.
+Keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor (scrolling it into view), ⏎ and
+Space activate the cursor's control, ⎋ backs out of a forget confirmation,
+else closes; hover moves the cursor without scrolling. On a confirming row
+the cursor stops on Forget and on Keep, each lit with the row fill behind
+its label. The control under the cursor is the accessibility focus, and a
+control VoiceOver focuses takes the cursor, so both always name one
+control. `KeyCatcher` holds first responder while the panel is key; that
+is safe because the panel has no text field or other control that reads
+keys, and the cursor reaches every control a click can, so it replaces the
+key-view loop rather than hiding a control from it.
 
 Copy: "Room to work" (title), meta = "Working…" | "Refreshing…" | "Usage
 probed 2 min ago" | "Saved logins" | "Unavailable"; "Not logged in" under a

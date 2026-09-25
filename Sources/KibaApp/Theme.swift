@@ -70,6 +70,8 @@ enum Theme {
     /// The status dot before a name.
     static let dot: CGFloat = 8
     static let actionPad: CGFloat = 5
+    /// Between a Forget or Keep label and its cursor fill.
+    static let choicePad: CGFloat = 6
     /// Between a row's name line and its reservoir.
     static let lineGap: CGFloat = 5
     static let corner: CGFloat = 6
