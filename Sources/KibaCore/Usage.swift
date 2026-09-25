@@ -16,6 +16,22 @@ public struct Limit: Codable, Equatable, Sendable {
     }
 }
 
+/// Limit resets the provider will grant this account on request.
+public struct ResetOffer: Codable, Equatable, Sendable {
+    /// Resets available now.
+    public var count: Int
+    /// Claude: "cedar_ember" (banked grants) or "juniper_tide" (one per week); Codex: "".
+    public var program: String
+    /// Claude cedar_ember: the grant to spend; else "".
+    public var grant: String
+
+    public init(count: Int, program: String, grant: String) {
+        self.count = count
+        self.program = program
+        self.grant = grant
+    }
+}
+
 /// What the last probe learned about a saved login.
 public enum UsageState: String, Codable, Sendable {
     case ok, expired, revoked, error, unknown
@@ -29,12 +45,16 @@ public struct UsageRecord: Codable, Equatable, Sendable {
     /// Why there are no limits, or what went wrong; "" when nothing to say.
     public var note: String
     public var limits: [Limit]
+    /// Nil when the provider said nothing about limit resets, and in every
+    /// record stored before they were read.
+    public var resets: ResetOffer?
 
-    public init(fetchedAt: Int, state: UsageState, note: String, limits: [Limit]) {
+    public init(fetchedAt: Int, state: UsageState, note: String, limits: [Limit], resets: ResetOffer? = nil) {
         self.fetchedAt = fetchedAt
         self.state = state
         self.note = note
         self.limits = limits
+        self.resets = resets
     }
 }
 

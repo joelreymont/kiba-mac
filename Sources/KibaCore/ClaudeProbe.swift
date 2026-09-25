@@ -1,10 +1,11 @@
 import Foundation
 
-/// Reads a Claude login's usage windows from Anthropic (kiba `CLAUDE-PROBE`).
-/// A saved login whose access token has expired is refreshed first; the live
-/// login's token belongs to Claude Code, so an expired live token is reported,
-/// never sent or refreshed. Writes nothing: a refreshed document comes back in
-/// the outcome for the Switcher to store.
+/// Reads a Claude login's usage windows and limit resets from Anthropic (kiba
+/// `CLAUDE-PROBE`), and spends a reset on request. A saved login whose access
+/// token has expired is refreshed first; the live login's token belongs to
+/// Claude Code, so an expired live token is reported, never sent or
+/// refreshed. Writes nothing: a refreshed document comes back for the
+/// Switcher to store.
 public struct ClaudeProbe: Sendable {
     private let http: any HTTPClient
     private let clock: Clock
@@ -17,36 +18,104 @@ public struct ClaudeProbe: Sendable {
     public func run(_ i: ProbeInput) async -> ProbeOutcome {
         let now = epochSeconds(clock())
         var doc = i.doc
-        func done(_ state: UsageState, _ note: String, _ limits: [Limit] = []) -> ProbeOutcome {
-            .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits), doc: doc)
+        func done(_ state: UsageState, _ note: String, _ limits: [Limit] = [], _ resets: ResetOffer? = nil)
+            -> ProbeOutcome
+        {
+            .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
         }
 
-        let oauth = JSONFields(doc)?.obj(Key.oauth)
-        if let ms = oauth?.int(Key.expiresAt), ms > 0, ms / Time.msPerSecond < now + Time.margin {
-            if i.live { return done(.expired, Note.liveExpired) }
-            guard let grant = oauth?.str(Key.refreshToken) else { return done(.expired, Note.noGrant) }
-            switch await refresh(doc, grant: grant, now: now) {
-            case .fresh(let refreshed): doc = refreshed
-            case .refused: return done(.expired, Note.refused)
-            case .failed(let note): return done(.error, note)
-            }
+        switch await fresh(doc, live: i.live, now: now) {
+        case .ready(let ready): doc = ready
+        case .stale(let state, let note): return done(state, note)
         }
-
-        guard let token = JSONFields(doc)?.obj(Key.oauth)?.str(Key.accessToken) else {
-            return done(.error, ProbeNote.noAccess)
-        }
-        let got = await http.send(.get(Endpoint.usage, bearer: token, extra: [Endpoint.betaHeader: Endpoint.beta]))
+        guard let token = accessToken(doc) else { return done(.error, ProbeNote.noAccess) }
+        let got = await http.send(.get(Endpoint.usage, bearer: token, extra: Endpoint.beta))
         guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
         switch r.status {
         case HTTPStatus.ok:
             guard let body = JSONFields(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
-            return done(.ok, "", limits(body))
+            return done(.ok, "", limits(body), resets(body))
         case HTTPStatus.unauthorized:
             return done(.expired, Note.rejected)
         case HTTPStatus.tooManyRequests:
             return done(.error, Note.throttled)
         default:
             return done(.error, ProbeNote.answered(Note.usage, r.status))
+        }
+    }
+
+    /// Spends one limit reset of `offer` for the organization `org`. A saved
+    /// login's token is refreshed when it has expired, or once when the reset
+    /// endpoint rejects it; the live login's never is.
+    func redeem(_ i: ProbeInput, offer: ResetOffer, org: String) async -> Redemption {
+        let now = epochSeconds(clock())
+        var doc = i.doc
+        func failed(_ error: KibaError) -> Redemption { Redemption(doc: doc, result: .failure(error)) }
+
+        guard !org.isEmpty else { return failed(.badJSON("\(ClaudeIdentity.Key.account).\(ClaudeIdentity.Key.org)")) }
+        guard let body = resetBody(offer) else { return failed(.noResets(i.provider, i.name.raw)) }
+        let url = Endpoint.organizations.appending(component: org).appending(component: Endpoint.resetPath)
+        func send(_ doc: Data) async -> HTTPOutcome? {
+            guard let token = accessToken(doc) else { return nil }
+            return await http.send(.post(url, json: body, bearer: token, extra: Endpoint.beta))
+        }
+
+        switch await fresh(doc, live: i.live, now: now) {
+        case .ready(let ready): doc = ready
+        case .stale(_, let note): return failed(.remote(note))
+        }
+        // A token refreshed a moment ago earns no second refresh.
+        let refreshed = doc != i.doc
+        guard var got = await send(doc) else { return failed(.remote(ProbeNote.noAccess)) }
+        if case .response(let r) = got, r.status == HTTPStatus.unauthorized, !refreshed {
+            if i.live { return failed(.remote(Note.liveExpired)) }
+            switch await renewed(doc, now: now) {
+            case .ready(let ready): doc = ready
+            case .stale(_, let note): return failed(.remote(note))
+            }
+            guard let again = await send(doc) else { return failed(.remote(ProbeNote.noAccess)) }
+            got = again
+        }
+        return Redemption(doc: doc, result: Self.reply.outcome(got))
+    }
+
+    /// `doc` with an access token that has not expired: as saved, or, for a
+    /// saved login, refreshed. The live login's token is Claude Code's to refresh.
+    private func fresh(_ doc: Data, live: Bool, now: Int) async -> Fresh {
+        guard let ms = JSONFields(doc)?.obj(Key.oauth)?.int(Key.expiresAt), ms > 0,
+              ms / Time.msPerSecond < now + Time.margin
+        else { return .ready(doc) }
+        if live { return .stale(.expired, Note.liveExpired) }
+        return await renewed(doc, now: now)
+    }
+
+    /// `doc` with its saved refresh grant spent.
+    private func renewed(_ doc: Data, now: Int) async -> Fresh {
+        guard let grant = JSONFields(doc)?.obj(Key.oauth)?.str(Key.refreshToken) else {
+            return .stale(.expired, Note.noGrant)
+        }
+        switch await refresh(doc, grant: grant, now: now) {
+        case .fresh(let refreshed): return .ready(refreshed)
+        case .refused: return .stale(.expired, Note.refused)
+        case .failed(let note): return .stale(.error, note)
+        }
+    }
+
+    private func accessToken(_ doc: Data) -> String? {
+        JSONFields(doc)?.obj(Key.oauth)?.str(Key.accessToken)
+    }
+
+    /// The request for `offer`'s program; nil for a program kiba does not know.
+    private func resetBody(_ offer: ResetOffer) -> Data? {
+        switch offer.program {
+        case Reset.banked:
+            return jsonObject([
+                Reset.program: Reset.banked, Reset.grantID: offer.grant, Reset.requestID: UUID().uuidString,
+            ])
+        case Reset.weekly:
+            return jsonObject([Reset.program: Reset.weekly])
+        default:
+            return nil
         }
     }
 
@@ -104,6 +173,21 @@ public struct ClaudeProbe: Sendable {
         return out
     }
 
+    /// The banked grant to spend next, else the weekly reset; nil when the
+    /// answer offers neither.
+    private func resets(_ body: JSONFields) -> ResetOffer? {
+        if let banked = body.obj(Reset.banked), banked.bool(Reset.eligible) == true,
+           let next = banked.str(Reset.nextGrant),
+           let grant = banked.objs(Reset.grants).first(where: { $0.str(Reset.id) == next }),
+           let left = grant.int(Reset.left)
+        {
+            return ResetOffer(count: left, program: Reset.banked, grant: next)
+        }
+        guard let weekly = body.obj(Reset.weekly), weekly.bool(Reset.eligible) == true else { return nil }
+        let count = weekly.bool(Reset.available) == true ? Reset.weeklyGrant : 0
+        return ResetOffer(count: count, program: Reset.weekly, grant: "")
+    }
+
     /// A `{utilization, resets_at}` bucket as the window `label`.
     private func bucket(_ b: JSONFields?, _ label: String) -> Limit? {
         guard let b, let pct = usedPercent(b.num(Usage.utilization)) else { return nil }
@@ -118,11 +202,15 @@ public struct ClaudeProbe: Sendable {
     }
 
     private enum Endpoint {
-        static let usage = URL(string: "https://api.anthropic.com/api/oauth/usage")!
+        /// The flags ask for both reset blocks, as Claude Code does.
+        static let usage = URL(
+            string: "https://api.anthropic.com/api/oauth/usage?\(Reset.banked)=\(Reset.on)&\(Reset.atWall)=\(Reset.on)")!
         static let token = URL(string: "https://platform.claude.com/v1/oauth/token")!
+        /// Followed by the organization UUID and `resetPath`.
+        static let organizations = URL(string: "https://api.anthropic.com/api/organizations")!
+        static let resetPath = "reset_rate_limits"
         static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-        static let betaHeader = "anthropic-beta"
-        static let beta = "oauth-2025-04-20"
+        static let beta = ["anthropic-beta": "oauth-2025-04-20"]
     }
 
     /// Members of the saved credentials document.
@@ -164,6 +252,37 @@ public struct ClaudeProbe: Sendable {
         static let sessionWord = "Session"
     }
 
+    /// Names in the limit-reset exchange, as Claude Code's parser reads them:
+    /// the usage query flags and answer blocks, and the reset request and answer.
+    private enum Reset {
+        /// Banked grants: both the usage flag and block, and the program.
+        static let banked = "cedar_ember"
+        /// One reset a week: the block and the program.
+        static let weekly = "juniper_tide"
+        /// Asks the usage endpoint for `juniper_tide`.
+        static let atWall = "at_wall"
+        static let on = "1"
+        static let eligible = "eligible"
+        static let grants = "grants"
+        static let id = "id"
+        static let left = "resets_left"
+        static let nextGrant = "next_grant_id"
+        static let available = "available"
+        /// Resets the weekly program offers while one is available.
+        static let weeklyGrant = 1
+        static let program = "program"
+        static let grantID = "grant_id"
+        static let requestID = "request_id"
+        static let result = "result"
+        static let words: [String: ResetOutcome] = [
+            "reset": .reset, "already_used": .alreadyUsed, "not_limited": .notLimited, "cooldown": .cooldown,
+            "ineligible": .ineligible, "unavailable": .unavailable,
+        ]
+    }
+
+    private static let reply = ResetReply(
+        field: Reset.result, words: Reset.words, what: Note.reset, rejected: Note.rejected, throttled: Note.resetThrottled)
+
     private enum Time {
         static let msPerSecond = 1000
         /// A token this close to expiring, in seconds, counts as expired.
@@ -173,10 +292,12 @@ public struct ClaudeProbe: Sendable {
     private enum Note {
         static let usage = "Anthropic's usage endpoint"
         static let token = "Anthropic's token endpoint"
+        static let reset = "Anthropic's reset endpoint"
         static let liveExpired = "access token expired; Claude Code refreshes it on its next run"
         static let noGrant = "access token expired and no refresh token is saved; log in again"
         static let refused = "access token expired and the refresh was refused; log in again"
         static let rejected = "login rejected by Anthropic; log in again"
         static let throttled = "Anthropic is rate limiting usage checks; try again later"
+        static let resetThrottled = "Anthropic is rate limiting limit resets; try again later"
     }
 }

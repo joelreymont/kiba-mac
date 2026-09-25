@@ -1,7 +1,7 @@
 import Foundation
 
 /// Saves, installs, forgets and probes saved logins (kiba `save`, `use`,
-/// `forget`, `usage`). Every store change runs in a `Store.write`
+/// `forget`, `usage`), and spends their limit resets. Every store change runs in a `Store.write`
 /// transaction; `probeAll` is the one place a failure is kept per account
 /// instead of thrown.
 public final class Switcher: Sendable {
@@ -105,6 +105,28 @@ public final class Switcher: Sendable {
         }
         guard let n = try put(p, files) else { throw KibaError.noLive(p) }
         return n
+    }
+
+    /// Spends one limit reset of the saved login `n`, then probes it again so
+    /// its usage and offer show the result. `noAccount` when there is no such
+    /// login, `noResets` when its last probe offered none. A saved login's
+    /// token is refreshed when it has expired or is rejected, and the new one
+    /// is kept even when the reset then fails; a live login's never is, so a
+    /// live name is decided as `probeAll` decides it.
+    public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome {
+        guard let row = try store.fetch(p, n) else { throw KibaError.noAccount(p, n.raw) }
+        guard let offer = row.usage?.resets, offer.count > 0 else { throw KibaError.noResets(p, n.raw) }
+        let live = try liveNames(p, mixed: isMixed(p)).contains(n)
+        let input = ProbeInput(provider: p, name: n, doc: row.login, live: live)
+        let spent: Redemption
+        switch p {
+        case .claude: spent = await ClaudeProbe(http: http, clock: clock).redeem(input, offer: offer, org: row.identity.org)
+        case .codex: spent = await CodexProbe(http: http, clock: clock).redeem(input)
+        }
+        if spent.doc != row.login { try store.write { try $0.setLogin(p, n, spent.doc) } }
+        let outcome = try spent.result.get()
+        try await probe(p, n, live: live)
+        return outcome
     }
 
     /// Probes the saved login `n` and records the outcome; `noAccount` when

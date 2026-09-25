@@ -1,5 +1,6 @@
 import Foundation
 import KibaCore
+import SQLite3
 import Testing
 
 @testable import KibaApp
@@ -313,6 +314,144 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     ]
 }
 
+// MARK: - Limit resets
+
+@Test func probeReadsClaudeResetOffers() async throws {
+    try await scratch { w in
+        for tag in ["a", "b", "c"] {
+            try w.seed(.claude, try slot("\(tag)@x"), Identity(email: "\(tag)@x", plan: "max", org: "org-\(tag)"),
+                       login: claudeCreds(tag, plan: "max", expires: Fixed.now + Fixed.day), profile: profile("\(tag)@x", org: "org-\(tag)"))
+        }
+        let http = StubHTTP([
+            answer(Status.ok, claudeUsage(session: 100, week: 60, resets: cedarBlock(left: 2))),
+            answer(Status.ok, claudeUsage(session: 100, week: 60, resets: juniperBlock(available: true))),
+            answer(Status.ok, claudeUsage(session: 30, week: 60)),
+        ])
+
+        _ = await w.switcher(http).probeAll(.claude)
+
+        #expect(http.requests.map(\.url.absoluteString) == Array(repeating: Endpoint.claudeUsage, count: 3))
+        let status = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        #expect(status?.accounts.map(\.usage?.resets) == [
+            ResetOffer(count: 2, program: "cedar_ember", grant: "grant-1"),
+            ResetOffer(count: 1, program: "juniper_tide", grant: ""),
+            nil,
+        ])
+    }
+}
+
+@Test func probeReadsCodexResetCredits() async throws {
+    try await scratch { w in
+        try w.seed(.codex, try slot("s@y"), Identity(email: "s@y", plan: "plus", org: "acct-s"),
+                   login: codexAuth("s@y", plan: "plus", account: "acct-s", tag: "s"), profile: nil)
+        let http = StubHTTP([answer(Status.ok, codexUsage(session: 100, week: 40, credits: 3))])
+
+        _ = await w.switcher(http).probeAll(.codex)
+
+        let status = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .codex }
+        #expect(status?.accounts.first?.usage == UsageRecord(
+            fetchedAt: Fixed.now, state: .ok, note: "", limits: windows(session: 100, week: 40),
+            resets: ResetOffer(count: 3, program: "", grant: "")))
+    }
+}
+
+@Test func redeemCodexResetsAndReprobes() async throws {
+    try await scratch { w in
+        let name = try slot("s@y")
+        try w.seed(.codex, name, Identity(email: "s@y", plan: "plus", org: "acct-s"),
+                   login: codexAuth("s@y", plan: "plus", account: "acct-s", tag: "s"), profile: nil)
+        let http = StubHTTP([
+            answer(Status.ok, codexUsage(session: 100, week: 40, credits: 3)),
+            answer(Status.ok, #"{"code":"reset"}"#),
+            answer(Status.ok, codexUsage(session: 0, week: 40, credits: 2)),
+        ])
+        let sw = w.switcher(http)
+        _ = await sw.probeAll(.codex)
+
+        #expect(try await sw.redeem(.codex, name) == .reset)
+
+        #expect(http.requests.map(\.url.absoluteString) == [Endpoint.codexUsage, Endpoint.codexConsume, Endpoint.codexUsage])
+        let post = http.requests[1]
+        #expect(post.method == "POST")
+        #expect(post.headers[Header.auth] == "Bearer at-s")
+        #expect(post.headers[Header.account] == "acct-s")
+        #expect(post.headers[Header.agent] == "codex-cli")
+        let body = try members(post.body)
+        #expect(Array(body.keys) == ["redeem_request_id"])
+        #expect(UUID(uuidString: body["redeem_request_id"] ?? "") != nil)
+        let status = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .codex }
+        #expect(status?.accounts.first?.usage == UsageRecord(
+            fetchedAt: Fixed.now, state: .ok, note: "", limits: windows(session: 0, week: 40),
+            resets: ResetOffer(count: 2, program: "", grant: "")))
+    }
+}
+
+@Test func redeemClaudeGrantRefreshesSavedLoginFirst() async throws {
+    try await scratch { w in
+        let name = try slot("b@x")
+        let offer = ResetOffer(count: 2, program: "cedar_ember", grant: "grant-1")
+        try w.seed(.claude, name, Identity(email: "b@x", plan: "max", org: Fixed.org),
+                   login: claudeCreds("b", plan: "max", expires: Fixed.now - Fixed.hour), profile: profile("b@x", org: Fixed.org),
+                   usage: UsageRecord(fetchedAt: Fixed.now - Fixed.day, state: .ok, note: "", limits: [], resets: offer))
+        let http = StubHTTP([
+            answer(Status.ok, #"{"access_token":"at-b2","refresh_token":"rt-b2","expires_in":\#(Fixed.tokenLife)}"#),
+            answer(Status.ok, #"{"result":"already_used"}"#),
+            answer(Status.ok, claudeUsage(session: 30, week: 60, resets: cedarBlock(left: 2))),
+        ])
+
+        #expect(try await w.switcher(http).redeem(.claude, name) == .alreadyUsed)
+
+        #expect(http.requests.map(\.url.absoluteString) == [Endpoint.claudeToken, Endpoint.claudeReset, Endpoint.claudeUsage])
+        let post = http.requests[1]
+        #expect(post.method == "POST")
+        #expect(post.headers[Header.auth] == "Bearer at-b2")
+        #expect(post.headers[Header.beta] == "oauth-2025-04-20")
+        #expect(post.headers[Header.contentType] == "application/json")
+        #expect(post.headers[Header.agent] == "kiba")
+        let body = try members(post.body)
+        #expect(body.keys.sorted() == ["grant_id", "program", "request_id"])
+        #expect(body["program"] == "cedar_ember")
+        #expect(body["grant_id"] == "grant-1")
+        #expect(UUID(uuidString: body["request_id"] ?? "") != nil)
+        let row = try w.store.fetch(.claude, name)
+        #expect(row?.login == claudeCreds("b2", plan: "max", expires: Fixed.now + Fixed.tokenLife))
+        #expect(row?.usage == probed(windows(session: 30, week: 60), resets: offer))
+    }
+}
+
+@Test func redeemNeedsOfferAndNeverRefreshesLive() async throws {
+    try await scratch { w in
+        let liveAuth = codexAuth("live@y", plan: "plus", account: "acct-l", tag: "l")
+        try w.writeCodex(liveAuth)
+        let live = try slot("live@y"), old = try slot("old@y")
+        try w.seed(.codex, old, Identity(email: "old@y", plan: "plus", org: "acct-o"),
+                   login: codexAuth("old@y", plan: "plus", account: "acct-o", tag: "o"), profile: nil)
+        try w.storeUsageText(.codex, old, Fixed.preResetUsage)
+        let http = StubHTTP([
+            answer(Status.ok, codexUsage(session: 100, week: 40, credits: 1)),
+            answer(Status.ok, codexUsage(session: 20, week: 40)),
+            answer(Status.unauthorized, #"{"error":{"code":"token_expired"}}"#),
+        ])
+        let sw = w.switcher(http)
+
+        let before = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .codex }
+        #expect(before?.accounts.map(\.usage) == [UsageRecord(
+            fetchedAt: Fixed.now - Fixed.day, state: .ok, note: "",
+            limits: [Limit(label: "Session (5-hour)", percent: 100, resetsAt: Fixed.sessionReset)])])
+        await #expect(throws: KibaError.noResets(.codex, "old@y")) { try await sw.redeem(.codex, old) }
+        #expect(http.requests.isEmpty)
+
+        _ = await sw.probeAll(.codex)
+        await #expect(throws: KibaError.remote("access token rejected; run codex once to refresh it")) {
+            try await sw.redeem(.codex, live)
+        }
+
+        #expect(http.requests.map(\.url.absoluteString) == [Endpoint.codexUsage, Endpoint.codexUsage, Endpoint.codexConsume])
+        #expect(try w.store.fetch(.codex, live)?.login == liveAuth)
+        #expect(w.read(w.paths.codexAuthFile(root: nil)) == liveAuth)
+    }
+}
+
 // MARK: - Rows
 
 @Test func rowsSortRoomTightUsedUpThenDead() async throws {
@@ -544,6 +683,11 @@ enum Fixed {
     static let sessionReset = "2026-09-21T15:13:20Z"
     static let weekReset = "2026-09-25T14:13:20Z"
     static let weekResetDays = 4
+    /// The Anthropic organization of the Claude login that redeems a reset.
+    static let org = "5f1c2a9e-8d3b-4c7a-9e21-0b6d4f3a7c58"
+    /// A usage column as kiba stored it before limit resets were read.
+    static let preResetUsage = #"{"fetchedAt":\#(now - day),"limits":[{"label":"Session (5-hour)","percent":100,"#
+        + #""resetsAt":"\#(sessionReset)"}],"note":"","state":"ok"}"#
 }
 
 enum Status {
@@ -555,14 +699,19 @@ enum Status {
 }
 
 enum Endpoint {
-    static let claudeUsage = "https://api.anthropic.com/api/oauth/usage"
+    static let claudeUsage = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1"
+    static let claudeReset = "https://api.anthropic.com/api/organizations/\(Fixed.org)/reset_rate_limits"
     static let claudeToken = "https://platform.claude.com/v1/oauth/token"
     static let codexUsage = "https://chatgpt.com/backend-api/wham/usage"
+    static let codexConsume = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 }
 
 enum Header {
     static let auth = "Authorization"
     static let agent = "User-Agent"
+    static let account = "ChatGPT-Account-Id"
+    static let beta = "anthropic-beta"
+    static let contentType = "Content-Type"
 }
 
 /// One test's scratch HOME, live-login directories and PATH, with the store
@@ -641,6 +790,18 @@ struct World: Sendable {
     /// Every fake CLI run so far, oldest first, as `<name> <arguments>`.
     func calls() -> [String] {
         (read(callLog).map(text) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    /// Stores `json` as the usage column of the saved login `n`, bypassing the
+    /// record codec, as an older kiba wrote it.
+    func storeUsageText(_ p: Provider, _ n: SlotName, _ json: String) throws {
+        var db: OpaquePointer?
+        defer { sqlite3_close(db) }
+        guard sqlite3_open(paths.db.path, &db) == SQLITE_OK else { throw KibaError.db("open \(paths.db.path)") }
+        let sql = "UPDATE account SET usage = '\(json)' WHERE provider = '\(p.rawValue)' AND name = '\(n.raw)'"
+        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, sqlite3_changes(db) == 1 else {
+            throw KibaError.db("store usage: \(String(cString: sqlite3_errmsg(db)))")
+        }
     }
 
     /// The file's bytes; nil when it does not exist.
@@ -771,20 +932,36 @@ func base64url(_ data: Data) -> String {
     data.base64EncodedString().replacing("+", with: "-").replacing("/", with: "_").replacing("=", with: "")
 }
 
-/// Anthropic's usage answer: session and week used, plus an Opus weekly window.
-func claudeUsage(session: Int, week: Int, opus: Int? = nil) -> String {
+/// Anthropic's usage answer: session and week used, plus an Opus weekly window
+/// and the `resets` blocks.
+func claudeUsage(session: Int, week: Int, opus: Int? = nil, resets: String = "") -> String {
     let model = opus.map {
         #","limits":[{"kind":"weekly","percent":\#($0),"resets_at":"\#(Fixed.weekReset)","scope":{"model":{"display_name":"Opus"}}}]"#
     } ?? ""
     return #"{"five_hour":{"utilization":\#(session),"resets_at":"\#(Fixed.sessionReset)"},"#
-        + #""seven_day":{"utilization":\#(week),"resets_at":"\#(Fixed.weekReset)"}\#(model)}"#
+        + #""seven_day":{"utilization":\#(week),"resets_at":"\#(Fixed.weekReset)"}\#(model)\#(resets)}"#
 }
 
-/// ChatGPT's usage answer: a 5-hour and a 7-day window.
-func codexUsage(session: Int, week: Int) -> String {
+/// A `cedar_ember` block whose next grant, `grant-1`, has `left` resets; an
+/// earlier grant is spent.
+func cedarBlock(left: Int) -> String {
+    #","cedar_ember":{"eligible":true,"next_grant_id":"grant-1","grants":["#
+        + #"{"id":"grant-0","label":"Launch","resets_total":1,"resets_left":0,"usable_now":false,"paused":false},"#
+        + #"{"id":"grant-1","label":"Welcome","resets_total":3,"resets_left":\#(left),"usable_now":true,"paused":false}]}"#
+}
+
+/// A `juniper_tide` block: one reset a week, `available` now or not.
+func juniperBlock(available: Bool) -> String {
+    #","juniper_tide":{"eligible":true,"available":\#(available),"next_available_at":null,"resets_per_week":1}"#
+}
+
+/// ChatGPT's usage answer: a 5-hour and a 7-day window, and `credits` limit
+/// resets when given.
+func codexUsage(session: Int, week: Int, credits: Int? = nil) -> String {
     let sessionAt = Fixed.now + Fixed.hour, weekAt = Fixed.now + Fixed.weekResetDays * Fixed.day
+    let resets = credits.map { #","rate_limit_reset_credits":{"available_count":\#($0)}"# } ?? ""
     return #"{"rate_limit":{"primary_window":{"used_percent":\#(session),"limit_window_seconds":18000,"reset_at":\#(sessionAt)},"#
-        + #""secondary_window":{"used_percent":\#(week),"limit_window_seconds":604800,"reset_at":\#(weekAt)}}}"#
+        + #""secondary_window":{"used_percent":\#(week),"limit_window_seconds":604800,"reset_at":\#(weekAt)}}\#(resets)}"#
 }
 
 func windows(session: Int, week: Int) -> [Limit] {
@@ -792,8 +969,13 @@ func windows(session: Int, week: Int) -> [Limit] {
      Limit(label: "Weekly (7-day)", percent: week, resetsAt: Fixed.weekReset)]
 }
 
-func probed(_ limits: [Limit]) -> UsageRecord {
-    UsageRecord(fetchedAt: Fixed.now, state: .ok, note: "", limits: limits)
+func probed(_ limits: [Limit], resets: ResetOffer? = nil) -> UsageRecord {
+    UsageRecord(fetchedAt: Fixed.now, state: .ok, note: "", limits: limits, resets: resets)
+}
+
+/// A request body's members, which must all be strings.
+func members(_ body: Data?) throws -> [String: String] {
+    try JSONDecoder().decode([String: String].self, from: try #require(body))
 }
 
 // MARK: - App model

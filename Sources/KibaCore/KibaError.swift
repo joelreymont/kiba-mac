@@ -16,6 +16,8 @@ public enum KibaError: Error, Equatable, Sendable {
     case io(String)
     case db(String)
     case tool(String, Int32, String)
+    case noResets(Provider, String)
+    case remote(String)
 }
 
 extension KibaError {
@@ -51,6 +53,10 @@ extension KibaError {
             let lines = stderr.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
             guard let detail = lines.first(where: { !$0.isEmpty }) else { return "\(name) failed (exit \(status))" }
             return "\(name) failed (exit \(status)): \(detail)"
+        case .noResets(_, let name):
+            return "no limit resets are available for \(name)"
+        case .remote(let note):
+            return note
         }
     }
 }

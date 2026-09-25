@@ -107,7 +107,7 @@ owns that token, and rotating it underneath a running session would log the
 session out. Only a 400 or 401 from a token endpoint means a saved login is
 gone; a Codex login the provider reports as revoked is removed, and any other
 failure is kept as that account's note. Every request names `kiba` as its
-User-Agent (the ChatGPT usage call keeps `codex-cli`). Nothing leaves the
+User-Agent (the ChatGPT usage and reset calls keep `codex-cli`). Nothing leaves the
 Mac except these calls.
 
 ## Where things live

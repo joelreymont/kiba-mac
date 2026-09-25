@@ -12,6 +12,8 @@ public protocol Backend: Sendable {
     /// Never throws: failures land in the report.
     func probeAll(_ p: Provider) async -> ProbeReport
     func add(_ p: Provider, expected: String?) async throws -> AddResult
+    /// Spends one limit reset of the saved login `n`, then re-probes it.
+    func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
 }
 
 /// What probing one saved login produced.
@@ -21,6 +23,24 @@ public enum ProbeOutcome: Equatable, Sendable {
     case record(UsageRecord, doc: Data)
     /// A later login revoked this one.
     case revoked(note: String)
+}
+
+/// What the provider made of a limit-reset request.
+public enum ResetOutcome: String, Equatable, Sendable {
+    /// The limit is cleared and one reset is spent.
+    case reset
+    /// The account is not at a limit; nothing was spent.
+    case notLimited
+    /// This reset was spent already.
+    case alreadyUsed
+    /// Codex: no reset credit is left.
+    case noCredit
+    /// Claude: resets are cooling down; try later.
+    case cooldown
+    /// Claude: the account may not reset.
+    case ineligible
+    /// Claude: resets are unavailable now.
+    case unavailable
 }
 
 /// One provider's probe run.

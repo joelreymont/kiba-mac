@@ -64,6 +64,8 @@ public enum KibaError: Error, Equatable {
   case io(String)                    // any file error, with the path
   case db(String)                    // SQLite refused: "<operation>: <sqlite message>"
   case tool(String, Int32, String)   // subprocess name, exit status, stderr
+  case noResets(Provider, String)    // redeem: the account's last probe offered no limit reset
+  case remote(String)                // redeem: a provider endpoint refused or failed; the note is the reason
 }
 extension KibaError { public var reason: String }   // one-line, user-facing, no code
 ```
@@ -193,7 +195,7 @@ absent. `Base64URL` (internal) accepts only the url alphabet with optional
 trailing `=` padding (at most two, then end of text); anything else is
 `badJSON` naming the field (`tokens.id_token`). Field reads on parsed
 documents go through one internal reader, `JSONFields` (`init(_:what:)`,
-`str`, `obj`, `int`), shared by identity, live-login, and probe code.
+`str`, `obj`, `int`, `bool`), shared by identity, live-login, and probe code.
 
 ### SecretStore
 
@@ -373,13 +375,22 @@ public struct CodexLive {
 ```swift
 public struct Limit: Codable, Equatable, Sendable { public var label: String; public var percent: Int; public var resetsAt: String }
 public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown }
+public struct ResetOffer: Codable, Equatable, Sendable {
+  public var count: Int              // resets available now
+  public var program: String         // Claude: "cedar_ember" (banked grants) | "juniper_tide" (one per week); Codex: ""
+  public var grant: String           // Claude cedar_ember: the grant to spend; else ""
+}
 public struct UsageRecord: Codable, Equatable, Sendable {
   public var fetchedAt: Int          // epoch seconds
   public var state: UsageState
   public var note: String
   public var limits: [Limit]
+  public var resets: ResetOffer?     // nil: the provider said nothing about limit resets
 }
 ```
+
+`resets` is optional and encoded only when present, so a record stored
+before limit resets were read decodes with `resets == nil`.
 
 `percent` is the whole number USED (0…100+). Percent rounding: decode the
 JSON number as `Decimal` and round with `NSDecimalRound(.plain, scale 0)`.
@@ -401,7 +412,11 @@ public final class StubHTTP: HTTPClient  // scripted responses, records requests
 ```
 
 Every request sets `Accept: application/json` and `User-Agent: kiba` except
-the ChatGPT usage call, which sends `User-Agent: codex-cli`.
+the ChatGPT backend calls (usage and reset), which send `User-Agent:
+codex-cli`. Builders: `HTTPRequest.get(url, bearer:, agent:, extra:)`,
+`.post(url, json:, bearer:, agent:, extra:)` (adds `Content-Type:
+application/json`), and `.post(url, json:)` for token grants, which carry
+no bearer.
 
 ### Probing (port of sw-usage.f)
 
@@ -429,13 +444,23 @@ Claude:
    `refresh_token_expires_in`) into the doc. 400/401 → `expired` "…the refresh
    was refused; log in again". Anything else / unreachable → `error`
    "Anthropic's token endpoint answered <code>" / "…could not be reached".
-2. GET `https://api.anthropic.com/api/oauth/usage`, `Authorization: Bearer`,
+2. GET `https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1`
+   (the flags ask for both reset blocks, as Claude Code 2.1.282 does; its
+   `skip_spend=1` is omitted), `Authorization: Bearer`,
    `anthropic-beta: oauth-2025-04-20`. 200 → limits: `five_hour` →
    Session; `seven_day_oauth_apps` else `seven_day` → Weekly (each bucket
    `{utilization, resets_at}`); then every `limits[]` entry with
    `scope.model.display_name` → `"<display_name> Weekly"` when `kind` starts
    with `weekly`, `"… Session"` for `five_hour`/`session`, bare name
    otherwise, `percent` from `percent`, reset from `resets_at`. State `ok`.
+   Resets: `cedar_ember` `{eligible, grants[{id, label, resets_total,
+   resets_left, usable_now, paused}], next_grant_id}` offers when `eligible`
+   and the grant whose `id` is `next_grant_id` exists: count = its
+   `resets_left`, program `cedar_ember`, grant = its id. Else `juniper_tide`
+   `{eligible, available, next_available_at, resets_per_week}` offers when
+   `eligible`: count = `available` ? 1 : 0, program `juniper_tide`, grant "".
+   Neither → nil. The names come from Claude Code's parser and live in one
+   constants enum, `Reset`.
    401 → `expired` "login rejected by Anthropic; log in again". 429 → `error`
    "Anthropic is rate limiting usage checks; try again later". Other →
    `error` "Anthropic's usage endpoint answered <code>". No `accessToken` →
@@ -449,7 +474,10 @@ Codex:
    present), UA `codex-cli`. 200 → `rate_limit.primary_window` and
    `secondary_window` `{used_percent, limit_window_seconds, reset_at}`:
    label Session when `limit_window_seconds ≤ 21600` else Weekly; `reset_at`
-   epoch → ISO 8601 UTC. 401 on live → `expired` "access token rejected; run
+   epoch → ISO 8601 UTC. `rate_limit_reset_credits.available_count` N →
+   `ResetOffer(count: N, program: "", grant: "")`; absent → nil (codex
+   rust-v0.157.0 `backend-client/src/types.rs`). 401 on live → `expired`
+   "access token rejected; run
    codex once to refresh it". 401 on saved → revokedFlag = body
    `error.code == "token_revoked"`; refresh: POST
    `https://auth.openai.com/oauth/token`
@@ -466,6 +494,39 @@ Codex:
 
 `fetchedAt` = now for every record.
 
+Both probes share one token step with redeem: Claude's `fresh` (the expiry
+check of step 1) and each provider's `renewed` (spend the grant, splice the
+answer) return `Fresh.ready(doc)` or `.stale(state, note)`.
+
+Limit resets (`redeem(_ i: ProbeInput, …) async -> Redemption`, the doc,
+refreshed or not, plus `Result<ResetOutcome, KibaError>`; every token or
+endpoint failure is `remote(note)`):
+
+- Token: the doc's access token. Claude: expired as in step 1 → live:
+  "access token expired; Claude Code refreshes it on its next run"; saved:
+  refresh. A 401 from the reset call on a token not refreshed a moment ago →
+  live: that live note (Codex: "access token rejected; run codex once to
+  refresh it"); saved: refresh, send again. The live token is never refreshed.
+- Claude: POST `https://api.anthropic.com/api/organizations/<org>/reset_rate_limits`,
+  `<org>` = `Identity.org` (`oauthAccount.organizationUuid`; empty →
+  `badJSON`), bearer, `anthropic-beta`, UA `kiba`. Body
+  `{"program":"cedar_ember","grant_id":<grant>,"request_id":<UUID>}` or
+  `{"program":"juniper_tide"}`; another program → `noResets`. 200
+  `{"result":…}`: `reset` | `already_used` | `not_limited` | `cooldown` |
+  `ineligible` | `unavailable` → the matching `ResetOutcome`.
+- Codex: POST `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume`,
+  bearer, `ChatGPT-Account-Id` when present, UA `codex-cli`, body
+  `{"redeem_request_id":<UUID>}`. 200 `{"code":…}`: `reset` → reset,
+  `nothing_to_reset` → notLimited, `no_credit` → noCredit, `already_redeemed`
+  → alreadyUsed.
+- Notes, as the probe's: unreachable "<endpoint> could not be reached"; 200
+  not an object "…sent an answer that is not a JSON object"; unknown word
+  `<endpoint> sent an unknown result "<x>"`; 401 after a refresh → the
+  provider's "login rejected by …; log in again"; 429 "<Anthropic|OpenAI> is
+  rate limiting limit resets; try again later"; other "<endpoint> answered
+  <code>". The endpoints are "Anthropic's reset endpoint" / "OpenAI's reset
+  endpoint".
+
 ### Switcher
 
 ```swift
@@ -475,6 +536,7 @@ public final class Switcher: Sendable {
   public func use(_ p: Provider, _ n: SlotName) async throws
   public func forget(_ p: Provider, _ n: SlotName) throws
   public func probeAll(_ p: Provider) async -> ProbeReport     // never throws
+  public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
   public func importLogin(_ p: Provider, root: URL, claudeCreds: Data?) throws -> SlotName
 }
 public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [(SlotName, ProbeOutcome)] }
@@ -497,6 +559,12 @@ public struct ProbeReport { public var saveBackError: String?; public var provid
   `setUsage`, `setLogin` when the doc changed, or on `.revoked` for a
   non-live account `remove`. The live account is never refreshed and never
   removed.
+- `redeem`: `noAccount` without the row; `noResets` unless its
+  `usage.resets.count > 0`. `live` = `n` in `liveNames(p, mixed:
+  isMixed(p))`, as `probeAll` decides it. The provider's `redeem`; a changed
+  doc is stored with `setLogin` before the result is read (a refresh spends
+  the old grant); a failure throws; after a 200, `probe(p, n, live:)` so the
+  row's usage and offer show the result, then the outcome.
 - `importLogin`: reads the identity from the throwaway root (Claude: config
   at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
   `root/.codex/auth.json`), `liveName`, `put`. `noLive` when nothing is
@@ -628,11 +696,15 @@ public protocol Backend: Sendable {
   func forget(_ p: Provider, _ n: SlotName) throws
   func probeAll(_ p: Provider) async -> ProbeReport
   func add(_ p: Provider, expected: String?) async throws -> AddResult
+  func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome  // spend one limit reset, re-probe
+}
+public enum ResetOutcome: String, Equatable, Sendable {
+  case reset, notLimited, alreadyUsed, noCredit, cooldown, ineligible, unavailable
 }
 ```
 
-`Backend.swift` in KibaCore holds the protocol plus `ProbeReport` and
-`AddResult`; `CoreBackend` (Switcher + StatusReader + LoginRunner) is the
+`Backend.swift` in KibaCore holds the protocol plus `ProbeOutcome`,
+`ResetOutcome`, `ProbeReport` and `AddResult`; `CoreBackend` (Switcher + StatusReader + LoginRunner) is the
 only production conformer. Tests drive `AppModel` on a scratch HOME through
 the same `CoreBackend`.
 

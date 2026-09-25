@@ -1,10 +1,11 @@
 import Foundation
 
-/// Reads a Codex login's usage windows from ChatGPT (kiba `CODEX-PROBE`). A
-/// saved login whose access token is rejected earns one refresh; the live
-/// login's token belongs to the running codex and is never refreshed. Writes
-/// nothing: a refreshed document comes back in the outcome for the Switcher to
-/// store, and `.revoked` asks it to remove the saved login.
+/// Reads a Codex login's usage windows and limit-reset credits from ChatGPT
+/// (kiba `CODEX-PROBE`), and spends a credit on request. A saved login whose
+/// access token is rejected earns one refresh; the live login's token belongs
+/// to the running codex and is never refreshed. Writes nothing: a refreshed
+/// document comes back for the Switcher to store, and `.revoked` asks it to
+/// remove the saved login.
 public struct CodexProbe: Sendable {
     private let http: any HTTPClient
     private let clock: Clock
@@ -17,15 +18,17 @@ public struct CodexProbe: Sendable {
     public func run(_ i: ProbeInput) async -> ProbeOutcome {
         let now = epochSeconds(clock())
         var doc = i.doc
-        func done(_ state: UsageState, _ note: String, _ limits: [Limit] = []) -> ProbeOutcome {
-            .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits), doc: doc)
+        func done(_ state: UsageState, _ note: String, _ limits: [Limit] = [], _ resets: ResetOffer? = nil)
+            -> ProbeOutcome
+        {
+            .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
         }
         func result(_ got: HTTPOutcome) -> ProbeOutcome {
             guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
             switch r.status {
             case HTTPStatus.ok:
                 guard let body = JSONFields(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
-                return done(.ok, "", limits(body))
+                return done(.ok, "", limits(body), resets(body))
             case HTTPStatus.unauthorized:
                 return done(.expired, Note.rejected)
             case HTTPStatus.tooManyRequests:
@@ -40,25 +43,70 @@ public struct CodexProbe: Sendable {
         guard let first = await usage(doc) else { return done(.error, ProbeNote.noAccess) }
         guard case .response(let r) = first, r.status == HTTPStatus.unauthorized else { return result(first) }
         if i.live { return done(.expired, Note.liveRejected) }
-
-        let revoked = JSONFields(r.body)?.obj(Wire.error)?.str(Wire.code) == Wire.tokenRevoked
-        guard let grant = tokens?.str(Key.refreshToken) else { return done(.expired, Note.noGrant) }
-        switch await refresh(doc, grant: grant, now: now) {
-        case .fresh(let refreshed): doc = refreshed
-        case .refused: return revoked ? .revoked(note: Note.revoked) : done(.expired, Note.refused)
-        case .failed(let note): return done(.error, note)
+        switch await renewed(doc, rejection: r, now: now) {
+        case .ready(let ready): doc = ready
+        case .stale(.revoked, let note): return .revoked(note: note)
+        case .stale(let state, let note): return done(state, note)
         }
         guard let again = await usage(doc) else { return done(.error, ProbeNote.noAccess) }
         return result(again)
     }
 
+    /// Spends one limit-reset credit. A saved login whose access token is
+    /// rejected earns one refresh; the live login's never does.
+    func redeem(_ i: ProbeInput) async -> Redemption {
+        let now = epochSeconds(clock())
+        var doc = i.doc
+        func failed(_ note: String) -> Redemption { Redemption(doc: doc, result: .failure(.remote(note))) }
+        let body = jsonObject([Reset.requestID: UUID().uuidString])
+        func send(_ doc: Data) async -> HTTPOutcome? {
+            guard let token = accessToken(doc) else { return nil }
+            return await http.send(
+                .post(Endpoint.consume, json: body, bearer: token, agent: Endpoint.agent, extra: account(doc)))
+        }
+
+        guard var got = await send(doc) else { return failed(ProbeNote.noAccess) }
+        if case .response(let r) = got, r.status == HTTPStatus.unauthorized {
+            if i.live { return failed(Note.liveRejected) }
+            switch await renewed(doc, rejection: r, now: now) {
+            case .ready(let ready): doc = ready
+            case .stale(_, let note): return failed(note)
+            }
+            guard let again = await send(doc) else { return failed(ProbeNote.noAccess) }
+            got = again
+        }
+        return Redemption(doc: doc, result: Self.reply.outcome(got))
+    }
+
+    /// `doc` with its refresh grant spent after `rejection` refused its access
+    /// token; `.stale(.revoked, …)` when the refresh is refused and the
+    /// rejection said a later login revoked the token.
+    private func renewed(_ doc: Data, rejection: HTTPResponse, now: Int) async -> Fresh {
+        let revoked = JSONFields(rejection.body)?.obj(Wire.error)?.str(Wire.code) == Wire.tokenRevoked
+        guard let grant = JSONFields(doc)?.obj(Key.tokens)?.str(Key.refreshToken) else {
+            return .stale(.expired, Note.noGrant)
+        }
+        switch await refresh(doc, grant: grant, now: now) {
+        case .fresh(let refreshed): return .ready(refreshed)
+        case .refused: return revoked ? .stale(.revoked, Note.revoked) : .stale(.expired, Note.refused)
+        case .failed(let note): return .stale(.error, note)
+        }
+    }
+
     /// GET the usage windows with `doc`'s access token; nil when it has none.
     private func usage(_ doc: Data) async -> HTTPOutcome? {
-        let tokens = JSONFields(doc)?.obj(Key.tokens)
-        guard let token = tokens?.str(Key.accessToken) else { return nil }
-        var extra: [String: String] = [:]
-        if let account = tokens?.str(Key.accountID), !account.isEmpty { extra[Endpoint.accountHeader] = account }
-        return await http.send(.get(Endpoint.usage, bearer: token, agent: Endpoint.agent, extra: extra))
+        guard let token = accessToken(doc) else { return nil }
+        return await http.send(.get(Endpoint.usage, bearer: token, agent: Endpoint.agent, extra: account(doc)))
+    }
+
+    private func accessToken(_ doc: Data) -> String? {
+        JSONFields(doc)?.obj(Key.tokens)?.str(Key.accessToken)
+    }
+
+    /// The `ChatGPT-Account-Id` header when `doc` names its account.
+    private func account(_ doc: Data) -> [String: String] {
+        guard let id = JSONFields(doc)?.obj(Key.tokens)?.str(Key.accountID), !id.isEmpty else { return [:] }
+        return [Endpoint.accountHeader: id]
     }
 
     /// Spends the saved refresh grant and splices the new tokens and the refresh
@@ -96,6 +144,12 @@ public struct CodexProbe: Sendable {
         }
     }
 
+    /// The credits the answer reports; nil when it says nothing about them.
+    private func resets(_ body: JSONFields) -> ResetOffer? {
+        guard let count = body.obj(Reset.credits)?.int(Reset.available) else { return nil }
+        return ResetOffer(count: count, program: "", grant: "")
+    }
+
     /// Epoch seconds as ISO 8601 UTC, such as `2026-09-24T12:00:00Z`.
     private func iso(_ secs: Int) -> String {
         Date(timeIntervalSince1970: TimeInterval(secs)).formatted(.iso8601)
@@ -103,10 +157,11 @@ public struct CodexProbe: Sendable {
 
     private enum Endpoint {
         static let usage = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
+        static let consume = URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")!
         static let token = URL(string: "https://auth.openai.com/oauth/token")!
         static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
         static let accountHeader = "ChatGPT-Account-Id"
-        /// The usage call names the Codex CLI, as codex itself does.
+        /// The ChatGPT backend calls name the Codex CLI, as codex itself does.
         static let agent = "codex-cli"
     }
 
@@ -142,9 +197,24 @@ public struct CodexProbe: Sendable {
         static let sessionMax = 21_600
     }
 
+    /// Names in the limit-reset exchange, as codex's backend client reads them.
+    private enum Reset {
+        static let credits = "rate_limit_reset_credits"
+        static let available = "available_count"
+        static let requestID = "redeem_request_id"
+        static let code = "code"
+        static let words: [String: ResetOutcome] = [
+            "reset": .reset, "nothing_to_reset": .notLimited, "no_credit": .noCredit, "already_redeemed": .alreadyUsed,
+        ]
+    }
+
+    private static let reply = ResetReply(
+        field: Reset.code, words: Reset.words, what: Note.reset, rejected: Note.rejected, throttled: Note.resetThrottled)
+
     private enum Note {
         static let usage = "OpenAI's usage endpoint"
         static let token = "OpenAI's token endpoint"
+        static let reset = "OpenAI's reset endpoint"
         static let apiKey = "API-key login: no usage windows to read"
         static let liveRejected = "access token rejected; run codex once to refresh it"
         static let noGrant = "access token rejected and no refresh token is saved; log in again"
@@ -152,5 +222,6 @@ public struct CodexProbe: Sendable {
         static let revoked = "login revoked by a later `codex login`"
         static let rejected = "login rejected by OpenAI; log in again"
         static let throttled = "OpenAI is rate limiting usage checks; try again later"
+        static let resetThrottled = "OpenAI is rate limiting limit resets; try again later"
     }
 }

@@ -49,20 +49,26 @@ enum HTTPStatus {
 }
 
 extension HTTPRequest {
-    /// User-Agent of every request except the ChatGPT usage call.
+    /// User-Agent of every request except the ChatGPT backend calls.
     static let kibaAgent = "kiba"
 
     /// A GET carrying `token` as its bearer, plus `extra` headers.
     static func get(
         _ url: URL, bearer token: String, agent: String = kibaAgent, extra: [String: String] = [:]
     ) -> HTTPRequest {
-        var headers = common(agent)
-        headers[Header.auth] = Header.bearer + token
-        headers.merge(extra) { _, added in added }
-        return HTTPRequest(method: Method.get, url: url, headers: headers, body: nil)
+        HTTPRequest(method: Method.get, url: url, headers: authorized(token, agent, extra), body: nil)
     }
 
-    /// A POST of the JSON document `json`.
+    /// A POST of the JSON document `json` carrying `token` as its bearer, plus `extra` headers.
+    static func post(
+        _ url: URL, json: Data, bearer token: String, agent: String = kibaAgent, extra: [String: String] = [:]
+    ) -> HTTPRequest {
+        var headers = authorized(token, agent, extra)
+        headers[Header.contentType] = Header.json
+        return HTTPRequest(method: Method.post, url: url, headers: headers, body: json)
+    }
+
+    /// A POST of the JSON document `json` with no bearer: a token grant.
     static func post(_ url: URL, json: Data) -> HTTPRequest {
         var headers = common(kibaAgent)
         headers[Header.contentType] = Header.json
@@ -71,6 +77,13 @@ extension HTTPRequest {
 
     private static func common(_ agent: String) -> [String: String] {
         [Header.accept: Header.json, Header.agent: agent]
+    }
+
+    private static func authorized(_ token: String, _ agent: String, _ extra: [String: String]) -> [String: String] {
+        var headers = common(agent)
+        headers[Header.auth] = Header.bearer + token
+        headers.merge(extra) { _, added in added }
+        return headers
     }
 
     private enum Method {

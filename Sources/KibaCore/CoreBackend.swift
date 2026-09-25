@@ -75,4 +75,8 @@ public struct CoreBackend: Backend {
     public func add(_ p: Provider, expected: String?) async throws -> AddResult {
         try await runner.add(p, expected: expected)
     }
+
+    public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome {
+        try await switcher.redeem(p, n)
+    }
 }

@@ -52,6 +52,12 @@ struct JSONFields {
         number(key).flatMap { Int(exactly: $0) }
     }
 
+    /// The boolean under `key`; nil when absent, null, or another kind.
+    func bool(_ key: String) -> Bool? {
+        guard let num = fields[key] as? NSNumber, CFGetTypeID(num) == CFBooleanGetTypeID() else { return nil }
+        return num.boolValue
+    }
+
     /// A JSON number; `true` and `false` are not numbers.
     private func number(_ key: String) -> NSNumber? {
         guard let num = fields[key] as? NSNumber, CFGetTypeID(num) != CFBooleanGetTypeID() else { return nil }

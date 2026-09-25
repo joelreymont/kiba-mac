@@ -30,6 +30,7 @@ enum ProbeNote {
     static func answered(_ what: String, _ status: Int) -> String { "\(what) answered \(status)" }
     static func unreachable(_ what: String) -> String { "\(what) could not be reached" }
     static func unreadable(_ what: String) -> String { "\(what) sent an answer that is not a JSON object" }
+    static func unknown(_ what: String, _ word: String) -> String { "\(what) sent an unknown result \"\(word)\"" }
 
     /// The note for an error thrown while building a refreshed document.
     static func failure(_ error: any Error) -> String {
@@ -57,6 +58,53 @@ extension Decimal {
         var rounded = Decimal()
         NSDecimalRound(&rounded, &value, 0, .plain)
         return Int(rounded.description)
+    }
+}
+
+/// A login document ready to send, or why it is not.
+enum Fresh {
+    /// The document, refreshed when its token had to be renewed.
+    case ready(Data)
+    /// No usable token: the state and note to record. `revoked` means a later
+    /// login revoked this one.
+    case stale(UsageState, String)
+}
+
+/// What spending one limit reset produced.
+struct Redemption {
+    /// The login document, refreshed when its token had to be renewed; stored
+    /// whatever the result, since a refresh spends the old grant.
+    var doc: Data
+    var result: Result<ResetOutcome, KibaError>
+}
+
+/// A provider's reset endpoint: the member of its 200 answer that holds the
+/// result word, what each word means, and the notes for its failures.
+struct ResetReply {
+    let field: String
+    let words: [String: ResetOutcome]
+    /// The endpoint as notes name it.
+    let what: String
+    /// The note for a 401 once the token cannot be renewed.
+    let rejected: String
+    let throttled: String
+
+    /// The outcome `got` names; `remote` with a note for any other answer.
+    func outcome(_ got: HTTPOutcome) -> Result<ResetOutcome, KibaError> {
+        guard case .response(let r) = got else { return .failure(.remote(ProbeNote.unreachable(what))) }
+        switch r.status {
+        case HTTPStatus.ok:
+            guard let body = JSONFields(r.body) else { return .failure(.remote(ProbeNote.unreadable(what))) }
+            let word = body.str(field) ?? ""
+            guard let outcome = words[word] else { return .failure(.remote(ProbeNote.unknown(what, word))) }
+            return .success(outcome)
+        case HTTPStatus.unauthorized:
+            return .failure(.remote(rejected))
+        case HTTPStatus.tooManyRequests:
+            return .failure(.remote(throttled))
+        default:
+            return .failure(.remote(ProbeNote.answered(what, r.status)))
+        }
     }
 }
 
