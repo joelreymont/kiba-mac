@@ -61,6 +61,7 @@ public enum KibaError: Error, Equatable {
   case mismatch(Provider, String)    // saved row names another account than its name
   case mixed                         // live Claude config and tokens name different accounts
   case superseded                    // another Claude install noted its own pending marker first
+  case unrepaired(Provider, String)  // this install is still pending: nothing is probed or refreshed until a switch completes
   case orphanLive(URL)               // Claude creds exist but the config naming their account is missing
   case capacity(String)              // >9 logins under one email, doc over 4 MiB
   case unsafePath(URL)               // symlink chain longer than 8 hops or ends in a link
@@ -428,18 +429,21 @@ leaves it pending, and a pending install is mixed whatever the tokens are,
 so a refresh by Claude Code cannot make the next save-back file one
 account's tokens under another's name.
 
-`isMixed` (kiba `CLAUDE-MIXED?`): a pending install → true. Else `installed`
-names row S and S exists and the live identity reads and the live config
-does NOT name S (email differs, or both orgs known and differ) and the live
-creds bytes equal S's login bytes → true. The next successful install
-clears it.
+`isMixed` (kiba `CLAUDE-MIXED?`): the live login is read first, so
+`orphanLive` propagates whether or not an install is pending. Then a
+pending install → true. Else `installed` names row S and S exists and
+there is a live login and the live config does NOT name S (email differs,
+or both orgs known and differ) and the live creds bytes equal S's login
+bytes → true. The next successful install clears it.
 
 Reading the live login (`identity`, `save`, `isMixed`): no credentials → no
 live login (nil). Credentials without a config → `orphanLive(config path)`:
 the tokens are some account's, maybe a saved row's refresh token, and
 nothing says whose, so no saved login is refreshed and the live credentials
 are not replaced until the config names them. `Switcher.save`, `use` and
-`redeem` throw it before writing anything; `probeAll` reports it as both
+`redeem` throw it before writing anything, a pending install
+notwithstanding: `use` never installs over orphan credentials, and the
+marker stays. `probeAll` reports it as both
 `saveBackError` and `providerError` and probes nothing; `StatusReader`
 shows it as the provider's error. Codex is unchanged: a missing `auth.json`
 is no credentials.
@@ -526,6 +530,14 @@ and the Switcher persists it. The Switcher runs one operation per provider
 at a time, so a refresh is never overtaken by a switch that makes the login
 live; and it writes an outcome only while the row still holds the bytes the
 probe read.
+
+A pending Claude repair stops all Claude probes and refreshes until `use`
+completes it: a failed install can leave one saved login's credentials
+live under another's restored config, and a later failed repair can rename
+the marker, so no saved name is known not to be live. `probeAll` probes
+nothing and `redeem` refuses, both with `unrepaired(name)`. Only the probe
+`LoginRunner` runs after an import goes on: it reads the login just signed
+in, whose tokens are not the live ones.
 
 Claude:
 1. Expired = `claudeAiOauth.expiresAt/1000 < now + 60`. If expired: live →
@@ -638,7 +650,7 @@ public final class Switcher: Sendable {
   public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
   public func importLogin(_ p: Provider, root: URL, claudeCreds: Data?) throws -> SlotName
 }
-public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [Probed] }
+public struct ProbeReport { public var saveBackError: String?; public var providerError: String?; public var accounts: [Probed] }   // accounts: only outcomes recorded
 public struct Probed { public let name: SlotName; public let outcome: ProbeOutcome; public let live: Bool }   // live: probed as the live login
 ```
 
@@ -653,10 +665,13 @@ every probe outcome and refreshed login is written only while the row still
 holds the login bytes it was read with (compared inside the `write`); a row
 replaced or forgotten meanwhile is never updated or removed.
 
-- `save`: `isMixed` → `mixed`; the provider's `login()` nil → nil; else, inside
-  one `store.write`, `liveName` from its identity and `put` of its bytes: one
-  read chooses the slot for the very bytes saved, so a login the CLI rewrites
-  meanwhile cannot land under another account's name.
+- `save`: inside one `store.write`, `isMixed` → `mixed`; the provider's
+  `login()` nil → nil; else `liveName` from its identity and `put` of its
+  bytes. One read chooses the slot for the very bytes saved, so a login the
+  CLI rewrites meanwhile cannot land under another account's name; the
+  write lock holds off another process's install, which writes both live
+  files in one transaction, so the check and the read never see half of
+  it. The save-backs of `use` and `probeAll` run the same way.
 - `use`: save-back (skip when mixed; save when a live identity exists),
   then `noteInstalled` the saved-back name, whose login the live files
   hold, so a crash between the install's two live writes leaves a pending
@@ -673,19 +688,24 @@ replaced or forgotten meanwhile is never updated or removed.
   the Claude files are mixed, the installed name); `write`, when the row
   still holds the probed login: `setUsage`, `setLogin` when the doc
   changed, or on `.revoked` for a non-live account `remove`. The live
-  account is never refreshed and never removed. An outcome whose row was
-  replaced or forgotten meanwhile is not written and not in `accounts`.
+  account is never refreshed and never removed. `accounts` holds only
+  outcomes recorded: one whose row was replaced or forgotten meanwhile is
+  not written and not in it, nor is one whose write failed, which
+  `providerError` names ("<name>: usage not recorded: <reason>"). A pending
+  Claude install stops it before any probe: `unrepaired` is the
+  `providerError` (the `saveBackError` is `mixed`).
 - `redeem`: `noAccount` without the row; `noResets` unless its
   `usage.resets.count > 0`. `live` = `n` in `liveNames(p, mixed:
-  isMixed(p))`, as `probeAll` decides it. The provider's `redeem`; a changed
+  isMixed(p))`, as `probeAll` decides it; `unrepaired` while a Claude
+  install is pending. The provider's `redeem`; a changed
   doc is stored with `setLogin`, while the row still holds the login it
   refreshed, before the result is read (a refresh spends the old grant); a
   failure throws; after a 200, `probe(p, n, live:)` so the
   row's usage and offer show the result, then the outcome.
 - `importLogin`: reads the login once from the throwaway root (Claude:
   config at `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
-  `root/.codex/auth.json`), `liveName`, `put`. `noLive` when nothing is
-  there.
+  `root/.codex/auth.json`), `liveName` and `put`, all inside one
+  `store.write`. `noLive` when nothing is there.
 
 ### Status
 

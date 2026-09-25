@@ -351,7 +351,9 @@ import os
     }
 }
 
-@Test func orphanClaudeCredsStopProbesAndSwitches() async throws {
+/// A pending switch does not hide orphan credentials: they stop probes and
+/// switches all the same, and the marker stays for the switch that repairs them.
+@Test(arguments: [false, true]) func orphanClaudeCredsStopProbesAndSwitches(pending: Bool) async throws {
     try await scratch { w in
         let (ax, bx) = (try slot("a@x"), try slot("b@x"))
         let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now - Fixed.hour)
@@ -361,6 +363,7 @@ import os
         // The config is gone but the credentials are still a@x's: refreshing
         // the saved a@x would spend the refresh grant the live login holds.
         try credsA.write(to: w.paths.claudeCredsFile(root: nil))
+        if pending { _ = try w.store.write { try $0.notePending(.claude, bx) } }
         let http = StubHTTP([])
         let sw = w.switcher(http)
         let orphan = KibaError.orphanLive(w.paths.claudeConfigFile(root: nil))
@@ -375,6 +378,7 @@ import os
         await #expect(throws: orphan) { try await sw.use(.claude, bx) }
         #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsA)
         #expect(w.read(w.paths.claudeConfigFile(root: nil)) == nil)
+        #expect(try w.store.pending(.claude) == (pending ? bx : nil))
         let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
         #expect(claude?.error == orphan.reason)
         #expect(claude?.live == nil)
@@ -1284,6 +1288,9 @@ enum Fixed {
     static let overtake = Duration.milliseconds(200)
     /// The database and the files SQLite keeps beside it in WAL mode.
     static let dbFiles = ["", "-wal", "-shm"]
+    /// Why the store refuses to delete an account once `keepRows` has run.
+    static let kept = "accounts are kept"
+    static let keepRows = "CREATE TRIGGER keep BEFORE DELETE ON account BEGIN SELECT RAISE(ABORT, '\(kept)'); END;"
     /// The store layout before pending installs had owners.
     static let storeV1 = """
         PRAGMA user_version = 1;
@@ -1424,10 +1431,15 @@ struct World: Sendable {
     /// Replaces the store with a database `sql` builds, as an older kiba-mac left it.
     func oldStore(_ sql: String) throws {
         for suffix in Fixed.dbFiles { try PrivateFS.removeTree(URL(fileURLWithPath: paths.db.path + suffix)) }
+        try storeSQL(sql)
+    }
+
+    /// Runs `sql` on the store as another program would.
+    func storeSQL(_ sql: String) throws {
         var db: OpaquePointer?
         defer { sqlite3_close(db) }
         guard sqlite3_open(paths.db.path, &db) == SQLITE_OK, sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
-            throw KibaError.db("old store: \(String(cString: sqlite3_errmsg(db)))")
+            throw KibaError.db("store sql: \(String(cString: sqlite3_errmsg(db)))")
         }
     }
 
@@ -1941,6 +1953,76 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(model.note == "")
     #expect(model.message == "Usage refreshed for 2 accounts")
     #expect(spoken == [held, held, "Usage refreshed for 2 accounts"])
+}
+
+/// A failed repair left c@x's tokens live under a@x's config with the
+/// switch to c@x pending: any saved login's tokens may be the live ones, so
+/// no Claude login is probed or refreshed, and the panel says why.
+@MainActor @Test func appModelShowsPendingRepairStopsProbes() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (ax, cx) = (try slot("a@x"), try slot("c@x"))
+    let profA = profile("a@x", org: "org-a")
+    let credsC = claudeCreds("xc", plan: "pro", expires: Fixed.now - Fixed.hour)
+    let offer = ResetOffer(count: 1, program: "juniper_tide", grant: "")
+    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
+               login: claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day), profile: profA)
+    try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"), login: credsC, profile: profile("c@x", org: "org-c"),
+               usage: UsageRecord(fetchedAt: Fixed.now - Fixed.day, state: .ok, note: "", limits: [], resets: offer))
+    try w.writeClaude(config: claudeConfig(profA), creds: credsC)
+    try w.store.write { try $0.noteInstalled(.claude, ax) }
+    _ = try w.store.write { try $0.notePending(.claude, cx) }
+    let http = StubHTTP([])
+    let core = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
+    let unrepaired = KibaError.unrepaired(.claude, cx.raw)
+
+    let report = await core.probeAll(.claude)
+    #expect(report.saveBackError == KibaError.mixed.reason)
+    #expect(report.providerError == unrepaired.reason)
+    #expect(report.accounts.isEmpty)
+    await #expect(throws: unrepaired) { try await core.redeem(.claude, cx) }
+
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.message == "Usage not refreshed")
+    let title = Provider.claude.title
+    #expect(model.error == "\(title): \(KibaError.mixed.reason)\n\(title): \(unrepaired.reason)")
+    #expect(http.requests.isEmpty)
+    #expect(try w.store.fetch(.claude, cx)?.login == credsC)
+}
+
+/// A revoked login whose removal the store refused is still saved: the
+/// probe names it as not recorded and counts nothing removed.
+@MainActor @Test func appModelCountsOnlyRecordedRemovals() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let usage = answer(Status.ok, codexUsage(session: 20, week: 45))
+    let revoked = [
+        answer(Status.unauthorized, #"{"error":{"code":"token_revoked","message":"Token revoked"}}"#),
+        answer(Status.unauthorized, #"{"error":"invalid_grant"}"#),
+    ]
+    let (core, ay, by) = try codexPair(w, [usage] + revoked + [usage] + revoked)
+    try w.storeSQL(Fixed.keepRows)
+    let unrecorded = "\(by.raw): usage not recorded: \(KibaError.db("remove: \(Fixed.kept)").reason)"
+
+    let report = await core.probeAll(.codex)
+    #expect(report.accounts.map(\.name) == [ay])
+    #expect(report.providerError == unrecorded)
+    #expect(try w.store.list(.codex).map(\.name) == [ay, by])
+
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "")
+    #expect(model.message == "Usage refreshed for 1 account")
+    #expect(model.error == "\(Provider.codex.title): \(unrecorded)")
 }
 
 /// The menu bar gauge tells unknown, room left, nothing left and an error

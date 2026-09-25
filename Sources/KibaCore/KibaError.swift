@@ -13,6 +13,7 @@ public enum KibaError: Error, Equatable, Sendable {
     case mismatch(Provider, String)
     case mixed
     case superseded
+    case unrepaired(Provider, String)
     case orphanLive(URL)
     case capacity(String)
     case unsafePath(URL)
@@ -49,6 +50,8 @@ extension KibaError {
             return "the live Claude files name different accounts; switch to an account to repair them"
         case .superseded:
             return "another Claude switch began before this one wrote anything; this one changed nothing"
+        case .unrepaired(let p, let name):
+            return "the \(p.title) switch to \(name) did not finish; nothing is probed or refreshed until a switch completes"
         case .orphanLive(let url):
             return "Claude credentials exist but \(url.path) is missing: nothing is probed or switched until it names their account"
         case .capacity(let what):

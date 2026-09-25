@@ -47,8 +47,10 @@ public enum ResetOutcome: String, Equatable, Sendable {
 public struct ProbeReport: Sendable {
     /// Saving the live login back to its slot failed; the probe went on.
     public var saveBackError: String?
-    /// The provider could not be probed at all.
+    /// The provider could not be probed at all, or some outcomes not recorded.
     public var providerError: String?
+    /// The outcomes recorded; one whose write failed or found its row
+    /// replaced or forgotten is not here.
     public var accounts: [Probed]
 
     public init(saveBackError: String?, providerError: String?, accounts: [Probed]) {

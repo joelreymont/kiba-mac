@@ -91,14 +91,17 @@ public struct ClaudeLive {
         }
     }
 
-    /// kiba `CLAUDE-MIXED?`, plus an unfinished install: an install is pending,
-    /// whatever the tokens; or the installed row exists, the live config names
-    /// another account (email differs, or both orgs are known and differ), and
-    /// the live credentials are still byte for byte that row's login.
+    /// kiba `CLAUDE-MIXED?`, plus an unfinished install. The live login is
+    /// read first, so credentials without a config are `orphanLive` even while
+    /// an install is pending. Then: an install is pending, whatever the tokens;
+    /// or the installed row exists, the live config names another account
+    /// (email differs, or both orgs are known and differ), and the live
+    /// credentials are still byte for byte that row's login.
     public func isMixed() throws -> Bool {
+        let live = try login()
         guard try store.pending(.claude) == nil else { return true }
-        guard let name = try store.installed(.claude), let row = try store.fetch(.claude, name),
-              let live = try login() else { return false }
+        guard let live, let name = try store.installed(.claude),
+              let row = try store.fetch(.claude, name) else { return false }
         let id = live.identity
         let sameOrg = id.org.isEmpty || row.identity.org.isEmpty || id.org == row.identity.org
         guard !(name.belongs(to: id.email) && sameOrg) else { return false }

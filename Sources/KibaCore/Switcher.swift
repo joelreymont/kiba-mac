@@ -29,7 +29,6 @@ public final class Switcher: Sendable {
     public func save(_ p: Provider) throws -> SlotName? {
         ops(p).enterBlocking()
         defer { ops(p).leave() }
-        if try isMixed(p) { throw KibaError.mixed }
         return try saveLive(p)
     }
 
@@ -46,7 +45,12 @@ public final class Switcher: Sendable {
     public func use(_ p: Provider, _ n: SlotName) async throws {
         await ops(p).enter()
         defer { ops(p).leave() }
-        let old = try isMixed(p) ? nil : saveLive(p)
+        let old: SlotName?
+        do {
+            old = try saveLive(p)
+        } catch KibaError.mixed {
+            old = nil
+        }
         if let old { try store.write { try $0.noteInstalled(p, old) } }
         try live(p).install(n)
         try await probeInTurn(p, n, live: true)
@@ -65,24 +69,21 @@ public final class Switcher: Sendable {
 
     /// Saves the live login back, then probes every saved login and records
     /// each outcome. A save-back failure is reported and the probe goes on; a
-    /// provider whose accounts or live login cannot be read is not probed at
-    /// all. The live login is probed as live, so its tokens are never
-    /// refreshed, and it is never removed. An outcome whose row was replaced
-    /// or forgotten meanwhile is neither written nor reported.
+    /// provider whose accounts or live login cannot be read, or whose install
+    /// is pending, is not probed at all. The live login is probed as live, so
+    /// its tokens are never refreshed, and it is never removed. An outcome
+    /// whose row was replaced or forgotten meanwhile is neither written nor
+    /// reported; one whose write failed is named in the provider error only.
     public func probeAll(_ p: Provider) async -> ProbeReport {
         await ops(p).enter()
         defer { ops(p).leave() }
         var backError: String?
         var mixed = false
         do {
-            mixed = try isMixed(p)
-            if mixed {
-                backError = KibaError.mixed.reason
-            } else {
-                try saveLive(p)
-            }
+            try saveLive(p)
         } catch {
             backError = StatusReader.reason(error)
+            mixed = error as? KibaError == .mixed
         }
         let rows: [SavedLogin]
         let live: Set<SlotName>
@@ -99,10 +100,10 @@ public final class Switcher: Sendable {
             let outcome = await run(p, row, live: isLive)
             do {
                 guard try record(p, row, outcome, live: isLive) else { continue }
+                accounts.append(Probed(name: row.name, outcome: outcome, live: isLive))
             } catch {
                 unrecorded.append("\(row.name.raw): usage not recorded: \(StatusReader.reason(error))")
             }
-            accounts.append(Probed(name: row.name, outcome: outcome, live: isLive))
         }
         let providerError = unrecorded.isEmpty ? nil : unrecorded.joined(separator: Self.joiner)
         return ProbeReport(saveBackError: backError, providerError: providerError, accounts: accounts)
@@ -126,11 +127,11 @@ public final class Switcher: Sendable {
 
     /// Spends one limit reset of the saved login `n`, then probes it again so
     /// its usage and offer show the result. `noAccount` when there is no such
-    /// login, `noResets` when its last probe offered none. A saved login's
-    /// token is refreshed when it has expired or is rejected, and the new one
-    /// is kept even when the reset then fails, unless the row was replaced
-    /// meanwhile; a live login's never is, so a live name is decided as
-    /// `probeAll` decides it.
+    /// login, `noResets` when its last probe offered none, `unrepaired` while
+    /// an install is pending. A saved login's token is refreshed when it has
+    /// expired or is rejected, and the new one is kept even when the reset
+    /// then fails, unless the row was replaced meanwhile; a live login's never
+    /// is, so a live name is decided as `probeAll` decides it.
     public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome {
         await ops(p).enter()
         defer { ops(p).leave() }
@@ -175,23 +176,33 @@ public final class Switcher: Sendable {
         }
     }
 
-    /// The live login saved under the name it belongs to; nil when there is none.
+    /// The live login saved under the name it belongs to; nil when there is
+    /// none. `mixed`, with nothing saved, when the live Claude files name
+    /// different accounts. The check and the read run in the transaction
+    /// that saves: its write lock holds off another process's install, which
+    /// writes both live files in one transaction, so no half of it is saved.
     @discardableResult
     func saveLive(_ p: Provider) throws -> SlotName? {
-        try put(p, live(p))
+        try store.write { tx in
+            if try isMixed(p) { throw KibaError.mixed }
+            return try put(p, live(p), tx)
+        }
+    }
+
+    /// `put` in a transaction of its own.
+    func put(_ p: Provider, _ files: any LiveFiles) throws -> SlotName? {
+        try store.write { try put(p, files, $0) }
     }
 
     /// Puts the login `files` hold under the name `liveName` gives its
-    /// identity, in one transaction; nil when there is no login. One read
-    /// serves both: the identity chooses the slot for the very bytes saved,
-    /// so a login rewritten meanwhile cannot land under another's name.
-    func put(_ p: Provider, _ files: any LiveFiles) throws -> SlotName? {
+    /// identity, in `tx`; nil when there is no login. One read serves both:
+    /// the identity chooses the slot for the very bytes saved, so a login
+    /// rewritten meanwhile cannot land under another's name.
+    func put(_ p: Provider, _ files: any LiveFiles, _ tx: Tx) throws -> SlotName? {
         guard let live = try files.login() else { return nil }
-        return try store.write { tx in
-            let n = try store.liveName(p, live: live.identity)
-            try tx.put(p, SavedLogin(name: n, identity: live.identity, login: live.login, profile: live.profile, usage: nil))
-            return n
-        }
+        let n = try store.liveName(p, live: live.identity)
+        try tx.put(p, SavedLogin(name: n, identity: live.identity, login: live.login, profile: live.profile, usage: nil))
+        return n
     }
 
     /// Only Claude keeps the account and the tokens in two files that can disagree.
@@ -204,10 +215,14 @@ public final class Switcher: Sendable {
 
     /// The saved names whose tokens the CLI is using: the live identity's
     /// name, and, while the live Claude files are mixed, the installed name,
-    /// whose tokens are still the live credentials.
+    /// whose tokens are still the live credentials. `unrepaired` while an
+    /// install is pending: a failed repair may have left any saved login's
+    /// tokens live, and a later one may have renamed the marker, so no saved
+    /// name is known not to be live until `use` completes an install.
     func liveNames(_ p: Provider, mixed: Bool) throws -> Set<SlotName> {
         var names: Set<SlotName> = []
         if let id = try live(p).identity() { names.insert(try store.liveName(p, live: id)) }
+        if let pending = try store.pending(p) { throw KibaError.unrepaired(p, pending.raw) }
         if mixed, let installed = try store.installed(p) { names.insert(installed) }
         return names
     }
