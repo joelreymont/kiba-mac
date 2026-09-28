@@ -126,7 +126,7 @@ struct AccountRow: View {
     private func speechValue(_ state: RowState) -> String {
         let u = account.usage
         var parts: [String] = []
-        if !account.plan.isEmpty { parts.append(account.plan + Copy.planWord) }
+        if state != .unsubscribed, !account.plan.isEmpty { parts.append(account.plan + Copy.planWord) }
         parts.append(verdict(state))
         parts += Rows.figures(u).map { "\($0.label): \(max($0.left, 0))\(Copy.left)" }
         if let at = u?.fetchedAt, at > 0 { parts.append(Copy.probed + Rows.age(at, now: model.now)) }
@@ -134,7 +134,8 @@ struct AccountRow: View {
     }
 
     /// What the status dot shows, in words: room, a limit and when it
-    /// lifts, a login to repeat, or why the usage is unknown.
+    /// lifts, a login to repeat, or the record's note: why there is no
+    /// plan, or why the usage is unknown.
     private func verdict(_ state: RowState) -> String {
         let u = account.usage
         switch state {
@@ -145,7 +146,7 @@ struct AccountRow: View {
             return when.isEmpty ? Copy.limited : Copy.limited + Copy.sep + Copy.resetsIn + when
         case .dead:
             return Copy.relogin
-        case .unknown:
+        case .unknown, .unsubscribed:
             guard let u else { return Copy.unprobed }
             return u.note.isEmpty ? Copy.noLimits : u.note
         }

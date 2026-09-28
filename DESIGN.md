@@ -463,7 +463,8 @@ public struct CodexLive {
 
 ```swift
 public struct Limit: Codable, Equatable, Sendable { public var label: String; public var percent: Int; public var resetsAt: String }
-public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown }
+public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown, unsubscribed }
+// unsubscribed: the login works, but the organization has no plan the CLI may use
 public struct ResetOffer: Codable, Equatable, Sendable {
   public var count: Int              // resets available now
   public var program: String         // Claude: "cedar_ember" (banked grants) | "juniper_tide" (one per week); Codex: ""
@@ -570,7 +571,13 @@ Claude:
    `eligible`: count = `available` ? 1 : 0, program `juniper_tide`, grant "".
    Neither → nil. The names come from Claude Code's parser and live in one
    constants enum, `Reset`.
-   401 → `expired` "login rejected by Anthropic; log in again". 429 → `error`
+   401 → `expired` "login rejected by Anthropic; log in again". 403 whose
+   body's `error.details.error_code` is `oauth_not_allowed_for_organization`
+   → `unsubscribed` "no plan for Claude Code: Anthropic does not allow this
+   organization's OAuth login": the login works, but the organization has
+   no plan Claude Code may use. A lapsed subscription answers so, while the
+   token document still claims its old `subscriptionType`, so the saved plan
+   is not shown for such a row (see Rows). 429 → `error`
    "Anthropic is rate limiting usage checks; try again later". Other →
    `error` "Anthropic's usage endpoint answered <code>". No `accessToken` →
    `error` "no access token saved".
@@ -728,7 +735,7 @@ accounts kept. Never opens a write transaction.
 ### Rows (port of Panel.qml, pure)
 
 ```swift
-public enum RowState: Sendable { case ok, tight, blocked, dead, unknown }
+public enum RowState: Sendable { case ok, tight, blocked, dead, unsubscribed, unknown }
 public enum Rows {
   static func isLong(_ label: String) -> Bool        // contains week|7-day|month|30-day (case-insensitive)
   static func session(_ u: UsageRecord?) -> Limit?   // first !isLong with percent ≥ 0
@@ -737,11 +744,12 @@ public enum Rows {
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
   static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, or expired && !active
   static func state(_ u: UsageRecord?, active: Bool) -> RowState
-  static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead 2, unknown 3
+  static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead/unsubscribed 2, unknown 3
   static func sorted(_ a: [Account]) -> [Account]    // rank; rank 2 by blocking reset (unparseable last); else input order
   static func figures(_ u: UsageRecord?) -> [Figure] // session, weekly, then other percent ≥ 0 in order; each (label, left = 100 - percent)
   static func figuresText(_ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
-  static func planText(_ a: Account, now: Date) -> String // "(pro)", "(pro, 5d)", "(pro, log in again)", ""
+  static func plan(_ a: Account) -> String           // the saved plan; "no plan" while unsubscribed
+  static func planText(_ a: Account, now: Date) -> String // "(pro)", "(pro, 5d)", "(pro, log in again)", "(no plan)", ""
   static func tooltip(_ p: Provider, _ a: Account, now: Date) -> [String]
   static func resets(_ u: UsageRecord?) -> Int       // the offer's count; 0 without one
   static func resetsText(_ n: Int) -> String         // "1 limit reset" | "2 limit resets"
@@ -753,10 +761,12 @@ public enum Rows {
 public struct Figure: Equatable { public var label: String; public var left: Int }
 ```
 
-State: dead → `.dead`; no usage or no limits → `.unknown`; any percent ≥ 100
+State: dead → `.dead`; record `unsubscribed` → `.unsubscribed`; no usage or
+no limits → `.unknown`; any percent ≥ 100
 → `.blocked`; headline left < 50 → `.tight`; any long window other than the
 weekly with left < 50 → `.tight`; else `.ok`. Tooltip lines: `email · plan ·
-current`; "Usage not probed yet" | note or "No limits reported" | one line
+current` (`plan`: "no plan" while unsubscribed, since the saved plan is the
+token document's stale claim); "Usage not probed yet" | note or "No limits reported" | one line
 per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
 "2 limit resets available" while `resets` > 0; "Probed 12 min ago"; then "Click to log in to this account again" (dead) or
 "Click to switch <title> to this account" (not active).
@@ -958,7 +968,7 @@ default 120, min 15).
   `use(p, name)` — a dead row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
   probes every provider and counts accounts per outcome: refreshed (the
-  provider answered: record `ok` or `unknown`), waiting (record `expired`
+  provider answered: record `ok`, `unknown` or `unsubscribed`), waiting (record `expired`
   on a row probed as live: its CLI refreshes the token, kiba never does),
   failed (record `expired` on a saved row, `error` or `revoked`: no fresh
   usage), removed (`.revoked`) and not probed (a row shown with no
@@ -1049,7 +1059,7 @@ against the window background and 3:1 against the raised track.
 |---------|-----------|-----------|-----------------|----------------|-----|
 | `room`  | `#1F7F52` | `#4FC08A` | `#0F5132`       | `#6FD9A4`      | segments half or more full; the dot of a usable account |
 | `low`   | `#9E6A0E` | `#E2A93B` | `#6B4700`       | `#F2C263`      | segments under half |
-| `out`   | `#B52F2F` | `#F07070` | `#8F1F1F`       | `#FFAAAA`      | "limit", "log in again", errors, the red dot, Forget, the urgent icon |
+| `out`   | `#B52F2F` | `#F07070` | `#8F1F1F`       | `#FFAAAA`      | "limit", "log in again", "no plan", errors, the red dot, Forget, the urgent icon |
 | `track` | quaternary label color | quaternary label color | tertiary label color | tertiary label color | empty reservoir |
 
 The rest are system colors, which follow every appearance themselves:
@@ -1071,8 +1081,9 @@ size (macOS has no Dynamic Type; the panel claims no text scaling): title
 `.subheadline.monospacedDigit()` in `ink`; the badge's count
 `.caption.bold().monospacedDigit()`. Section headers are accessibility
 headings. Text is never colored by usage
-state: the bars carry the color, and only "limit" and "log in again" (plan
-text and figures of a blocked or dead row) are `out`. Rows and actions are
+state: the bars carry the color, and only "limit", "log in again" and "no
+plan" (plan text and figures of a blocked, dead or unsubscribed row) are
+`out`. Rows and actions are
 `Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
 is `Button("Add Claude Code account", systemImage: "plus")` (the
 provider's title), `.iconOnly`, `.accessoryBar` style. Reduce Transparency swaps the popover material for
@@ -1116,12 +1127,13 @@ each segment in its own color: `room` with half or more left, `low` under
 half (`Rows.isLow`); a remainder too thin to see still draws a sliver as
 wide as the bar is tall. The track is always grey. The bar shows the
 **usable** limit left: when the account cannot take work (`Rows.usable`
-false: a window at its limit, or dead) it is drained, every segment an
+false: a window at its limit, dead, or without a plan) it is drained, every segment an
 empty track, because a limited account has no usable limit left whatever
 its other windows hold. A row with no figures yet (unknown usage) shows two
 empty tracks, session and week, so the bar is never missing. The verdict is
 the **status dot** before the name (8 pt): `room` green when the account
-can take work (ok or tight), `out` red when it is limited or dead, `idle`
+can take work (ok or tight), `out` red when it is limited, dead or without
+a plan, `idle`
 grey while unknown;
 under Differentiate Without Color it is a check, cross, or question mark
 symbol. The
@@ -1158,10 +1170,11 @@ name alone gives way,
 laid out first (`layoutPriority`) with every point they leave and shortened
 in the middle ("nfnht45…leid.com") so both ends still name the account, as
 the original kiba did. The whole name is in the tooltip and the VoiceOver
-label. Blocked and dead names are `idle`; blocked figures read
-`limit`; dead plan text carries "log in again". VoiceOver reads a row as
+label. Blocked, dead and unsubscribed names are `idle`; blocked figures
+read `limit`; dead plan text carries "log in again"; an unsubscribed row's
+plan text is "no plan", never the saved plan. VoiceOver reads a row as
 one button: label "<Provider>: <name>" plus ", current account"; value the
-plan, the verdict ("has room"; "limit reached, resets in 5 h 12 min";
+plan (none while unsubscribed), the verdict ("has room"; "limit reached, resets in 5 h 12 min";
 "login required, log in again"; "usage not probed yet", the record's note,
 or "no limits reported"), each window "<label>: 72% left", and "probed 12
 min ago"; hint "Switches <Provider> to this account" (none on the active

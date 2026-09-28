@@ -474,6 +474,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     /// A rejected access token the provider has not revoked: it earns a refresh.
     static let rejected = answer(Status.unauthorized, #"{"error":{"code":"token_expired"}}"#)
     static let down = HTTPOutcome.unreachable("host down")
+    /// Anthropic's answer for an organization whose subscription lapsed.
+    static let noOAuth = #"{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_visibility":"user_facing","error_code":"oauth_not_allowed_for_organization"}}}"#
+    static let noPlan = "no plan for Claude Code: Anthropic does not allow this organization's OAuth login"
 
     static let all = [
         ProbeCase(provider: .claude, login: stale, answers: [answer(Status.badRequest, #"{"error":"invalid_grant"}"#)],
@@ -484,6 +487,10 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
                   state: .error, note: "Anthropic's usage endpoint could not be reached"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],
                   state: .error, note: "Anthropic is rate limiting usage checks; try again later"),
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, noOAuth)],
+                  state: .unsubscribed, note: noPlan),
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, "{}")],
+                  state: .error, note: "Anthropic's usage endpoint answered 403"),
         ProbeCase(provider: .codex, login: auth, answers: [rejected, answer(Status.badRequest, #"{"error":"invalid_grant"}"#)],
                   state: .expired, note: "access token rejected and the refresh was refused; log in again"),
         ProbeCase(provider: .codex, login: auth, answers: [rejected, down],
@@ -664,6 +671,46 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             Figure(label: "Opus Weekly", left: 60),
         ])
     }
+}
+
+/// A lapsed subscription: Anthropic answers the usage check with a 403 that
+/// bars the organization from OAuth. The row reads "no plan" in place of the
+/// plan the token document still claims, cannot take work, and the probe
+/// counts it as answered, not failed.
+@MainActor @Test func rowsShowNoPlanWhenTheSubscriptionLapsed() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let ax = try slot("a@x")
+    let prof = profile("a@x", org: "org-a")
+    let creds = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: creds, profile: prof)
+    try w.writeClaude(config: claudeConfig(prof), creds: creds)
+    let http = StubHTTP([answer(Status.forbidden, ProbeCase.noOAuth)])
+    let core = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:])))
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.message == "Usage refreshed for 1 account")
+    #expect(model.note == "")
+    #expect(model.error == "")
+    #expect(model.iconValue.contains("Claude Code: none left"))
+
+    let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+    let a = try #require(claude?.accounts.first)
+    let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
+    #expect(a.active)
+    #expect(a.usage == UsageRecord(fetchedAt: Fixed.now, state: .unsubscribed, note: ProbeCase.noPlan, limits: []))
+    #expect(Rows.state(a.usage, active: true) == .unsubscribed)
+    #expect(Rows.usable(.unsubscribed) == false)
+    #expect(Rows.rank(.unsubscribed) == Rows.rank(.dead))
+    #expect(Rows.planText(a, now: now) == "(no plan)")
+    #expect(Rows.figuresText(a.usage) == "")
+    #expect(Rows.tooltip(.claude, a, now: now) == ["a@x · no plan · current", ProbeCase.noPlan, "Probed just now"])
 }
 
 /// A probed row's hover lines count the limit resets it offers, after its
@@ -1406,6 +1453,7 @@ enum Status {
     static let ok = 200
     static let badRequest = 400
     static let unauthorized = 401
+    static let forbidden = 403
     static let tooMany = 429
     static let serverError = 500
 }

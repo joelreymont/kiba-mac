@@ -43,6 +43,7 @@ enum HTTPStatus {
     static let ok = 200
     static let badRequest = 400
     static let unauthorized = 401
+    static let forbidden = 403
     static let tooManyRequests = 429
     /// A token endpoint's refusal of the grant: the only proof a saved login is gone.
     static let refusals = [badRequest, unauthorized]

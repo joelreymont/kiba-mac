@@ -37,11 +37,20 @@ public struct ClaudeProbe: Sendable {
             return done(.ok, "", limits(body), resets(body))
         case HTTPStatus.unauthorized:
             return done(.expired, Note.rejected)
+        case HTTPStatus.forbidden where Self.noPlan(r.body):
+            return done(.unsubscribed, Note.unsubscribed)
         case HTTPStatus.tooManyRequests:
             return done(.error, Note.throttled)
         default:
             return done(.error, ProbeNote.answered(Note.usage, r.status))
         }
+    }
+
+    /// The usage endpoint's 403 for an organization whose plan does not
+    /// allow Claude Code's OAuth: a lapsed subscription answers so, while
+    /// the token document still claims the old plan.
+    private static func noPlan(_ body: Data) -> Bool {
+        JSONFields(body)?.obj(Fail.error)?.obj(Fail.details)?.str(Fail.code) == Fail.noOAuth
     }
 
     /// Spends one limit reset of `offer` for the organization `org`. A saved
@@ -258,6 +267,15 @@ public struct ClaudeProbe: Sendable {
         static let sessionWord = "Session"
     }
 
+    /// Members of an error answer.
+    private enum Fail {
+        static let error = "error"
+        static let details = "details"
+        static let code = "error_code"
+        /// The organization has no plan Claude Code may use.
+        static let noOAuth = "oauth_not_allowed_for_organization"
+    }
+
     /// Names in the limit-reset exchange, as Claude Code's parser reads them:
     /// the usage query flags and answer blocks, and the reset request and answer.
     private enum Reset {
@@ -304,6 +322,7 @@ public struct ClaudeProbe: Sendable {
         static let refused = "access token expired and the refresh was refused; log in again"
         static let rejected = "login rejected by Anthropic; log in again"
         static let throttled = "Anthropic is rate limiting usage checks; try again later"
+        static let unsubscribed = "no plan for Claude Code: Anthropic does not allow this organization's OAuth login"
         static let resetThrottled = "Anthropic is rate limiting limit resets; try again later"
     }
 }

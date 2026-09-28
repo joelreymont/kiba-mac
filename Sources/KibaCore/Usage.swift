@@ -35,6 +35,8 @@ public struct ResetOffer: Codable, Equatable, Sendable {
 /// What the last probe learned about a saved login.
 public enum UsageState: String, Codable, Sendable {
     case ok, expired, revoked, error, unknown
+    /// The login works, but the organization has no plan the CLI may use.
+    case unsubscribed
 }
 
 /// A saved account's `usage.json`: the result of its last probe.

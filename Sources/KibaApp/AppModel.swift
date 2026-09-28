@@ -271,11 +271,11 @@ final class AppModel {
     }
 
     /// The current account's headline room; nothing usable while a window is
-    /// used up or the login is gone.
+    /// used up, the login is gone, or the organization has no plan.
     private static func cell(_ p: ProviderStatus?) -> Gauge.Cell {
         guard let a = p?.accounts.first(where: \.active) else { return .unknown }
         switch Rows.state(a.usage, active: true) {
-        case .blocked, .dead: return .spent
+        case .blocked, .dead, .unsubscribed: return .spent
         case .unknown: return .unknown
         case .ok, .tight:
             guard let h = Rows.headline(a.usage) else { return .unknown }
@@ -790,7 +790,7 @@ final class AppModel {
                     case .record(let u, _):
                         records[p, default: [:]][a.name] = u
                         switch u.state {
-                        case .ok, .unknown:
+                        case .ok, .unknown, .unsubscribed:
                             refreshed += 1
                         case .expired where a.live:
                             waiting += 1

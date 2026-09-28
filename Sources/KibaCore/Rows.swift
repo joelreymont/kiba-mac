@@ -10,6 +10,8 @@ public enum RowState: Sendable {
     case blocked
     /// The saved login no longer works.
     case dead
+    /// The organization has no plan the CLI may use.
+    case unsubscribed
     /// No usage data.
     case unknown
 }
@@ -74,6 +76,7 @@ public enum Rows {
 
     public static func state(_ u: UsageRecord?, active: Bool) -> RowState {
         if dead(u, active: active) { return .dead }
+        if u?.state == .unsubscribed { return .unsubscribed }
         guard let u, !u.limits.isEmpty else { return .unknown }
         if u.limits.contains(where: { $0.percent >= Level.full }) { return .blocked }
         if let h = headline(u), Level.full - h.percent < Level.half { return .tight }
@@ -85,12 +88,13 @@ public enum Rows {
         return .ok
     }
 
-    /// Room first, then running low, then used up or dead, then unknown.
+    /// Room first, then running low, then used up, dead or without a plan,
+    /// then unknown.
     public static func rank(_ s: RowState) -> Int {
         switch s {
         case .ok: return Rank.ok
         case .tight: return Rank.tight
-        case .blocked, .dead: return Rank.out
+        case .blocked, .dead, .unsubscribed: return Rank.out
         case .unknown: return Rank.unknown
         }
     }
@@ -131,7 +135,7 @@ public enum Rows {
     public static func usable(_ s: RowState) -> Bool? {
         switch s {
         case .ok, .tight: return true
-        case .blocked, .dead: return false
+        case .blocked, .dead, .unsubscribed: return false
         case .unknown: return nil
         }
     }
@@ -142,10 +146,18 @@ public enum Rows {
         return figures(u).map { "\($0.left)%" }.joined(separator: Copy.figureSep)
     }
 
-    /// `"(pro)"`, `"(pro, 5d)"` while blocked, `"(pro, log in again)"` when dead, or "".
+    /// The saved plan, or "no plan" for an unsubscribed row: the token
+    /// document still claims the plan the organization no longer has.
+    public static func plan(_ a: Account) -> String {
+        a.usage?.state == .unsubscribed ? Copy.noPlan : a.plan
+    }
+
+    /// `"(pro)"`, `"(pro, 5d)"` while blocked, `"(pro, log in again)"` when
+    /// dead, `"(no plan)"` when unsubscribed, or "".
     public static func planText(_ a: Account, now: Date) -> String {
         var parts: [String] = []
-        if !a.plan.isEmpty { parts.append(a.plan) }
+        let label = plan(a)
+        if !label.isEmpty { parts.append(label) }
         if let b = blocking(a.usage) {
             let when = resetShort(b.resetsAt, now: now)
             if !when.isEmpty { parts.append(when) }
@@ -158,7 +170,8 @@ public enum Rows {
     /// probe age, what a click does.
     public static func tooltip(_ p: Provider, _ a: Account, now: Date) -> [String] {
         var head = a.name.raw
-        if !a.plan.isEmpty { head += Copy.lineSep + a.plan }
+        let label = plan(a)
+        if !label.isEmpty { head += Copy.lineSep + label }
         if a.active { head += Copy.lineSep + Copy.current }
         var lines = [head]
         if let u = a.usage {
@@ -282,6 +295,7 @@ public enum Rows {
     private enum Copy {
         static let limit = "limit"
         static let again = "log in again"
+        static let noPlan = "no plan"
         static let current = "current"
         static let unprobed = "Usage not probed yet"
         static let noLimits = "No limits reported"
