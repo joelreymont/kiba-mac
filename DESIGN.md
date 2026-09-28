@@ -62,6 +62,7 @@ public enum KibaError: Error, Equatable {
   case mixed                         // live Claude config and tokens name different accounts
   case superseded                    // another Claude install noted its own pending marker first
   case unrepaired(Provider, String)  // this install is still pending: nothing is probed or refreshed until a switch completes
+  case unrestored(Provider)          // an add's record of the live item waits: nothing is saved, switched or probed until it is settled
   case orphanLive(URL)               // Claude creds exist but the config naming their account is missing
   case capacity(String)              // >9 logins under one email, doc over 4 MiB
   case unsafePath(URL)               // symlink chain longer than 8 hops or ends in a link
@@ -300,7 +301,7 @@ no slot directories, no markers: a write transaction is the mutex and every
 row is whole or absent.
 
 ```sql
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 CREATE TABLE IF NOT EXISTS account (
   provider TEXT NOT NULL,          -- "claude" | "codex"
   name     TEXT NOT NULL,          -- SlotName.raw
@@ -323,7 +324,8 @@ CREATE TABLE IF NOT EXISTS pending (
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS adding (
   provider TEXT PRIMARY KEY,       -- row absent: no add in flight
-  live     BLOB                    -- the live Keychain item before the add's login; NULL: there was none
+  live     BLOB,                   -- the live Keychain item before the add's login; NULL: there was none
+  service  TEXT NOT NULL           -- the Keychain service that item is filed under (paths.keychainService then)
 ) WITHOUT ROWID;
 ```
 
@@ -336,7 +338,7 @@ public struct SavedLogin: Equatable, Sendable {
   public var usage: UsageRecord?
 }
 
-public struct LiveItem: Equatable, Sendable { public var bytes: Data? }   // nil: no item
+public struct LiveItem: Equatable, Sendable { public var bytes: Data?; public var service: String }   // bytes nil: no item
 
 public struct Store: Sendable {
   public init(paths: Paths) throws                 // mkdir store 0700; open/create db 0600; apply schema
@@ -382,7 +384,11 @@ the transaction.
 `init` applies the schema in one `write`. A version 1 store (its `pending`
 table has no `owner`: `pragma_table_info` finds none) gains the column by
 `ALTER TABLE pending ADD COLUMN owner TEXT`; every row is kept, and a marker
-it holds, owned by no install, stays until an install replaces it.
+it holds, owned by no install, stays until an install replaces it. A version
+1 or 2 store (its `adding` table has no `service`) gains that column by
+`ALTER TABLE adding ADD COLUMN service TEXT NOT NULL DEFAULT ''`, then every
+row gets the launch's `paths.keychainService`: an older build always put the
+item back there, so that is what its record meant.
 
 `liveName` (kiba `LIVE-NAME`): candidates `email`, `email #2` … `email #9`.
 For each: no row → first free candidate remembered; row exists and its org
@@ -395,7 +401,8 @@ return that row's name. Return the first free; none → `capacity`.
 public struct ClaudeLive {
   public init(paths: Paths, store: Store, secrets: SecretStore)   // secrets = ClaudeSecrets.live(...)
   public func identity() throws -> Identity?     // nil when no creds; orphanLive when creds exist without a config
-  func login() throws -> LoginRead?              // one read: identity, login = creds bytes, profile = exact oauthAccount object bytes; nil as identity
+  func login() throws -> LoginRead?              // one read of live(), then decode; nil as identity
+  static func decode(_ config: Data, _ creds: Data) throws -> LoginRead   // identity, login = creds bytes, profile = exact oauthAccount object bytes
   public func install(_ n: SlotName) throws
   public func isMixed() throws -> Bool
 }
@@ -429,12 +436,15 @@ leaves it pending, and a pending install is mixed whatever the tokens are,
 so a refresh by Claude Code cannot make the next save-back file one
 account's tokens under another's name.
 
-`isMixed` (kiba `CLAUDE-MIXED?`): the live login is read first, so
-`orphanLive` propagates whether or not an install is pending. Then a
-pending install → true. Else `installed` names row S and S exists and
-there is a live login and the live config does NOT name S (email differs,
-or both orgs known and differ) and the live creds bytes equal S's login
-bytes → true. The next successful install clears it.
+`isMixed` (kiba `CLAUDE-MIXED?`): the live config and credentials are read
+first, raw (`live()`), so `orphanLive` propagates whether or not an install
+is pending. Then a pending install → true, whatever the files hold: a
+config that names no account, such as the `{}` a failed install over a
+signed-out config puts back, is the install's to repair, not `badJSON`.
+Only then is the config decoded, for this comparison: `installed` names
+row S and S exists and there is a live login and the live config does NOT
+name S (email differs, or both orgs known and differ) and the live creds
+bytes equal S's login bytes → true. The next successful install clears it.
 
 Reading the live login (`identity`, `save`, `isMixed`): no credentials → no
 live login (nil). Credentials without a config → `orphanLive(config path)`:
@@ -536,7 +546,9 @@ A pending Claude repair stops all Claude probes and refreshes until `use`
 completes it: a failed install can leave one saved login's credentials
 live under another's restored config, and a later failed repair can rename
 the marker, so no saved name is known not to be live. `probeAll` probes
-nothing and `redeem` refuses, both with `unrepaired(name)`. Only the probe
+nothing and `redeem` refuses, both with `unrepaired(name)`. An add's
+record of the live item does the same, with `unrestored`, until
+`LoginRunner` settles it (see Switcher). Only the probe
 `LoginRunner` runs after an import goes on: it reads the login just signed
 in, whose tokens are not the live ones.
 
@@ -673,13 +685,14 @@ every probe outcome and refreshed login is written only while the row still
 holds the login bytes it was read with (compared inside the `write`); a row
 replaced or forgotten meanwhile is never updated or removed.
 
-- `save`: inside one `store.write`, `isMixed` → `mixed`; the provider's
-  `login()` nil → nil; else `liveName` from its identity and `put` of its
-  bytes. One read chooses the slot for the very bytes saved, so a login the
-  CLI rewrites meanwhile cannot land under another account's name; the
-  write lock holds off another process's install, which writes both live
-  files in one transaction, so the check and the read never see half of
-  it. The save-backs of `use` and `probeAll` run the same way.
+- `save`: inside one `store.write`, an `adding` record → `unrestored`;
+  `isMixed` → `mixed`; the provider's `login()` nil → nil; else `liveName`
+  from its identity and `put` of its bytes. One read chooses the slot for
+  the very bytes saved, so a login the CLI rewrites meanwhile cannot land
+  under another account's name; the write lock holds off another process's
+  install, which writes both live files in one transaction, so the checks
+  and the read never see half of it. The save-backs of `use` and
+  `probeAll` run the same way.
 - `use`: save-back (skip when mixed; save when a live identity exists),
   then `noteInstalled` the saved-back name, whose login the live files
   hold, so a crash between the install's two live writes leaves a pending
@@ -701,20 +714,30 @@ replaced or forgotten meanwhile is never updated or removed.
   not written and not in it, nor is one whose write failed, which
   `providerError` names ("<name>: usage not recorded: <reason>"). A pending
   Claude install stops it before any probe: `unrepaired` is the
-  `providerError` (the `saveBackError` is `mixed`).
+  `providerError` (the `saveBackError` is `mixed`). An `adding` record
+  stops it the same way: `unrestored` is both.
 - `redeem`: `noAccount` without the row; `noResets` unless its
   `usage.resets.count > 0`. `live` = `n` in `liveNames(p, mixed:
   isMixed(p))`, as `probeAll` decides it; `unrepaired` while a Claude
-  install is pending. The provider's `redeem`; a changed
-  doc is stored with `setLogin`, while the row still holds the login it
-  refreshed, before the result is read (a refresh spends the old grant); a
-  failure throws; after a 200, `probe(p, n, live:)` so the
-  row's usage and offer show the result, then the outcome.
+  install is pending, `unrestored` while an `adding` record waits. The
+  provider's `redeem`; a changed doc is stored with `setLogin`, while the
+  row still holds the login it refreshed, before the result is read (a
+  refresh spends the old grant); a failure throws; after a 200,
+  `probe(p, n, live:)` so the row's usage and offer show the result, then
+  the outcome.
 - `importInTurn` (internal; only `add` calls it, in its turn): reads the
   login once from the throwaway root (Claude: config at
   `root/.claude/.claude.json` and `claudeCreds` bytes; Codex:
   `root/.codex/auth.json`), `liveName` and `put`, all inside one
   `store.write`. `noLive` when nothing is there.
+
+While `store.adding(p)` holds a record, the save-back and `liveNames`
+throw `unrestored`, so `save`, `use` and `redeem` refuse and `probeAll`
+probes nothing: the live item may still hold what that add's login wrote,
+which no saved name owns, and the next `recover` would write the old bytes
+over any switch made meanwhile. `LoginRunner.init` or the next Claude `add`
+settles the record. `add`'s own `importInTurn` and `probeInTurn` never
+check it, and `StatusReader` reads no markers.
 
 ### Status
 
@@ -806,11 +829,13 @@ login item inherits only the system default PATH, which lacks the CLIs.
 
 `init` undoes an add the app did not live to finish before anything reads
 the live login: when `store.adding(.claude)` holds a record, it stops that
-login if it still runs, puts the live item back as in 5 with `before` taken
-as absent (no snapshot of the login's item outlives the app), and removes
-`paths.loginRoot(.claude)`. A Claude `add` does the same first, in its
-turn, so the record a failed stop (4) kept is put back before its own
-snapshot (3) replaces it.
+login if it still runs, puts the recorded item back as in 5, judged by
+what the login left in `paths.loginRoot(.claude)` (a missing root shows
+nothing, so the item stays), and removes that root. A Claude `add` does
+the same first, in its turn, so the record a failed stop (4) or restore
+(5) kept is settled before its own snapshot (3) replaces it. Until then
+`Switcher` saves, switches, probes and redeems no Claude login
+(`unrestored`).
 
 `add` holds a per-provider lease from its first line to its return, across
 every await. Every login of a provider uses the same root, so a second `add`
@@ -849,40 +874,48 @@ the held turn shows nowhere.
    earlier add wrote, which Terminal may start only once root was made
    again, from running in the new root. The hard link publishes the pid
    whole and fails when the name exists, so a stop can claim it first.
-3. Claude only: snapshot `before`, the bytes of the login's item
-   (`keychain.item(paths.loginService)`, nil when absent), and `old`, the
-   live item's bytes (`KeychainItem.read()`). Commit
-   `tx.noteAdding(.claude, LiveItem(bytes: old))` before the launch.
+3. Claude only: remove the login's item
+   (`keychain.item(paths.loginService)`), which an earlier add killed
+   before its removal, or whose import failed (7), may have left: the login
+   home's fixed path always names the same item, and bytes found there
+   after the launch must be this login's. Snapshot `old`, the live item's
+   bytes (`KeychainItem.read()`) and service (`paths.keychainService`).
+   Commit `tx.noteAdding(.claude, LiveItem(bytes: old, service:))` before
+   the launch.
 4. `terminal.open(script)`, then wait for `root/exit` (directory watch via
    `DispatchSource`, plus a 1 s poll as belt and braces). A wait that ends
    without a status (the task was cancelled, the file is unreadable) or a
    failed open stops the login; its error is thrown after 5. A stop that
    fails throws at once: the login may still run, so root and the `adding`
    record stay for the next start or Claude `add`.
-5. Claude only, whatever 4 ended in: put the live item back when the login
-   wrote it, which it did only when it filed its credentials nowhere in its
-   own home (6a and 6b find nothing). Then live bytes that differ from
-   `old` are kept as `written`, and `old` is written back (the item removed
-   when `old` is nil). Otherwise a changed live item is Claude Code's own
-   refresh and stays: with `CLAUDE_CONFIG_DIR` set, 2.1.282 files a login
-   under `paths.loginService` and never writes the live item, and stale
-   tokens written over a refresh could end the live login. Then
-   `tx.clearAdding`. A restore that fails leaves the record for the next
-   start. Then a non-zero status → `loginFailed`.
+5. Claude only, whatever 4 ended in: put the live item back only on the
+   login's evidence that it wrote it, as an old CLI did: it completed
+   (`root/.claude/.claude.json` holds a top-level `oauthAccount` object; a
+   config that is not JSON is no evidence and counts as none, so a broken
+   one never blocks a start) and filed nothing of its own (6a and 6b
+   find nothing). Then the bytes of `old.service`'s item, when they differ
+   from `old`, are kept as `written`, and `old` is written back to that
+   item (removed when `old` is nil). In every other case the live item
+   stays whatever it holds: a change is Claude Code's own refresh. With
+   `CLAUDE_CONFIG_DIR` set, 2.1.282 files a login under
+   `paths.loginService` and never writes the live item, and stale tokens
+   written over a refresh could end the live login. Then `tx.clearAdding`.
+   A restore that fails throws and keeps root and the record, the evidence
+   and the bytes the next start or Claude `add` restores by. Then a
+   non-zero status → `loginFailed`.
 6. Locate the new credentials (Claude), reading only, first hit wins:
    a. `root/.claude/.credentials.json` exists → its bytes.
-   b. the login's item holds bytes that differ from `before` → those
-      bytes; the item is the source. Content, not existence: the login
-      home's fixed path always names the same item, and an earlier add
-      killed before its removal leaves that item behind.
+   b. the login's item holds bytes → those bytes; the item is the source.
+      3 emptied it, so they are this login's.
    c. `written` → the login wrote the live item and nothing else (5).
    d. → `loginProducedNothing`.
 7. `switcher.importInTurn(p, root, claudeCreds)`. Only once it has committed
    are the source item (6b) deleted and root removed: a failed import leaves
-   both in place and throws its error. Then probe the new account
-   (`probeInTurn`, `live: false`) and `write` its usage. `differs` =
-   expected email given and `saved.email != expected`. Any failure before 7
-   removes root, except a stop that fails (4).
+   both in place and throws its error, until the next add (1, 3) removes
+   them. Then probe the new account (`probeInTurn`, `live: false`) and
+   `write` its usage. `differs` = expected email given and `saved.email !=
+   expected`. Any failure before 7 removes root, except a stop (4) or a
+   restore (5) that fails.
 
 Stopping a login: claim `root/pid` by an exclusive create. When that
 succeeds the script has not filed its pid and, its link failing, exits
@@ -895,11 +928,16 @@ after 5 s.
 
 The live login is never read by the provider's login command and never
 revoked: the throwaway home guarantees that on Codex; on Claude the restore
-in 5 covers a login that writes the live item on every outcome, and the
-`adding` record carries it across a crash to the next start. Credentials a
-login wrote only over the live item (6c) are lost when the import fails: the
-live login comes first. Keeping them is not worth more machinery: only an
-old CLI writes there, and what such a failure loses is the new login, which
+in 5 covers a login that writes the live item, whatever its exit status,
+and the `adding` record carries the old bytes and their service across a
+crash to the next start, which writes them back to that service whatever
+`CLAUDE_CONFIG_DIR` it runs with. The login's own home is the evidence, so
+a live change without it, a refresh by Claude Code, is never undone. The
+residual: an old CLI killed between writing the live tokens and writing its
+config leaves no evidence, and its write stays. Credentials a login wrote
+only over the live item (6c) are lost when the import fails: the live login
+comes first. Keeping them is not worth more machinery: only an old CLI
+writes there, and what such a failure loses is the new login, which
 another add redoes, never the live one.
 
 ## KibaApp

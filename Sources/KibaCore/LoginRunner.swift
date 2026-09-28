@@ -14,9 +14,11 @@ public protocol Keychain: Sendable {
 /// what it produced (kiba `add`). The live login is never read by the login
 /// command and never revoked: the throwaway home keeps Codex away from it, and
 /// a Claude login that overwrites the live Keychain item, as only an old CLI
-/// does, gets it written back whatever the outcome. The old bytes wait in the
-/// store until they are back, so an add the app does not live to finish is
-/// undone at the next start.
+/// does, gets it written back, whatever its exit status, once its home shows
+/// it did: it completed and filed nothing of its own. The old bytes and their
+/// service wait in the store until then, so an add the app does not live to
+/// finish is undone at the next start, and no switch, save or probe of Claude
+/// runs meanwhile.
 public actor LoginRunner {
     let paths: Paths
     let switcher: Switcher
@@ -45,10 +47,12 @@ public actor LoginRunner {
     /// snapshot of the live login and the probe of the new one. `differs`
     /// when `email` was given and another account signed in; `loginRunning`
     /// while another add for `p` waits on its login. A failure removes the
-    /// throwaway home, except where the login may still run or the import
-    /// failed: the login's source goes only once the import has committed.
-    /// A Claude add first undoes the one a failed stop left, as `init` does,
-    /// so the record of the live item is put back before a new one replaces it.
+    /// throwaway home, except where the login may still run, the live item
+    /// could not be put back, or the import failed: the home is the evidence
+    /// the next start restores by, and the login's source goes only once the
+    /// import has committed. A Claude add first undoes the one a failed stop
+    /// or restore left, as `init` does, so the record of the live item is
+    /// settled before a new one replaces it.
     public func add(_ p: Provider, expected email: String?) async throws -> AddResult {
         guard running.insert(p).inserted else { throw KibaError.loginRunning(p) }
         defer { running.remove(p) }
@@ -58,9 +62,9 @@ public actor LoginRunner {
         defer { ops.leave() }
         if p == .claude { try recover() }
         let root = paths.loginRoot(p)
-        let snap = try Self.removing(root) { try prepare(p, cli: cli, email: email, root: root) }
+        let old = try Self.removing(root) { try prepare(p, cli: cli, email: email, root: root) }
         let ended = try await run(root)
-        let found = try Self.removing(root) { try settle(snap, ended, root: root) }
+        let found = try settle(old, ended, root: root)
         let saved = try switcher.importInTurn(p, root: root, claudeCreds: found.creds)
         try found.item?.remove()
         try PrivateFS.removeTree(root)
@@ -69,10 +73,12 @@ public actor LoginRunner {
     }
 
     /// Makes the throwaway home afresh with this run's nonce and the login
-    /// script. For Claude, snapshots the login's own item and the live one,
-    /// whose bytes stay in the store from before the launch until they are
-    /// back; nil for Codex, whose login cannot reach the live one.
-    func prepare(_ p: Provider, cli: URL, email: String?, root: URL) throws -> Snapshot? {
+    /// script. For Claude, removes the item an earlier add may have left
+    /// under the login's service, so any found there later is this login's,
+    /// and snapshots the live item, whose bytes and service stay in the store
+    /// from before the launch until they are settled; nil for Codex, whose
+    /// login cannot reach the live one.
+    func prepare(_ p: Provider, cli: URL, email: String?, root: URL) throws -> LiveItem? {
         try PrivateFS.removeTree(root)
         let home = p == .claude ? paths.claudeConfigDir(root: root) : paths.codexHome(root: root)
         try PrivateFS.ensurePrivateDir(home)
@@ -83,25 +89,31 @@ public actor LoginRunner {
         try PrivateFS.writePrivate(Data(text.utf8), to: script)
         guard chmod(script.path, Self.scriptMode) == 0 else { throw KibaError.io(PrivateFS.failure("chmod", script.path)) }
         guard p == .claude else { return nil }
-        let snap = Snapshot(before: try loginItem.read(), old: LiveItem(bytes: try liveItem.read()))
-        try switcher.store.write { try $0.noteAdding(.claude, snap.old) }
-        return snap
+        try loginItem.remove()
+        let old = LiveItem(bytes: try liveItem.read(), service: paths.keychainService)
+        try switcher.store.write { try $0.noteAdding(.claude, old) }
+        return old
     }
 
     /// Once the login has ended: puts the live Claude item back when the
-    /// login wrote it, throws why the login failed, then finds what it
-    /// produced.
-    func settle(_ snap: Snapshot?, _ ended: Result<Int32, any Error>, root: URL) throws -> Found {
-        guard let snap else {
-            try Self.check(ended)
-            return Found(creds: nil, item: nil)
+    /// login wrote it, then throws why the login failed or finds what it
+    /// produced. A throw before the live item is settled keeps the home for
+    /// the next start; any later one removes it.
+    func settle(_ old: LiveItem?, _ ended: Result<Int32, any Error>, root: URL) throws -> Found {
+        guard let old else {
+            return try Self.removing(root) {
+                try Self.check(ended)
+                return Found(creds: nil, item: nil)
+            }
         }
-        let own = try filed(root: root, before: snap.before)
-        let written = try restore(snap.old, filed: own != nil)
-        try Self.check(ended)
-        if let own { return own }
-        guard let written else { throw KibaError.loginProducedNothing(.claude) }
-        return Found(creds: written, item: nil)
+        let own = try filed(root: root)
+        let written = try restore(old, wrote: own == nil && completed(root: root))
+        return try Self.removing(root) {
+            try Self.check(ended)
+            if let own { return own }
+            guard let written else { throw KibaError.loginProducedNothing(.claude) }
+            return Found(creds: written, item: nil)
+        }
     }
 
     /// Opens the login script in Terminal and waits for its exit status. A
@@ -140,31 +152,36 @@ public actor LoginRunner {
 
     /// Undoes an add the app did not live to finish, found by its record in
     /// the store: stops its login if that still runs, writes the live item
-    /// back unless the login filed credentials in its own home (its item
-    /// counts as absent before), and removes the throwaway home.
+    /// back when the throwaway home shows the login wrote it, and removes
+    /// that home. A missing home shows nothing.
     nonisolated func recover() throws {
         guard let old = try switcher.store.adding(.claude) else { return }
         let root = paths.loginRoot(.claude)
         try Self.stop(root)
-        try restore(old, filed: try filed(root: root, before: nil) != nil)
+        try restore(old, wrote: try filed(root: root) == nil && completed(root: root))
         try PrivateFS.removeTree(root)
     }
 
-    /// Writes the live Claude item back as `old` holds it (removes it when
-    /// there was none) when the login wrote it, then drops the store's record
-    /// of it. The login wrote it only when it `filed` its credentials nowhere
-    /// in its own home, as an old CLI did; Claude Code 2.1.282 files them
-    /// under `paths.loginService`, so a change beside them is its own refresh
-    /// of the live login, which stays. Returns the bytes the login left there.
+    /// Writes the item of `old.service` back as `old` holds it (removes it
+    /// when there was none) when the login `wrote` it and it changed, then
+    /// drops the store's record of it. The login wrote it only when it
+    /// completed and filed nothing of its own, as an old CLI did; Claude Code
+    /// 2.1.282 files a login under `paths.loginService`, so any other change
+    /// is its own refresh of the live login, which stays. Returns the bytes
+    /// the login left there.
     @discardableResult
-    nonisolated func restore(_ old: LiveItem, filed: Bool) throws -> Data? {
-        let now = try liveItem.read()
-        let wrote = !filed && now != old.bytes
+    nonisolated func restore(_ old: LiveItem, wrote: Bool) throws -> Data? {
+        var written: Data?
         if wrote {
-            if let bytes = old.bytes { try liveItem.write(bytes) } else { try liveItem.remove() }
+            let item = keychain.item(old.service)
+            let now = try item.read()
+            if now != old.bytes {
+                if let bytes = old.bytes { try item.write(bytes) } else { try item.remove() }
+                written = now
+            }
         }
         try switcher.store.write { try $0.clearAdding(.claude) }
-        return wrote ? now : nil
+        return written
     }
 
     /// The live Claude Keychain item.
@@ -172,13 +189,6 @@ public actor LoginRunner {
 
     /// The Keychain item a Claude login in the throwaway home writes.
     nonisolated var loginItem: any SecretStore { keychain.item(paths.loginService) }
-
-    /// The Claude items before the login: its own (`before`) and the live
-    /// one (`old`, in the store until it is back).
-    struct Snapshot {
-        let before: Data?
-        let old: LiveItem
-    }
 
     /// What a login produced: the Claude credentials, and the login's own
     /// Keychain item they came from, which goes once the import commits.
@@ -189,14 +199,26 @@ public actor LoginRunner {
 
     /// Where a Claude login filed its credentials in its own home, first hit
     /// wins: the config dir's `.credentials.json`; the login's own Keychain
-    /// item when it holds other bytes than `before`, since the login home's
-    /// fixed path always names the same item and an earlier add may have left
-    /// it behind. Nil when it filed none. Items of other config dirs are
-    /// never read: they refresh on their own.
-    nonisolated func filed(root: URL, before: Data?) throws -> Found? {
+    /// item, which `prepare` emptied before the launch. Nil when it filed
+    /// none. Items of other config dirs are never read: they refresh on
+    /// their own.
+    nonisolated func filed(root: URL) throws -> Found? {
         if let file = try PrivateFS.read(paths.claudeCredsFile(root: root)) { return Found(creds: file, item: nil) }
-        if let bytes = try loginItem.read(), bytes != before { return Found(creds: bytes, item: loginItem) }
+        if let bytes = try loginItem.read() { return Found(creds: bytes, item: loginItem) }
         return nil
+    }
+
+    /// Whether the Claude login in `root` completed: its home config holds a
+    /// top-level `oauthAccount` object. A config that is not JSON is no
+    /// evidence and counts as none: Claude Code writes its config whole, so a
+    /// broken one is a write that did not finish, and the live item stays.
+    nonisolated func completed(root: URL) throws -> Bool {
+        guard let config = try PrivateFS.read(paths.claudeConfigFile(root: root)) else { return false }
+        do {
+            return try JSONDoc(config).objectSpan(ClaudeIdentity.Key.account) != nil
+        } catch KibaError.badJSON {
+            return false
+        }
     }
 
     /// The login script Terminal runs: files its pid, exports the throwaway

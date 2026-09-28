@@ -22,12 +22,15 @@ public struct SavedLogin: Equatable, Sendable {
     }
 }
 
-/// A live Keychain item's bytes at one moment; nil when there was no item.
+/// A live Keychain item's bytes at one moment, and the service it is filed
+/// under then; nil bytes when there was no item.
 public struct LiveItem: Equatable, Sendable {
     public var bytes: Data?
+    public var service: String
 
-    public init(bytes: Data?) {
+    public init(bytes: Data?, service: String) {
         self.bytes = bytes
+        self.service = service
     }
 }
 
@@ -43,7 +46,7 @@ public struct Store: Sendable {
     static let suffixMark = " #"
     static let columns = "name, email, org, plan, login, profile, usage"
     static let schema = """
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
         CREATE TABLE IF NOT EXISTS account (
           provider TEXT NOT NULL,
           name     TEXT NOT NULL,
@@ -66,13 +69,20 @@ public struct Store: Sendable {
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS adding (
           provider TEXT PRIMARY KEY,
-          live     BLOB
+          live     BLOB,
+          service  TEXT NOT NULL
         ) WITHOUT ROWID;
         """
     /// A version 1 store's `pending` table lacks the owner column. Its marker
     /// is owned by no install, so it stays until an install replaces it.
     static let ownerColumn = "SELECT 1 FROM pragma_table_info('pending') WHERE name = 'owner'"
     static let addOwner = "ALTER TABLE pending ADD COLUMN owner TEXT"
+    /// A version 1 or 2 store's `adding` table lacks the service column. Its
+    /// build always put the item back under the launch's live service, so
+    /// that is what a record it left meant.
+    static let serviceColumn = "SELECT 1 FROM pragma_table_info('adding') WHERE name = 'service'"
+    static let addService = "ALTER TABLE adding ADD COLUMN service TEXT NOT NULL DEFAULT ''"
+    static let fillService = "UPDATE adding SET service = ?"
 
     /// Creates the store directory (0700) and the database (0600) when missing,
     /// and applies the schema in one transaction, adding what an older store lacks.
@@ -81,10 +91,19 @@ public struct Store: Sendable {
         try PrivateFS.ensurePrivateDir(paths.store)
         try write { tx in
             try tx.conn.exec(Self.schema, "schema")
-            var owned = false
-            try tx.conn.query(Self.ownerColumn, "schema", []) { _ in owned = true }
-            if !owned { try tx.conn.exec(Self.addOwner, "schema") }
+            if try !Self.found(tx, Self.ownerColumn) { try tx.conn.exec(Self.addOwner, "schema") }
+            if try !Self.found(tx, Self.serviceColumn) {
+                try tx.conn.exec(Self.addService, "schema")
+                try tx.run(Self.fillService, "schema", [.text(paths.keychainService)])
+            }
         }
+    }
+
+    /// Whether `sql` selects a row in `tx`.
+    static func found(_ tx: Tx, _ sql: String) throws -> Bool {
+        var hit = false
+        try tx.query(sql, "schema", []) { _ in hit = true }
+        return hit
     }
 
     /// The provider's saved logins, sorted by name.
@@ -139,8 +158,8 @@ public struct Store: Sendable {
     /// ran; nil when no add is in flight.
     public func adding(_ p: Provider) throws -> LiveItem? {
         var item: LiveItem?
-        try Connection(db).query("SELECT live FROM adding WHERE provider = ?", "adding", [.text(p.rawValue)]) {
-            item = LiveItem(bytes: $0.blob(0))
+        try Connection(db).query("SELECT live, service FROM adding WHERE provider = ?", "adding", [.text(p.rawValue)]) {
+            item = LiveItem(bytes: $0.blob(0), service: $0.text(1) ?? "")
         }
         return item
     }
@@ -277,13 +296,14 @@ public final class Tx {
     }
 
     /// Records an add's login as begun, with the live item it must leave as
-    /// it found; committed before the login is launched.
+    /// it found and the service that item is filed under; committed before
+    /// the login is launched.
     public func noteAdding(_ p: Provider, _ item: LiveItem) throws {
         try run(
             """
-            INSERT INTO adding (provider, live) VALUES (?, ?)
-            ON CONFLICT (provider) DO UPDATE SET live = excluded.live
-            """, "note adding", [.text(p.rawValue), .blob(item.bytes)])
+            INSERT INTO adding (provider, live, service) VALUES (?, ?, ?)
+            ON CONFLICT (provider) DO UPDATE SET live = excluded.live, service = excluded.service
+            """, "note adding", [.text(p.rawValue), .blob(item.bytes), .text(item.service)])
     }
 
     /// Nothing to do when no add is in flight.

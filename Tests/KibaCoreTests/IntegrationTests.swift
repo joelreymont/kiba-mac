@@ -194,6 +194,28 @@ import os
     }
 }
 
+@Test func switchRepairsInstallOverSignedOutConfig() async throws {
+    try await scratch { w in
+        let cx = try slot("c@x")
+        let profC = profile("c@x", org: "org-c")
+        let credsC = claudeCreds("xc", plan: "pro", expires: Fixed.now + Fixed.day)
+        try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"), login: credsC, profile: profC)
+        // An install of c@x over a signed-out config wrote the credentials,
+        // then failed and put the config back: it names no account.
+        let signedOut = Data("{}".utf8)
+        try w.writeClaude(config: signedOut, creds: credsC)
+        _ = try w.store.write { try $0.notePending(.claude, cx) }
+        let sw = w.switcher(StubHTTP([answer(Status.ok, claudeUsage(session: 10, week: 20))]))
+
+        try await sw.use(.claude, cx)
+
+        #expect(w.read(w.paths.claudeConfigFile(root: nil)) == Data(#"{"oauthAccount":"#.utf8) + profC + Data("}".utf8))
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsC)
+        #expect(try w.store.pending(.claude) == nil)
+        #expect(try sw.save(.claude) == cx)
+    }
+}
+
 @Test func unconfirmedSwitchStaysPending() async throws {
     try await scratch { w in
         let (ax, bx) = (try slot("a@x"), try slot("b@x"))
@@ -897,20 +919,34 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
-@Test func failedLoginPutsLiveItemBack() async throws {
+@Test func failedLoginUndoesOnlyItsOwnWrite() async throws {
     try await scratch { w in
-        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
-        let keychain = FakeKeychain(items: [w.paths.keychainService: MemorySecret(liveCreds)])
-        let live = keychain.item(w.paths.keychainService)
+        let live = MemorySecret(claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day))
+        let keychain = FakeKeychain(items: [w.paths.keychainService: live])
 
-        // A login that overwrites the live item and then fails.
+        // Claude Code refreshes the live item while a login fails before it
+        // completes: the refresh stays.
+        let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
         try w.fakeCLI("claude", "exit 3")
-        let failing = try w.runner(StubHTTP([]), keychain: keychain) {
+        let failing = try w.runner(StubHTTP([]), keychain: keychain) { try live.write(refreshed) }
+        await #expect(throws: KibaError.loginFailed(3)) { try await failing.add(.claude, expected: "x@y") }
+        #expect(try live.read() == refreshed)
+        #expect(try w.store.adding(.claude) == nil)
+
+        // An old CLI writes the live item and its home config, then fails:
+        // its write goes.
+        try w.fakeCLI("claude", """
+            printf '%s' '\(text(claudeConfig(profile("x@y", org: "org-x"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+            exit 3
+            """)
+        let legacy = try w.runner(StubHTTP([]), keychain: keychain) {
             try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
         }
-        await #expect(throws: KibaError.loginFailed(3)) { try await failing.add(.claude, expected: "x@y") }
-        #expect(try live.read() == liveCreds)
+        await #expect(throws: KibaError.loginFailed(3)) { try await legacy.add(.claude, expected: "x@y") }
+        #expect(try live.read() == refreshed)
         #expect(try w.store.adding(.claude) == nil)
+        #expect(try w.store.list(.claude).isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.claude).path))
     }
 }
 
@@ -956,17 +992,15 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
-@Test func cancelledAddStopsLoginAndPutsLiveItemBack() async throws {
+@Test func cancelledAddStopsLoginAndKeepsLiveItem() async throws {
     try await scratch { w in
-        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
-        let keychain = FakeKeychain(items: [w.paths.keychainService: MemorySecret(liveCreds)])
-        let live = keychain.item(w.paths.keychainService)
-        // A login that overwrites the live item, then waits on the browser.
+        let live = MemorySecret(claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day))
+        let keychain = FakeKeychain(items: [w.paths.keychainService: live])
+        // Claude Code refreshes the live item while the login waits on the browser.
         let cliPid = w.dir.appending(component: "cli.pid")
         try w.fakeCLI("claude", "printf '%s' \"$$\" > '\(cliPid.path)'\nsleep \(Fixed.stall)")
-        let runner = try w.runner(StubHTTP([]), keychain: keychain, background: true) {
-            try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
-        }
+        let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
+        let runner = try w.runner(StubHTTP([]), keychain: keychain, background: true) { try live.write(refreshed) }
         let add = Task { try await runner.add(.claude, expected: "x@y") }
         try await until("the login to start") { w.read(cliPid) != nil }
 
@@ -974,7 +1008,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
         let exit = w.paths.loginRoot(.claude).appending(component: "exit")
         await #expect(throws: KibaError.io("login wait cancelled before \(exit.path) appeared")) { try await add.value }
-        #expect(try live.read() == liveCreds)
+        #expect(try live.read() == refreshed)
+        #expect(try w.store.adding(.claude) == nil)
         let pid = try #require(w.read(cliPid).flatMap { pid_t(text($0)) })
         #expect(kill(pid, 0) == -1 && errno == ESRCH, "the login still runs")
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.claude).path))
@@ -1033,33 +1068,155 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 @Test func startUndoesAddTheAppDidNotFinish() async throws {
     try await scratch { w in
-        // The app died while an add's login had overwritten the live item.
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         let live = MemorySecret(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
         let keychain = FakeKeychain(items: [w.paths.keychainService: live])
-        try w.store.write { try $0.noteAdding(.claude, LiveItem(bytes: liveCreds)) }
         let root = w.paths.loginRoot(.claude)
-        try FileManager.default.createDirectory(at: w.paths.claudeConfigDir(root: root), withIntermediateDirectories: true)
+        let config = claudeConfig(profile("x@y", org: "org-x"))
 
+        // The app died once an add's login had written the live item and
+        // its home config.
+        try w.noteAdding(liveCreds)
+        try w.writeLoginConfig(config)
         _ = try w.runner(StubHTTP([]), keychain: keychain)
-
         #expect(try live.read() == liveCreds)
         #expect(try w.store.adding(.claude) == nil)
         #expect(!FileManager.default.fileExists(atPath: root.path))
 
-        // It died once the login had filed its own item: the live change is
-        // Claude Code's refresh, which stays.
+        // It died before the login completed: the live change is Claude
+        // Code's refresh, which stays.
         let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
         try live.write(refreshed)
-        let login = MemorySecret(claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day))
-        try w.store.write { try $0.noteAdding(.claude, LiveItem(bytes: liveCreds)) }
+        try w.noteAdding(liveCreds)
         try FileManager.default.createDirectory(at: w.paths.claudeConfigDir(root: root), withIntermediateDirectories: true)
+        _ = try w.runner(StubHTTP([]), keychain: keychain)
+        #expect(try live.read() == refreshed)
+        #expect(try w.store.adding(.claude) == nil)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
 
+        // It died once the login had completed and filed its own item: the
+        // change stays too.
+        let login = MemorySecret(claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day))
+        try w.noteAdding(liveCreds)
+        try w.writeLoginConfig(config)
         _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [
             w.paths.keychainService: live, w.paths.loginService: login,
         ]))
-
         #expect(try live.read() == refreshed)
+        #expect(try w.store.adding(.claude) == nil)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+
+        // An old CLI's login, begun beside an item an earlier add left under
+        // the login's service, writes the live item and completes, and the
+        // live item refuses to go back: the root and the record wait for the
+        // next start, which puts it back. The item left before is not the
+        // login's output.
+        let leftover = MemorySecret(claudeCreds("old", plan: "pro", expires: Fixed.now))
+        try w.fakeCLI("claude", "printf '%s' '\(text(config))' > \"$CLAUDE_CONFIG_DIR/.claude.json\"")
+        let locked = FakeKeychain(items: [w.paths.keychainService: LockedSecret(item: live), w.paths.loginService: leftover])
+        let failing = try w.runner(StubHTTP([]), keychain: locked) {
+            try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
+        }
+        await #expect(throws: LockedSecret.refusal) { try await failing.add(.claude, expected: "x@y") }
+        #expect(w.read(w.paths.claudeConfigFile(root: root)) == config)
+        #expect(try w.store.adding(.claude) != nil)
+
+        _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [
+            w.paths.keychainService: live, w.paths.loginService: leftover,
+        ]))
+        #expect(try live.read() == refreshed)
+        #expect(try w.store.adding(.claude) == nil)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+        #expect(try w.store.list(.claude).isEmpty)
+    }
+}
+
+@Test func startPutsBackTheItemTheAddRecorded() async throws {
+    try await scratch { w in
+        let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
+        let wrote = claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day)
+        let config = claudeConfig(profile("x@y", org: "org-x"))
+        // An older kiba-mac died once an add's login had written the live
+        // item and its home config. Its record names no service: it meant
+        // the live one.
+        try w.oldStore(Fixed.storeV1 + "INSERT INTO adding VALUES ('claude', \(sqlBlob(liveCreds)));")
+        let store = try Store(paths: w.paths)
+        #expect(try store.adding(.claude) == LiveItem(bytes: liveCreds, service: w.paths.keychainService))
+        try w.writeLoginConfig(config)
+        let live = MemorySecret(wrote)
+        _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [w.paths.keychainService: live]))
+        #expect(try live.read() == liveCreds)
+        #expect(try store.adding(.claude) == nil)
+
+        // A launch with another CLAUDE_CONFIG_DIR died inside its add: the
+        // item of that dir goes back, and this launch's live item stays.
+        var env = w.env
+        env[Provider.claude.homeVar] = w.dir.appending(component: "claude-before").path
+        let before = try Paths(env: env, username: Fixed.user, keychainService: Fixed.noKeychain)
+        let other = MemorySecret(wrote)
+        try w.noteAdding(liveCreds, service: before.keychainService)
+        try w.writeLoginConfig(config)
+        let current = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
+        try live.write(current)
+        _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [
+            w.paths.keychainService: live, before.keychainService: other,
+        ]))
+        #expect(try other.read() == liveCreds)
+        #expect(try live.read() == current)
+        #expect(try store.adding(.claude) == nil)
+    }
+}
+
+@Test func unrestoredAddBlocksSwitchAndProbe() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        let credsB = claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day)
+        let offer = ResetOffer(count: 1, program: "juniper_tide", grant: "")
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"), login: credsB, profile: profB,
+                   usage: UsageRecord(fetchedAt: Fixed.now - Fixed.day, state: .ok, note: "", limits: [], resets: offer))
+        try w.writeClaude(config: claudeConfig(profA), creds: credsA)
+        // An add could not put the live item back and left its record.
+        try w.noteAdding(credsA)
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 10, week: 20)),
+                             answer(Status.ok, claudeUsage(session: 30, week: 60))])
+        let sw = w.switcher(http)
+        let unrestored = KibaError.unrestored(.claude)
+
+        #expect(throws: unrestored) { try sw.save(.claude) }
+        await #expect(throws: unrestored) { try await sw.use(.claude, bx) }
+        let report = await sw.probeAll(.claude)
+        #expect(report.saveBackError == unrestored.reason)
+        #expect(report.providerError == unrestored.reason)
+        #expect(report.accounts.isEmpty)
+        await #expect(throws: unrestored) { try await sw.redeem(.claude, bx) }
+        #expect(http.requests.isEmpty)
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsA)
+
+        // The next start settles the record; the switch then goes ahead.
+        _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:]))
+        try await sw.use(.claude, bx)
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsB)
+        #expect(try w.store.installed(.claude) == bx)
+    }
+}
+
+/// A login config that is not JSON is no evidence the login completed: the
+/// next start leaves the live item as it is, settles the record and removes
+/// the root, so a broken config never blocks a start.
+@Test func startKeepsLiveItemOverBrokenLoginConfig() async throws {
+    try await scratch { w in
+        let changed = claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day)
+        let live = MemorySecret(changed)
+        try w.noteAdding(claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day))
+        try w.writeLoginConfig(Data("{\"oauthAccount\":".utf8))
+        let root = w.paths.loginRoot(.claude)
+
+        _ = try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [w.paths.keychainService: live]))
+
+        #expect(try live.read() == changed)
         #expect(try w.store.adding(.claude) == nil)
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
@@ -1340,9 +1497,10 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 @Test func addUndoesTheAddBeforeIt() async throws {
     try await scratch { w in
-        // A stop that failed left the live item as a failed login wrote it,
-        // with the old bytes on record: the next add puts them back first, so
-        // its own snapshot is of the live login, not of the failed one.
+        // A stop that failed left the live item as an old CLI's login wrote
+        // it, beside that login's home config, with the old bytes on record:
+        // the next add puts them back first, so its own snapshot is of the
+        // live login, not of the failed one.
         let liveCreds = claudeCreds("live", plan: "max", expires: Fixed.now + Fixed.day)
         let live = MemorySecret(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
         let login = MemorySecret(nil)
@@ -1353,7 +1511,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             """)
         let itemCreds = claudeCreds("n", plan: "pro", expires: Fixed.now + Fixed.day)
         let runner = try w.runner(http, keychain: keychain) { try login.write(itemCreds) }
-        try w.store.write { try $0.noteAdding(.claude, LiveItem(bytes: liveCreds)) }
+        try w.noteAdding(liveCreds)
+        try w.writeLoginConfig(claudeConfig(profile("x@y", org: "org-x")))
 
         let added = try await runner.add(.claude, expected: "n@y")
         #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
@@ -1547,6 +1706,20 @@ struct World: Sendable {
         try store.write { try $0.put(p, SavedLogin(name: name, identity: id, login: login, profile: profile, usage: usage)) }
     }
 
+    /// Notes an add's Claude login as begun over the live item `bytes` of
+    /// `service` (the live one when nil), as `add` does before its launch.
+    func noteAdding(_ bytes: Data?, service: String? = nil) throws {
+        try store.write { try $0.noteAdding(.claude, LiveItem(bytes: bytes, service: service ?? paths.keychainService)) }
+    }
+
+    /// Leaves `config` as the home config of the Claude login `add` runs, as
+    /// a login that completed writes it.
+    func writeLoginConfig(_ config: Data) throws {
+        let file = paths.claudeConfigFile(root: paths.loginRoot(.claude))
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try config.write(to: file)
+    }
+
     /// A `name` executable on the scratch PATH running `body` under `/bin/sh`,
     /// once it has added its command line to `calls()`.
     func fakeCLI(_ name: String, _ body: String) throws {
@@ -1689,12 +1862,23 @@ func finish<T: Sendable>(_ task: Task<T, any Error>) async throws -> T {
 
 /// The Keychain as `add` sees it, one in-memory item per service.
 struct FakeKeychain: Keychain {
-    let items: [String: MemorySecret]
+    let items: [String: any SecretStore]
 
     /// An unknown service is an absent item.
     func item(_ service: String) -> SecretStore {
         items[service] ?? MemorySecret(nil)
     }
+}
+
+/// A Keychain item that reads `item` but refuses every change, as the
+/// Keychain does once the user refuses its prompt.
+struct LockedSecret: SecretStore {
+    static let refusal = KibaError.io("the Keychain item refused the change")
+    let item: MemorySecret
+
+    func read() throws -> Data? { try item.read() }
+    func write(_ data: Data) throws { throw Self.refusal }
+    func remove() throws { throw Self.refusal }
 }
 
 /// `security` works on the default keychain of this process's HOME. Under

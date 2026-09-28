@@ -31,12 +31,17 @@ public struct ClaudeLive {
         try login()?.identity
     }
 
-    /// The login as one read: login = the credentials bytes, profile = the
-    /// exact `oauthAccount` object bytes, identity decoded from those same
-    /// bytes plus the credentials' plan. Only that object is decoded: the
-    /// rest of `.claude.json` is Claude Code's. Nil as `identity`.
+    /// The login as one read, decoded; nil as `identity`.
     func login() throws -> LoginRead? {
         guard let (config, creds) = try live() else { return nil }
+        return try Self.decode(config, creds)
+    }
+
+    /// The login a config and credentials hold: login = the credentials
+    /// bytes, profile = the exact `oauthAccount` object bytes, identity
+    /// decoded from those same bytes plus the credentials' plan. Only that
+    /// object is decoded: the rest of `.claude.json` is Claude Code's.
+    static func decode(_ config: Data, _ creds: Data) throws -> LoginRead {
         let profile = try ClaudeIdentity.profile(config)
         var id = try ClaudeIdentity.fromOAuthAccount(profile)
         id.plan = ClaudeIdentity.planFromCreds(creds)
@@ -91,21 +96,23 @@ public struct ClaudeLive {
         }
     }
 
-    /// kiba `CLAUDE-MIXED?`, plus an unfinished install. The live login is
+    /// kiba `CLAUDE-MIXED?`, plus an unfinished install. The live files are
     /// read first, so credentials without a config are `orphanLive` even while
-    /// an install is pending. Then: an install is pending, whatever the tokens;
+    /// an install is pending. Then: an install is pending, whatever the files
+    /// hold, even a config that names no account, which the install repairs;
     /// or the installed row exists, the live config names another account
     /// (email differs, or both orgs are known and differ), and the live
-    /// credentials are still byte for byte that row's login.
+    /// credentials are still byte for byte that row's login. The config is
+    /// decoded only for that comparison.
     public func isMixed() throws -> Bool {
-        let live = try login()
+        let pair = try live()
         guard try store.pending(.claude) == nil else { return true }
-        guard let live, let name = try store.installed(.claude),
+        guard let (config, creds) = pair, let name = try store.installed(.claude),
               let row = try store.fetch(.claude, name) else { return false }
-        let id = live.identity
+        let id = try Self.decode(config, creds).identity
         let sameOrg = id.org.isEmpty || row.identity.org.isEmpty || id.org == row.identity.org
         guard !(name.belongs(to: id.email) && sameOrg) else { return false }
-        return live.login == row.login
+        return creds == row.login
     }
 
     /// The live config and credentials; nil when there are no credentials.
