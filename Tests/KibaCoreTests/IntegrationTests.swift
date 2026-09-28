@@ -2127,43 +2127,56 @@ func members(_ body: Data?) throws -> [String: String] {
 
 /// A failed repair left c@x's tokens live under a@x's config with the
 /// switch to c@x pending: any saved login's tokens may be the live ones, so
-/// no Claude login is probed or refreshed, and the panel says why.
+/// no Claude login is probed or refreshed, the panel says why, and the
+/// header keeps the probe made before the repair failed.
 @MainActor @Test func appModelShowsPendingRepairStopsProbes() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
     let (ax, cx) = (try slot("a@x"), try slot("c@x"))
     let profA = profile("a@x", org: "org-a")
-    let credsC = claudeCreds("xc", plan: "pro", expires: Fixed.now - Fixed.hour)
+    let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+    let credsC = claudeCreds("xc", plan: "pro", expires: Fixed.now + Fixed.day)
     let offer = ResetOffer(count: 1, program: "juniper_tide", grant: "")
-    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
-               login: claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day), profile: profA)
-    try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"), login: credsC, profile: profile("c@x", org: "org-c"),
-               usage: UsageRecord(fetchedAt: Fixed.now - Fixed.day, state: .ok, note: "", limits: [], resets: offer))
-    try w.writeClaude(config: claudeConfig(profA), creds: credsC)
+    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
+    try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"), login: credsC, profile: profile("c@x", org: "org-c"))
+    try w.writeClaude(config: claudeConfig(profA), creds: credsA)
     try w.store.write { try $0.noteInstalled(.claude, ax) }
-    _ = try w.store.write { try $0.notePending(.claude, cx) }
-    let http = StubHTTP([])
+    let usage = answer(Status.ok, claudeUsage(session: 30, week: 60, resets: juniperBlock(available: true)))
+    let http = StubHTTP([usage, usage])
     let core = CoreBackend(
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
         runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
-    let unrepaired = KibaError.unrepaired(.claude, cx.raw)
-
-    let report = await core.probeAll(.claude)
-    #expect(report.saveBackError == KibaError.mixed.reason)
-    #expect(report.providerError == unrepaired.reason)
-    #expect(report.accounts.isEmpty)
-    await #expect(throws: unrepaired) { try await core.redeem(.claude, cx) }
-
     let model = AppModel(connect: { core })
     model.start()
     try await settle(model)
     model.probeUsage()
     try await settle(model)
+    #expect(model.message == "Usage refreshed for 2 accounts")
+    #expect(model.meta == "All usage probed just now")
+    #expect(http.requests.count == 2)
+
+    // The repair failed: c@x's tokens are live under a@x's config.
+    try w.writeClaude(config: claudeConfig(profA), creds: credsC)
+    _ = try w.store.write { try $0.notePending(.claude, cx) }
+    let unrepaired = KibaError.unrepaired(.claude, cx.raw)
+    let report = await core.probeAll(.claude)
+    #expect(report.saveBackError == KibaError.mixed.reason)
+    #expect(report.providerError == unrepaired.reason)
+    #expect(report.accounts.isEmpty)
+    #expect(try w.store.fetch(.claude, cx)?.usage?.resets == offer)
+    await #expect(throws: unrepaired) { try await core.redeem(.claude, cx) }
+
+    model.probeUsage()
+    try await settle(model)
     #expect(model.note == "Usage not refreshed: 2 not probed")
     #expect(model.message == "")
+    // A run that reached no account is no probe: the header and the Refresh
+    // usage row keep the age of the probe before it.
+    #expect(model.meta == "All usage probed just now")
+    #expect(model.probeAge == "just now")
     let title = Provider.claude.title
     #expect(model.error == "\(title): \(KibaError.mixed.reason)\n\(title): \(unrepaired.reason)")
-    #expect(http.requests.isEmpty)
+    #expect(http.requests.count == 2)
     #expect(try w.store.fetch(.claude, cx)?.login == credsC)
 }
 

@@ -545,12 +545,18 @@ final class AppModel {
 
     /// `.autoProbe` is the probe that opening the panel starts: it adds to
     /// what is held, so the report of an action that failed while the panel
-    /// was closed stays. Nothing saved leaves no probe to date.
+    /// was closed stays. Nothing saved leaves no probe to date; a run that
+    /// reached no account leaves the last one standing, so the meta line
+    /// and the Refresh usage row keep the age of the latest actual probe.
     private func probe(_ scope: Scope) {
         let start = Int(Date().timeIntervalSince1970)
         run(Copy.probing, scope: scope) { [self] b in
             let t = Tally(await Self.probe(b), shown: snapshot)
-            lastProbe = t.total == 0 ? nil : ProbeRun(at: start, clean: t.clean, records: t.records)
+            if t.total == 0 {
+                lastProbe = nil
+            } else if t.covered > 0 {
+                lastProbe = ProbeRun(at: start, clean: t.clean, records: t.records)
+            }
             return t.outcome
         }
     }
@@ -813,7 +819,9 @@ final class AppModel {
         }
 
         var clean: Bool { failed == 0 && waiting == 0 && !unprobed }
-        var total: Int { refreshed + failed + removed + waiting + skipped }
+        /// Accounts an outcome reached.
+        var covered: Int { refreshed + failed + removed + waiting }
+        var total: Int { covered + skipped }
 
         /// Every account refreshed, or nothing to probe, is plain; a probe
         /// that missed any account is held, with one line per failed or

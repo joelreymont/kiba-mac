@@ -983,7 +983,10 @@ default 120, min 15).
   failed"; a failed or removed account adds "<Provider>: <name>: <note>" or
   "<Provider>: removed <name>, <note>", and save-back and provider errors
   become errors, each line once. A result that missed any account is
-  held, every other is plain; `lastProbe` records the run. `forget(p, name)`;
+  held, every other is plain; `lastProbe` records a run that reached any
+account, and one that reached none leaves the last standing, so the meta
+line and the Refresh usage row keep the latest actual probe's age.
+`forget(p, name)`;
   `redeem(p, name)` — "Resetting
   limit for <name>…", `Backend.redeem`, then one sentence per outcome:
   reset "Limit reset for <name>", notLimited "<name> is not at a limit;
