@@ -7,10 +7,13 @@ import SwiftUI
 enum Theme {
     // MARK: Color
 
-    /// Light values hold 3:1 against the track on the popover material; the
-    /// red holds 4.5:1 as text on both appearances (Apple's contrast criteria).
-    /// Under Increase Contrast each holds 7:1 against the window background
-    /// and 3:1 against the raised track.
+    /// Chosen for Apple's contrast criteria: 3:1 against the track on the
+    /// popover material in light, 4.5:1 for the red as text on both
+    /// appearances, and under Increase Contrast 7:1 against the window
+    /// background and 3:1 against the raised track. Those are targets from
+    /// the hex values against the material's nominal tints, not measurements
+    /// of the rendered composite, which the translucent material and the
+    /// row highlight shift.
     static let roomNS = dynamic(
         light: rgb(0x1F7F52), dark: rgb(0x4FC08A), lightContrast: rgb(0x0F5132), darkContrast: rgb(0x6FD9A4))
     static let lowNS = dynamic(

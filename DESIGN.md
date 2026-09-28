@@ -1054,9 +1054,12 @@ material and system type except one signature and one risk.
 Tokens (`Theme.swift`). The custom colors resolve for four appearances:
 light (`aqua`), dark (`darkAqua`), and each under Increase Contrast
 (`accessibilityHighContrastAqua`, `accessibilityHighContrastDarkAqua`).
-Light values hold 3:1 against the track on the popover material and the
-red holds 4.5:1 as text on both; the Increase Contrast values hold 7:1
-against the window background and 3:1 against the raised track.
+The values were chosen for 3:1 against the track on the popover material
+in light, 4.5:1 for the red as text on both appearances, and 7:1 against
+the window background and 3:1 against the raised track under Increase
+Contrast: targets from the hex values against the material's nominal
+tints, not measurements of the rendered composite, which the translucent
+material and the row highlight shift.
 
 | token   | light     | dark      | light, contrast | dark, contrast | use |
 |---------|-----------|-----------|-----------------|----------------|-----|
