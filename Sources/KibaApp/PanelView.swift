@@ -2,9 +2,11 @@ import AppKit
 import KibaCore
 import SwiftUI
 
-/// The popover: which account has room, and how much.
+/// The popover: which account has room, and how much. `menu` is the status
+/// item's app menu, which the header's More control opens.
 struct PanelView: View {
     let model: AppModel
+    let menu: NSMenu
 
     var body: some View {
         CapHeight(limit: model.heightLimit) {
@@ -23,8 +25,7 @@ struct PanelView: View {
         .frame(width: Theme.width)
         .background(Backdrop())
         .background(KeyCatcher(
-            move: model.move, activate: model.activate, escape: model.escape,
-            forget: model.forgetCursor, showMenu: { model.showMenu() }))
+            move: model.move, activate: model.activate, escape: model.escape, forget: model.forgetCursor))
     }
 
     private var content: some View {
@@ -49,12 +50,19 @@ struct PanelView: View {
         .padding(.horizontal, Theme.gutter)
     }
 
+    /// The title with More at its right, as a section header carries its
+    /// add, and the meta line under the title: beside the title and More it
+    /// would lose its age to truncation.
     private var header: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.gap) {
-            Text(Copy.title)
-                .font(Theme.title)
-                .foregroundStyle(Theme.ink)
-            Spacer(minLength: Theme.gap)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Theme.gap) {
+                Text(Copy.title)
+                    .font(Theme.title)
+                    .foregroundStyle(Theme.ink)
+                Spacer(minLength: Theme.gap)
+                MoreButton(model: model, menu: menu)
+                    .id(ActionKey.menu)
+            }
             Text(model.meta)
                 .font(Theme.meta)
                 .foregroundStyle(Theme.idle)
@@ -202,6 +210,36 @@ private struct DismissButton: View {
 
     private enum Copy {
         static let dismiss = "Dismiss notice"
+    }
+}
+
+/// The ellipsis ending the title line: pops the app menu (Refresh usage,
+/// Start at login, Quit) up below itself, from a click or from ⏎ or Space on
+/// the cursor. It stays enabled while an action runs: the menu enables its
+/// own items.
+private struct MoreButton: View {
+    let model: AppModel
+    let menu: NSMenu
+
+    var body: some View {
+        Button(Copy.more, systemImage: Symbol.more) { model.trigger(.menu) }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.accessoryBar)
+            .font(Theme.meta)
+            .foregroundStyle(model.cursor == .menu ? Theme.accent : Theme.idle)
+            .help(Copy.more)
+            .accessibilityHint(Copy.hint)
+            .background(MenuAnchor(model: model, menu: menu))
+            .cursorTarget(model, .menu)
+    }
+
+    private enum Symbol {
+        static let more = "ellipsis.circle"
+    }
+
+    private enum Copy {
+        static let more = "More"
+        static let hint = "Opens the app menu"
     }
 }
 

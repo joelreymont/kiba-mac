@@ -1897,9 +1897,9 @@ func members(_ body: Data?) throws -> [String: String] {
     model.start()
     try await settle(model)
     #expect(model.availability == .failed(KibaError.io(Fixed.offline).reason))
-    #expect(model.actions == [.retry])
+    #expect(model.actions == [.menu, .retry])
 
-    model.move(1)
+    model.move(-1)
     #expect(model.cursor == .retry)
     online.open()
     model.activate()
@@ -1941,6 +1941,39 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(model.sections.first { $0.id == .codex }?.accounts.map(\.name) == [ay])
 }
 
+/// More, the header's way to the app menu, is the cursor's first stop and
+/// the top of its order. Return and a click both open the menu the control
+/// installed, also while an action runs; Delete there asks nothing.
+@MainActor @Test func appModelOpensTheMenuFromTheHeader() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, _, by) = try codexPair(w)
+    let model = AppModel(connect: { core })
+    var shown = 0
+    model.showMenu = { shown += 1 }
+    model.start()
+    try await settle(model)
+
+    model.move(1)
+    #expect(model.cursor == .menu)
+    model.forgetCursor()
+    #expect(model.confirming == nil)
+    model.activate()
+    #expect(shown == 1)
+
+    model.move(1)
+    #expect(model.cursor == .add(.claude))
+    for _ in model.actions { model.move(-1) }
+    #expect(model.cursor == .menu)
+
+    model.use(.codex, by)
+    #expect(model.busy)
+    model.trigger(.menu)
+    #expect(shown == 2)
+    try await settle(model)
+    #expect(model.message == "Codex: now b@y")
+}
+
 /// A row offering limit resets carries its badge right after it in the
 /// cursor order; a row with none left has no badge.
 @MainActor @Test func appModelListsResetBadgeAfterItsRow() async throws {
@@ -1951,7 +1984,9 @@ func members(_ body: Data?) throws -> [String: String] {
 
     model.start()
     try await settle(model)
-    #expect(model.actions == [.add(.claude), .add(.codex), .use(.codex, ay), .use(.codex, by), .redeem(.codex, by), .usage])
+    #expect(model.actions == [
+        .menu, .add(.claude), .add(.codex), .use(.codex, ay), .use(.codex, by), .redeem(.codex, by), .usage,
+    ])
 }
 
 /// The badge asks first: Keep and Escape back out without reaching the
@@ -2100,7 +2135,7 @@ func members(_ body: Data?) throws -> [String: String] {
     try await settle(model)
     let held = "Usage refreshed for 1 of 2 accounts: 1 failed\nCodex: b@y: \(Fixed.usageOffline)"
     #expect(model.note == held)
-    #expect(model.actions.first == .dismiss)
+    #expect(model.actions.prefix(2) == [.menu, .dismiss])
 
     model.opened()
     try await settle(model)

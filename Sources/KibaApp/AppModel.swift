@@ -7,6 +7,8 @@ typealias Connect = @Sendable () throws -> any Backend
 
 /// One control the cursor can rest on; `trigger(_:)` runs each.
 enum ActionKey: Hashable, Sendable {
+    /// The header's More control: opens the app menu.
+    case menu
     /// An account row: switch to it.
     case use(Provider, SlotName)
     /// A row's limit-reset badge: asks before spending one.
@@ -163,7 +165,7 @@ final class AppModel {
 
     /// Closes the popover; the status item sets it.
     @ObservationIgnored var closePanel: () -> Void = {}
-    /// Closes the popover and opens the app menu; the status item sets it.
+    /// Opens the app menu at the header's More control; that control sets it.
     @ObservationIgnored var showMenu: () -> Void = {}
     /// Speaks what an action came to; the status item posts it to VoiceOver.
     @ObservationIgnored var announce: (String) -> Void = { _ in }
@@ -187,13 +189,14 @@ final class AppModel {
 
     // MARK: Derived
 
-    /// Every control a click can reach, in panel order: Dismiss while a
-    /// notice is held; Retry while the status read has failed; per provider
-    /// its add, its account rows, each followed by its limit-reset badge when
-    /// it offers one, and its save; the usage action last. A row asking to
-    /// confirm offers its go and Keep buttons in place of the row and its badge.
+    /// Every control a click can reach, in panel order: More, always;
+    /// Dismiss while a notice is held; Retry while the status read has
+    /// failed; per provider its add, its account rows, each followed by its
+    /// limit-reset badge when it offers one, and its save; the usage action
+    /// last. A row asking to confirm offers its go and Keep buttons in place
+    /// of the row and its badge. Never empty: More is always there.
     var actions: [ActionKey] {
-        var keys: [ActionKey] = []
+        var keys: [ActionKey] = [.menu]
         if canDismiss { keys.append(.dismiss) }
         if canRetry { keys.append(.retry) }
         for sec in sections {
@@ -377,7 +380,7 @@ final class AppModel {
     private func retain(_ old: [ActionKey]) {
         guard let c = cursor, !actions.contains(c) else { return }
         let i = old.firstIndex(of: c) ?? 0
-        cursor = actions.isEmpty ? nil : actions[min(i, actions.count - 1)]
+        cursor = actions[min(i, actions.count - 1)]
     }
 
     // MARK: Panel lifecycle
@@ -443,7 +446,6 @@ final class AppModel {
 
     /// Keyboard: moves the cursor one control and scrolls it into view.
     func move(_ delta: Int) {
-        guard !actions.isEmpty else { return }
         let next: Int
         if let c = cursor, let i = actions.firstIndex(of: c) {
             next = min(max(i + delta, 0), actions.count - 1)
@@ -479,10 +481,12 @@ final class AppModel {
     // MARK: Actions
 
     /// Runs the control `k` names. Each action refuses while one runs;
-    /// Keep (it only ends a confirmation), Dismiss (it only clears the
-    /// notice) and Retry (it only rereads) always run.
+    /// More (its menu enables its own items), Keep (it only ends a
+    /// confirmation), Dismiss (it only clears the notice) and Retry (it only
+    /// rereads) always run.
     func trigger(_ k: ActionKey) {
         switch k {
+        case .menu: showMenu()
         case .use(let p, let n): use(p, n)
         case .redeem(let p, let n): ask(.reset, p, n)
         case .save(let p): save(p)
