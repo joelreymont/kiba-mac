@@ -3,9 +3,8 @@ import ServiceManagement
 import SwiftUI
 
 /// The menu bar item: left click toggles the panel popover, right click (or
-/// control-click) shows the app menu. The panel's More control opens the
-/// same menu for the pointer, the keyboard and VoiceOver; VoiceOver also
-/// reaches it through the item's Show Menu action.
+/// control-click) shows the app menu. VoiceOver reaches the menu through
+/// the item's Show Menu action.
 @MainActor
 final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
     private let model: AppModel
@@ -19,7 +18,7 @@ final class StatusItem: NSObject, NSPopoverDelegate, NSMenuDelegate {
     init(model: AppModel) {
         self.model = model
         super.init()
-        let host = NSHostingController(rootView: PanelView(model: model, menu: menu))
+        let host = NSHostingController(rootView: PanelView(model: model))
         host.sizingOptions = .preferredContentSize
         popover.contentViewController = host
         popover.behavior = .transient

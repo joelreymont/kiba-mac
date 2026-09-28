@@ -1043,17 +1043,15 @@ line and the Refresh usage row keep the latest actual probe's age.
   action ends with a forced status read and stays `busy` until that read,
   and any queued behind it, has applied its snapshot or failed: controls
   re-enable only over rows that show the action's result.
-- `actions: [ActionKey]`, every control a click can reach, in panel order:
-  `menu` (More) always; `dismiss` while a result or a shown action error is
-  held; `retry` while the status read has failed and no read runs; per
+- `actions: [ActionKey]`, every control a click can reach, in panel
+  order: `dismiss` while a result or a shown action error is held; `retry`
+  while the status read has failed and no read runs; per
   provider `add`, every account row (`use`), each followed by its badge
   (`redeem`) while `Rows.resets` > 0, then `save` when the provider has a
   live login, no error and no active row; `usage` at the end. A confirming
   row contributes its `confirm` and `keep` buttons in place of `use` and
-  `redeem`. `trigger(_:)` runs every key, `menu` even while busy: it calls
-  `showMenu`, which the More control installs (see Status item). The cursor
-  tracks its key across refreshes and stays at the same position when its
-  key is gone.
+  `redeem`. `trigger(_:)` runs every key; the cursor tracks its key across
+  refreshes and stays at the same position when its key is gone.
 
 ### Status item and popover
 
@@ -1062,21 +1060,12 @@ toggles an `NSPopover` (`.transient`, `NSVisualEffectView` `.popover`
 material) hosting `PanelView`; right click, or Control-click with the mouse,
 shows the app menu: Refresh usage, Start at login, Quit. Only a mouse event
 counts as a right or Control-click: a press from the keyboard or VoiceOver
-(whose keys hold Control) toggles the panel. In the panel, the header's
-More button opens the same menu below itself, left edges aligned:
-`MenuAnchor`, an AppKit view behind the button, installs
-`AppModel.showMenu`, which pops the status item's menu up there
-(`NSMenu.popUp(positioning:at:in:)`) on the next turn of the main loop, so
-the click, key or VoiceOver press that asked returns before the menu
-tracks. The menu keeps its delegate, so it enables its items as it opens
-wherever it opens, and More is never disabled. On every supported macOS
-the mouse reaches the menu by a right click on the icon or a click on
-More; the keyboard by ⏎ or Space on More, the cursor's first stop;
-VoiceOver by More, a button like the rest, or by the icon's accessibility
-custom action "Show Menu" (VoiceOver's actions menu, VO-⌘-Space), which
-also returns before the menu tracks. The system's context-menu key (⌃⏎,
-macOS 15 and later) keeps AppKit's default: the panel selects nothing, so
-it opens nothing. `LSUIElement` true. The icon
+(whose keys hold Control) toggles the panel. VoiceOver reaches the menu
+through the button's accessibility custom action "Show Menu" (VoiceOver's
+actions menu, VO-⌘-Space), which returns before the menu tracks; the
+keyboard alone has no way to it. The system's context-menu key (⌃⏎, macOS
+15 and later) keeps AppKit's default: the panel selects nothing, so it
+opens nothing. `LSUIElement` true. The icon
 tooltip lists `<title>: <live email or none>` per provider, or "AI accounts"
 while unavailable. The button's accessibility value (`AppModel.iconValue`)
 names each provider's cell ("Codex: 80% left", "none left", "usage
@@ -1139,11 +1128,9 @@ plan" (plan text and figures of a blocked, dead or unsubscribed row) are
 `out`. Rows and actions are
 `Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
 is `Button("Add Claude Code account", systemImage: "plus")` (the provider's
-title), `.iconOnly`, `.accessoryBar` style; More is
-`Button("More", systemImage: "ellipsis.circle")` the same way, its symbol
-at the meta's `.subheadline`. Reduce Transparency swaps the popover
-material for the window background; Increase Contrast resolves every
-custom token to its contrast column, the empty track included; Reduce
+title), `.iconOnly`, `.accessoryBar` style. Reduce Transparency swaps the
+popover material for the window background; Increase Contrast resolves
+every custom token to its contrast column, the empty track included; Reduce
 Motion stops the fill animation.
 
 Layout (width 340, vertical padding 10, row inset 10). The panel is as tall
@@ -1151,18 +1138,15 @@ as its content, capped at the menu bar screen's visible height less 24 pt
 (measured before each show); taller content scrolls, with the system's
 scroll indicators (`.automatic`: overlay scrollers show while it scrolls,
 or always under the "Show scroll bars: Always" setting). The panel's header
-is two lines: the title with More at its right, and the meta line under the
-title, which beside both would lose its age to truncation at this width.
-Each provider's header line carries the add action at its right, a standard
-plus button, `accent` under the keyboard cursor, tooltip its label, "Add
-Codex account"; there is no add row. More is lit the same way. Cursor order:
-More, Dismiss, Retry, then per section add, accounts (each followed by its
-badge), save, then Refresh usage (`AppModel.actions`).
+is one line, the title with the meta at its right. Each provider's header
+line carries the add action at its right, a standard plus button, `accent`
+under the keyboard cursor, tooltip its label, "Add Codex account"; there is
+no add row. Cursor order: Dismiss, Retry, then per section add, accounts
+(each followed by its badge), save, then Refresh usage (`AppModel.actions`).
 
 ```
 ┌──────────────────────────────────────────────┐
-│ Room to work                               ⋯ │  title · More
-│ All usage probed 2 min ago                   │  meta
+│ Room to work                 Probed 2 min ago│  title · meta
 │ ──────────────────────────────────────────── │
 │ Claude Code                                + │  section header · add
 │ ● joel@x.com (max)            72% · 40% · 9% │  dot · name · plan · figures
@@ -1253,12 +1237,10 @@ is safe because the panel has no text field or other control that reads
 keys, and the cursor reaches every control a click can, so it replaces the
 key-view loop rather than hiding a control from it.
 
-Copy: "Room to work" (title), "More" (the `ellipsis.circle` ending the title
-line, and its tooltip; hint "Opens the app menu"), meta = "Working…" |
-"Refreshing…" | "All usage probed 2 min ago" (the latest probe, complete) |
-"Some usage probed 2 min ago" (it missed accounts) | "Oldest usage from 40
-min ago" (no probe yet: the oldest record shown) | "Saved logins" (no
-records) |
+Copy: "Room to work" (title), meta = "Working…" | "Refreshing…" | "All
+usage probed 2 min ago" (the latest probe, complete) | "Some usage probed 2
+min ago" (it missed accounts) | "Oldest usage from 40 min ago" (no probe
+yet: the oldest record shown) | "Saved logins" (no records) |
 "Unavailable"; the Refresh usage row's detail is the latest probe's age, and
 each row's tooltip and VoiceOver value carry its own record's age. "Not
 logged in" under a provider without a live login, or the provider's error,

@@ -7,9 +7,8 @@ import SwiftUI
 /// first responder whenever the panel's window becomes key, and reads keys
 /// through the standard key bindings. Holding first responder is safe
 /// because the panel has no text field or other control that reads keys,
-/// and the cursor reaches every control a click can, More and its app menu
-/// included, so it replaces the key-view loop rather than hiding a control
-/// from it.
+/// and the cursor reaches every control a click can, so it replaces the
+/// key-view loop rather than hiding a control from it.
 struct KeyCatcher: NSViewRepresentable {
     let move: (Int) -> Void
     let activate: () -> Void
