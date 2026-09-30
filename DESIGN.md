@@ -716,7 +716,7 @@ replaced or forgotten meanwhile is never updated or removed.
   usage; then, when the save-back named an account other than `n`, probe
   that one as saved and `write` it like `probeAll` does. Its usage came
   from a live probe, which never refreshes, so an expired token would
-  otherwise leave it dead ("log in again") once inactive.
+  otherwise leave it dead once inactive.
 - `probeAll`: save-back (an error becomes `saveBackError`), `list`. Live
   Claude credentials without a config stop it here: `orphanLive` is both
   `saveBackError` and `providerError`, no account is probed. Then
@@ -781,13 +781,14 @@ public enum Rows {
   static func blocking(_ u: UsageRecord?) -> Limit?  // among percent ≥ 100: latest parseable reset, else the first
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
   static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, or expired && !active
+  static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool // claude && dead
   static func state(_ u: UsageRecord?, active: Bool) -> RowState
   static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead/unsubscribed 2, unknown 3
   static func sorted(_ a: [Account]) -> [Account]    // rank; rank 2 by blocking reset (unparseable last); else input order
   static func figures(_ u: UsageRecord?) -> [Figure] // session, weekly, then other percent ≥ 0 in order; each (label, left = 100 - percent)
   static func figuresText(_ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
   static func plan(_ a: Account) -> String           // the saved plan; "no plan" while unsubscribed
-  static func planText(_ a: Account, now: Date) -> String // "(pro)", "(pro, 5d)", "(pro, log in again)", "(no plan)", ""
+  static func planText(_ p: Provider, _ a: Account, now: Date) -> String // "(pro)", "(pro, 5d)", "(pro, log in again)", "(free?)" when maybeFree, "(no plan)", ""
   static func tooltip(_ p: Provider, _ a: Account, now: Date) -> [String]
   static func resets(_ u: UsageRecord?) -> Int       // the offer's count; 0 without one
   static func resetsText(_ n: Int) -> String         // "1 limit reset" | "2 limit resets"
@@ -802,7 +803,9 @@ public struct Figure: Equatable { public var label: String; public var left: Int
 State: dead → `.dead`; record `unsubscribed` → `.unsubscribed`; no usage or
 no limits → `.unknown`; any percent ≥ 100
 → `.blocked`; headline left < 50 → `.tight`; any long window other than the
-weekly with left < 50 → `.tight`; else `.ok`. Tooltip lines: `email · plan ·
+weekly with left < 50 → `.tight`; else `.ok`. A dead Claude row's plan
+text is "(free?)", not "(<plan>, log in again)": a guess that the plan
+lapsed, which no answer proves. Tooltip lines: `email · plan ·
 current` (`plan`: "no plan" while unsubscribed, since the saved plan is the
 token document's stale claim); "Usage not probed yet" | note or "No limits reported" | one line
 per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
@@ -1021,9 +1024,10 @@ default 120, min 15).
   `use(p, name)` — a dead row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
   probes every provider and counts accounts per outcome: refreshed (the
-  provider answered: record `ok`, `unknown` or `unsubscribed`), waiting (record `expired`
+  provider answered: record `ok`, `unknown` or `unsubscribed`, or a dead
+  Claude row, `Rows.maybeFree`), waiting (record `expired`
   on a row probed as live: its CLI refreshes the token, kiba never does),
-  failed (record `expired` on a saved row, `error` or `revoked`: no fresh
+  failed (any other record `expired`, `error` or `revoked`: no fresh
   usage), removed (`.revoked`) and not probed (a row shown with no
   outcome: its provider could not be probed, or its login changed before
   its usage was recorded). Each row shown when the probe ends and each
@@ -1116,7 +1120,7 @@ material and the row highlight shift.
 |---------|-----------|-----------|-----------------|----------------|-----|
 | `room`  | `#1F7F52` | `#4FC08A` | `#0F5132`       | `#6FD9A4`      | segments half or more full; the dot of a usable account |
 | `low`   | `#9E6A0E` | `#E2A93B` | `#6B4700`       | `#F2C263`      | segments under half |
-| `out`   | `#B52F2F` | `#F07070` | `#8F1F1F`       | `#FFAAAA`      | "limit", "log in again", "no plan", errors, the red dot, Forget, the urgent icon |
+| `out`   | `#B52F2F` | `#F07070` | `#8F1F1F`       | `#FFAAAA`      | "limit", "log in again", "free?", "no plan", errors, the red dot, Forget, the urgent icon |
 | `track` | quaternary label color | quaternary label color | tertiary label color | tertiary label color | empty reservoir |
 
 The rest are system colors, which follow every appearance themselves:
@@ -1138,8 +1142,8 @@ size (macOS has no Dynamic Type; the panel claims no text scaling): title
 `.subheadline.monospacedDigit()` in `ink`; the badge's count
 `.caption.bold().monospacedDigit()`. Section headers are accessibility
 headings. Text is never colored by usage
-state: the bars carry the color, and only "limit", "log in again" and "no
-plan" (plan text and figures of a blocked, dead or unsubscribed row) are
+state: the bars carry the color, and only "limit", "log in again", "free?"
+and "no plan" (plan text and figures of a blocked, dead or unsubscribed row) are
 `out`. Rows and actions are
 `Button`s (`.plain` style, keyboard and VoiceOver for free); the add action
 is `Button("Add Claude Code account", systemImage: "plus")` (the provider's
@@ -1221,14 +1225,16 @@ Color. A click asks first, like Forget.
 Rows: no boxes; a row highlights with `ink` at 10 % under the pointer or the
 keyboard cursor, 5 % when active. One line: dot, name, plan, figures, badge.
 Plan and figures are short bounded strings (the login's one-word plan, a
-reset countdown or "log in again", a percentage per window or "limit"), so
+reset countdown, "log in again" or "free?", a percentage per window or
+"limit"), so
 they always fit at their full width and one line always holds the row; the
 name alone gives way,
 laid out first (`layoutPriority`) with every point they leave and shortened
 in the middle ("nfnht45…leid.com") so both ends still name the account, as
 the original kiba did. The whole name is in the tooltip and the VoiceOver
 label. Blocked, dead and unsubscribed names are `idle`; blocked figures
-read `limit`; dead plan text carries "log in again"; an unsubscribed row's
+read `limit`; dead plan text carries "log in again", or is "free?" on
+Claude; an unsubscribed row's
 plan text is "no plan", never the saved plan. VoiceOver reads a row as
 one button: label "<Provider>: <name>" plus ", current account"; value the
 plan (none while unsubscribed), the verdict ("has room"; "limit reached, resets in 5 h 12 min";

@@ -25,7 +25,7 @@ enum Theme {
     static let room = Color(nsColor: roomNS)
     /// Reservoir segments under half.
     static let low = Color(nsColor: lowNS)
-    /// Spent reservoir segments, "limit" and "log in again", errors, the urgent icon.
+    /// Spent reservoir segments, "limit", "log in again" and "free?", errors, the urgent icon.
     static let out = Color(nsColor: outNS)
     /// Meta text, plan text, idle controls.
     static let idle = Color(nsColor: .secondaryLabelColor)

@@ -759,9 +759,51 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     #expect(Rows.state(a.usage, active: true) == .unsubscribed)
     #expect(Rows.usable(.unsubscribed) == false)
     #expect(Rows.rank(.unsubscribed) == Rows.rank(.dead))
-    #expect(Rows.planText(a, now: now) == "(no plan)")
+    #expect(Rows.planText(.claude, a, now: now) == "(no plan)")
     #expect(Rows.figuresText(a.usage) == "")
     #expect(Rows.tooltip(.claude, a, now: now) == ["a@x · no plan · current", ProbeCase.noPlan, "Probed just now"])
+}
+
+/// Anthropic refused a saved login's refresh and says nothing of why: the
+/// row reads "free?" where it read the plan and "log in again", and the
+/// probe counts it as answered, not failed. Its hover lines keep the plan,
+/// Anthropic's answer and the offer to log in again.
+@MainActor @Test func rowsShowRefusedClaudeLoginAsFree() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+    let prof = profile("a@x", org: "org-a")
+    let creds = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: creds, profile: prof)
+    try w.seed(.claude, bx, Identity(email: "b@x", plan: "max", org: "org-b"),
+               login: claudeCreds("xb", plan: "max", expires: Fixed.now - Fixed.hour), profile: profile("b@x", org: "org-b"))
+    try w.writeClaude(config: claudeConfig(prof), creds: creds)
+    let http = StubHTTP([
+        answer(Status.ok, claudeUsage(session: 30, week: 60)),
+        answer(Status.badRequest, #"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#),
+    ])
+    let core = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:])))
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.message == "Usage refreshed for 2 accounts")
+    #expect(model.note == "")
+    #expect(model.error == "")
+    #expect(model.meta == "All usage probed just now")
+
+    let rows = try #require(model.sections.first { $0.id == .claude }).accounts
+    try #require(rows.map(\.name) == [ax, bx])
+    let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
+    #expect(rows.map { Rows.planText(.claude, $0, now: now) } == ["(max)", "(free?)"])
+    #expect(Rows.tooltip(.claude, rows[1], now: now) == [
+        "b@x · max", ProbeCase.refused("400 invalid_grant: Refresh token not found or invalid"),
+        "Probed just now", "Click to log in to this account again",
+    ])
 }
 
 /// A probed row's hover lines count the limit resets it offers, after its
@@ -2247,16 +2289,19 @@ func members(_ body: Data?) throws -> [String: String] {
 
 /// A probe's notice counts refreshed and failed accounts apart and holds a
 /// miss with its reasons; the header says whose age it shows and marks a
-/// probe that missed accounts.
+/// probe that missed accounts. A saved login whose refresh OpenAI refuses
+/// fails, and its row asks to log in again.
 @MainActor @Test func appModelCountsProbeResults() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
     let offline = HTTPOutcome.unreachable(Fixed.offline)
-    let (core, _, _) = try codexPair(w, [
+    let (core, _, by) = try codexPair(w, [
         answer(Status.ok, codexUsage(session: 20, week: 45)), offline,
         offline, offline,
         answer(Status.ok, codexUsage(session: 20, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
         answer(Status.unauthorized, "{}"), answer(Status.ok, codexUsage(session: 15, week: 25)),
+        answer(Status.ok, codexUsage(session: 20, week: 45)), ProbeCase.rejected,
+        answer(Status.badRequest, #"{"error":"invalid_grant"}"#),
     ])
     let model = AppModel(connect: { core })
     model.start()
@@ -2288,6 +2333,13 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 live login waiting for its CLI")
     #expect(model.message == "")
     #expect(model.meta == "Some usage probed just now")
+
+    model.probeUsage()
+    try await settle(model)
+    let refused = "Codex: b@y: access token rejected and the refresh was refused; log in again"
+    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 failed\n" + refused)
+    let b = try #require(model.sections.first { $0.id == .codex }?.accounts.first { $0.name == by })
+    #expect(Rows.planText(.codex, b, now: Date(timeIntervalSince1970: TimeInterval(Fixed.now))) == "(pro, log in again)")
 }
 
 /// A result that needs attention stays through the probe the panel starts

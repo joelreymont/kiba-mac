@@ -85,7 +85,7 @@ struct AccountRow: View {
     }
 
     @ViewBuilder private func plan(_ red: Bool) -> some View {
-        let text = Rows.planText(account, now: model.now)
+        let text = Rows.planText(provider, account, now: model.now)
         if !text.isEmpty {
             Text(text)
                 .font(Theme.meta)

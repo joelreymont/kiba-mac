@@ -74,6 +74,13 @@ public enum Rows {
         return u.state == .revoked || (u.state == .expired && !active)
     }
 
+    /// A dead Claude row: it reads "free?", a guess that the plan lapsed,
+    /// and a probe counts it as answered. A dead Codex row asks to log in
+    /// again.
+    public static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool {
+        p == .claude && dead(u, active: active)
+    }
+
     public static func state(_ u: UsageRecord?, active: Bool) -> RowState {
         if dead(u, active: active) { return .dead }
         if u?.state == .unsubscribed { return .unsubscribed }
@@ -153,8 +160,10 @@ public enum Rows {
     }
 
     /// `"(pro)"`, `"(pro, 5d)"` while blocked, `"(pro, log in again)"` when
-    /// dead, `"(no plan)"` when unsubscribed, or "".
-    public static func planText(_ a: Account, now: Date) -> String {
+    /// dead, `"(free?)"` in its place on Claude, `"(no plan)"` when
+    /// unsubscribed, or "".
+    public static func planText(_ p: Provider, _ a: Account, now: Date) -> String {
+        if maybeFree(p, a.usage, active: a.active) { return "(" + Copy.free + ")" }
         var parts: [String] = []
         let label = plan(a)
         if !label.isEmpty { parts.append(label) }
@@ -295,6 +304,7 @@ public enum Rows {
     private enum Copy {
         static let limit = "limit"
         static let again = "log in again"
+        static let free = "free?"
         static let noPlan = "no plan"
         static let current = "current"
         static let unprobed = "Usage not probed yet"
