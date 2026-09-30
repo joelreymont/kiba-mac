@@ -36,7 +36,8 @@ layout, UI spec. Read it before changing anything.
 - Never run `claude auth logout` or `codex logout` from code or tests: both
   revoke tokens server-side and kill every saved copy.
 - Never refresh the live account's token. Only a 400 or 401 from a token
-  endpoint means a saved login is gone; anything else is `error`.
+  endpoint means a saved login is gone; anything else is `error`, and so is
+  Anthropic's `account_on_hold` answer (400, 401 or 403): the login is kept.
 - Credential files and slot directories are 0600/0700 and replaced by
   temp + rename (`PrivateFS`). Login documents are rewritten by byte
   splicing (`JSONDoc`), never by re-serialising.

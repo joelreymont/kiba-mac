@@ -112,10 +112,15 @@ struct ResetReply {
 enum Renewal {
     /// The login document with the new tokens spliced in.
     case fresh(Data)
-    /// The token endpoint refused the grant (400 or 401): the saved login is gone.
-    case refused
-    /// Any other end; the note to record.
+    /// The token endpoint answered without a token: its answer, for the probe to read.
+    case denied(HTTPResponse)
+    /// Unreachable, a 200 without a token, or a splice error: the note to record.
     case failed(String)
+}
+
+extension HTTPResponse {
+    /// A token endpoint's 400 or 401: the only statuses that prove a saved login gone.
+    var refused: Bool { HTTPStatus.refusals.contains(status) }
 }
 
 extension HTTPClient {
@@ -128,9 +133,9 @@ extension HTTPClient {
         guard case .response(let r) = await send(.post(url, json: jsonObject(grant))) else {
             return .failed(ProbeNote.unreachable(what))
         }
-        if HTTPStatus.refusals.contains(r.status) { return .refused }
+        guard r.status == HTTPStatus.ok else { return .denied(r) }
         do {
-            guard r.status == HTTPStatus.ok, let answer = JSONFields(r.body), let doc = try splice(answer) else {
+            guard let answer = JSONFields(r.body), let doc = try splice(answer) else {
                 return .failed(ProbeNote.answered(what, r.status))
             }
             return .fresh(doc.data)

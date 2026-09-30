@@ -499,10 +499,37 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     /// Anthropic's answer for an organization whose subscription lapsed.
     static let noOAuth = #"{"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_visibility":"user_facing","error_code":"oauth_not_allowed_for_organization"}}}"#
     static let noPlan = "no plan for Claude Code: Anthropic does not allow this organization's OAuth login"
+    /// The longest server-supplied text a note carries.
+    static let detailMax = 120
+    /// A refusal whose description runs past `detailMax` over two lines, and its detail on one.
+    static let long = #"{"error":"invalid_grant","error_description":"line one\n"# + String(repeating: "x", count: 130) + #""}"#
+    static let longDetail = "400 invalid_grant: line one " + String(repeating: "x", count: 130)
+    static func refused(_ detail: String) -> String {
+        "access token expired and the refresh was refused (\(detail)); log in again"
+    }
+    static func onHold(_ url: String) -> String {
+        "account on hold and cannot use Claude Code; view details or appeal at \(url)"
+    }
 
     static let all = [
-        ProbeCase(provider: .claude, login: stale, answers: [answer(Status.badRequest, #"{"error":"invalid_grant"}"#)],
-                  state: .expired, note: "access token expired and the refresh was refused; log in again"),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(
+            Status.badRequest, #"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#)],
+                  state: .expired, note: refused("400 invalid_grant: Refresh token not found or invalid")),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(
+            Status.unauthorized, #"{"type":"error","error":{"type":"authentication_error","message":"x"}}"#)],
+                  state: .expired, note: refused("401 authentication_error")),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(Status.unauthorized, "nope")],
+                  state: .expired, note: refused("401")),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(Status.badRequest, long)],
+                  state: .expired, note: refused(String(longDetail.prefix(detailMax - 1)) + "…")),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(
+            Status.badRequest,
+            #"{"error":"invalid_grant","error_description":"account_on_hold","error_uri":"https://claude.ai/restricted?org=org-s"}"#)],
+                  state: .error, note: onHold("https://claude.ai/restricted?org=org-s")),
+        ProbeCase(provider: .claude, login: stale, answers: [answer(
+            Status.forbidden,
+            #"{"error":"access_denied","error_description":"account_on_hold","error_uri":"https://claude.ai.evil.example/x"}"#)],
+                  state: .error, note: onHold("https://claude.ai/restricted")),
         ProbeCase(provider: .claude, login: stale, answers: [answer(Status.serverError, "")],
                   state: .error, note: "Anthropic's token endpoint answered 500"),
         ProbeCase(provider: .claude, login: fresh, answers: [down],
@@ -517,6 +544,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
                   state: .expired, note: "access token rejected and the refresh was refused; log in again"),
         ProbeCase(provider: .codex, login: auth, answers: [rejected, down],
                   state: .error, note: "OpenAI's token endpoint could not be reached"),
+        ProbeCase(provider: .codex, login: auth, answers: [rejected, answer(Status.serverError, "")],
+                  state: .error, note: "OpenAI's token endpoint answered 500"),
         ProbeCase(provider: .codex, login: auth, answers: [answer(Status.serverError, "")],
                   state: .error, note: "OpenAI's usage endpoint answered 500"),
         ProbeCase(provider: .codex, login: auth, answers: [answer(Status.tooMany, "{}")],

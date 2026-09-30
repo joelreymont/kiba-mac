@@ -88,7 +88,9 @@ public struct CodexProbe: Sendable {
         }
         switch await refresh(doc, grant: grant, now: now) {
         case .fresh(let refreshed): return .ready(refreshed)
-        case .refused: return revoked ? .stale(.revoked, Note.revoked) : .stale(.expired, Note.refused)
+        case .denied(let r) where r.refused:
+            return revoked ? .stale(.revoked, Note.revoked) : .stale(.expired, Note.refused)
+        case .denied(let r): return .stale(.error, ProbeNote.answered(Note.token, r.status))
         case .failed(let note): return .stale(.error, note)
         }
     }

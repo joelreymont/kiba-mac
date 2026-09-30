@@ -562,9 +562,24 @@ Claude:
    200 → splice `accessToken`, `refreshToken` (if returned), `expiresAt =
    (now+expires_in)*1000`, `refreshTokenExpiresAt` (if
    `refresh_token_expires_in`) into `claudeAiOauth`, each added at the end of
-   that object when the doc lacks it. 400/401 → `expired` "…the refresh
-   was refused; log in again". Anything else / unreachable → `error`
-   "Anthropic's token endpoint answered <code>" / "…could not be reached".
+   that object when the doc lacks it. An answer without a token is read as
+   Claude Code 2.1.285 reads it: code = `error` when it is a string, else
+   `error.type`; description = `error_description`; `error_uri`. On hold =
+   status 400, 401 or 403 with code `invalid_grant` or `access_denied` and
+   description `account_on_hold` → `error` "account on hold and cannot use
+   Claude Code; view details or appeal at <url>", the saved login kept as it
+   is: the hold may lift. `<url>` is `error_uri` when it starts `https://`,
+   its host is `claude.ai`, `anthropic.com` or a subdomain of either
+   (lowercase letters, digits, `.`, `-`), the rest is spelled only in
+   `A-Za-z0-9/._~%-?=&` (so no user, port or fragment), it does not end in
+   `.` or `?`, and it is at most `detailMax` (120) characters; else
+   `https://claude.ai/restricted`. Any other 400/401 → `expired` "access
+   token expired and the refresh was refused (<status> <code>:
+   <description>); log in again", absent parts left out ("(401)"), runs of
+   whitespace and control characters one space, the parenthesis cut to
+   `detailMax` Unicode scalars ending in `…`. Anything else / unreachable →
+   `error` "Anthropic's token endpoint answered <code>" / "…could not be
+   reached".
 2. GET `https://api.anthropic.com/api/oauth/usage?cedar_ember=1&at_wall=1`
    (the flags ask for both reset blocks, as Claude Code 2.1.282 does; its
    `skip_spend=1` is omitted), `Authorization: Bearer`,

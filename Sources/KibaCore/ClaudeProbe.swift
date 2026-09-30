@@ -98,16 +98,51 @@ public struct ClaudeProbe: Sendable {
         return await renewed(doc, now: now)
     }
 
-    /// `doc` with its saved refresh grant spent.
+    /// `doc` with its saved refresh grant spent. An account on hold is an
+    /// `error`, not `expired`: the hold may lift, so the login stays saved.
     private func renewed(_ doc: Data, now: Int) async -> Fresh {
         guard let grant = JSONFields(doc)?.obj(Key.oauth)?.str(Key.refreshToken) else {
             return .stale(.expired, Note.noGrant)
         }
         switch await refresh(doc, grant: grant, now: now) {
         case .fresh(let refreshed): return .ready(refreshed)
-        case .refused: return .stale(.expired, Note.refused)
+        case .denied(let r):
+            let said = Refusal(r.body)
+            if Hold.statuses.contains(r.status), said.onHold {
+                return .stale(.error, Note.onHold(Self.appeal(said.uri)))
+            }
+            guard r.refused else { return .stale(.error, ProbeNote.answered(Note.token, r.status)) }
+            return .stale(.expired, Note.refused(said.detail(r.status)))
         case .failed(let note): return .stale(.error, note)
         }
+    }
+
+    /// `s` with each run of whitespace and control characters as one space,
+    /// cut to `Note.detailMax` Unicode scalars ending in `Note.ellipsis`:
+    /// scalars, not characters, so combining marks cannot stack past the bound.
+    private static func oneLine(_ s: String) -> String {
+        let words = s.split { c in
+            c.isWhitespace || c.unicodeScalars.allSatisfy { $0.properties.generalCategory == .control }
+        }
+        let line = words.joined(separator: " ").unicodeScalars
+        guard line.count > Note.detailMax else { return String(line) }
+        return String(Substring(line.prefix(Note.detailMax - 1))) + Note.ellipsis
+    }
+
+    /// `uri` when it is a plain https page on Anthropic's own hosts: no user,
+    /// port or fragment, nothing outside `Hold.chars`, no trailing `.` or `?`,
+    /// at most `Note.detailMax` characters. Else Claude Code's fallback page.
+    private static func appeal(_ uri: String?) -> String {
+        guard let uri, uri.count <= Note.detailMax, uri.hasPrefix(Hold.scheme), let last = uri.last,
+              !Hold.trailing.contains(last)
+        else { return Hold.restricted }
+        let rest = uri.dropFirst(Hold.scheme.count)
+        let host = rest.prefix { $0 != "/" && $0 != "?" }.lowercased()
+        guard rest.unicodeScalars.allSatisfy({ Hold.chars.contains($0) }), !host.isEmpty,
+              host.unicodeScalars.allSatisfy({ Hold.hostChars.contains($0) }),
+              Hold.hosts.contains(where: { host == $0 || host.hasSuffix("." + $0) })
+        else { return Hold.restricted }
+        return uri
     }
 
     private func accessToken(_ doc: Data) -> String? {
@@ -274,6 +309,52 @@ public struct ClaudeProbe: Sendable {
         static let code = "error_code"
         /// The organization has no plan Claude Code may use.
         static let noOAuth = "oauth_not_allowed_for_organization"
+        static let type = "type"
+        static let description = "error_description"
+        static let uri = "error_uri"
+    }
+
+    /// Anthropic's on-hold refusal and its appeal page, as Claude Code 2.1.285 reads them.
+    private enum Hold {
+        static let statuses = HTTPStatus.refusals + [HTTPStatus.forbidden]
+        static let codes = ["invalid_grant", "access_denied"]
+        static let description = "account_on_hold"
+        /// Claude Code's page when the answer names none kiba trusts.
+        static let restricted = "https://claude.ai/restricted"
+        static let scheme = "https://"
+        /// An appeal page's host is one of these or a subdomain.
+        static let hosts = ["claude.ai", "anthropic.com"]
+        static let hostChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-")
+        /// Every character an appeal page may spell after the scheme: no `@`, `:` or `#`.
+        static let chars = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/._~%-?=&")
+        static let trailing: [Character] = [".", "?"]
+    }
+
+    /// A token endpoint's error answer as Claude Code reads it.
+    private struct Refusal {
+        /// `error` when it is a string, else `error.type`; "" when absent.
+        let code: String
+        /// `error_description`; "" when absent.
+        let description: String
+        let uri: String?
+
+        init(_ body: Data) {
+            let fields = JSONFields(body)
+            code = fields?.str(Fail.error) ?? fields?.obj(Fail.error)?.str(Fail.type) ?? ""
+            description = fields?.str(Fail.description) ?? ""
+            uri = fields?.str(Fail.uri)
+        }
+
+        var onHold: Bool { Hold.codes.contains(code) && description == Hold.description }
+
+        /// `<status> <code>: <description>` on one line, absent parts left out.
+        func detail(_ status: Int) -> String {
+            var out = String(status)
+            if !code.isEmpty { out += " \(code)" }
+            if !description.isEmpty { out += ": \(description)" }
+            return ClaudeProbe.oneLine(out)
+        }
     }
 
     /// Names in the limit-reset exchange, as Claude Code's parser reads them:
@@ -319,10 +400,20 @@ public struct ClaudeProbe: Sendable {
         static let reset = "Anthropic's reset endpoint"
         static let liveExpired = "access token expired; Claude Code refreshes it on its next run"
         static let noGrant = "access token expired and no refresh token is saved; log in again"
-        static let refused = "access token expired and the refresh was refused; log in again"
+        /// The longest server-supplied text a note carries.
+        static let detailMax = 120
+        static let ellipsis = "…"
         static let rejected = "login rejected by Anthropic; log in again"
         static let throttled = "Anthropic is rate limiting usage checks; try again later"
         static let unsubscribed = "no plan for Claude Code: Anthropic does not allow this organization's OAuth login"
         static let resetThrottled = "Anthropic is rate limiting limit resets; try again later"
+
+        static func refused(_ detail: String) -> String {
+            "access token expired and the refresh was refused (\(detail)); log in again"
+        }
+
+        static func onHold(_ url: String) -> String {
+            "account on hold and cannot use Claude Code; view details or appeal at \(url)"
+        }
     }
 }
