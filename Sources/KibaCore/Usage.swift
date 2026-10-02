@@ -37,6 +37,8 @@ public enum UsageState: String, Codable, Sendable {
     case ok, expired, revoked, error, unknown
     /// The login works, but the organization has no plan the CLI may use.
     case unsubscribed
+    /// The provider is rate limiting this login's usage checks.
+    case throttled
 }
 
 /// A saved account's `usage.json`: the result of its last probe.

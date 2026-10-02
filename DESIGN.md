@@ -473,8 +473,9 @@ public struct CodexLive {
 
 ```swift
 public struct Limit: Codable, Equatable, Sendable { public var label: String; public var percent: Int; public var resetsAt: String }
-public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown, unsubscribed }
+public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown, unsubscribed, throttled }
 // unsubscribed: the login works, but the organization has no plan the CLI may use
+// throttled: the provider is rate limiting this login's usage checks
 public struct ResetOffer: Codable, Equatable, Sendable {
   public var count: Int              // resets available now
   public var program: String         // Claude: "cedar_ember" (banked grants) | "juniper_tide" (one per week); Codex: ""
@@ -604,7 +605,7 @@ Claude:
    organization's OAuth login": the login works, but the organization has
    no plan Claude Code may use. A lapsed subscription answers so, while the
    token document still claims its old `subscriptionType`, so the saved plan
-   is not shown for such a row (see Rows). 429 → `error`
+   is not shown for such a row (see Rows). 429 → `throttled`
    "Anthropic is rate limiting usage checks; try again later". Other →
    `error` "Anthropic's usage endpoint answered <code>". No `accessToken` →
    `error` "no access token saved".
@@ -632,7 +633,7 @@ Codex:
    (400/401): revokedFlag → `.revoked(note: "login revoked by a later
    `codex login`")`; else `expired` "access token rejected and the refresh
    was refused; log in again". Refresh other →
-   `error` "OpenAI's token endpoint answered <code>". 429 → `error` "OpenAI
+   `error` "OpenAI's token endpoint answered <code>". 429 → `throttled` "OpenAI
    is rate limiting usage checks; try again later". Other → `error` "OpenAI's
    usage endpoint answered <code>".
 
@@ -781,9 +782,11 @@ public enum Rows {
   static func blocking(_ u: UsageRecord?) -> Limit?  // among percent ≥ 100: latest parseable reset, else the first
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
   static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, or expired && !active
+  static func relogin(_ u: UsageRecord?, active: Bool) -> Bool // dead, or throttled && !active: a click logs in again
   static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool // claude && dead
   static func state(_ u: UsageRecord?, active: Bool) -> RowState
   static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead/unsubscribed 2, unknown 3
+  static func drained(_ s: RowState) -> Bool         // dead or unsubscribed: every bar segment an empty track
   static func sorted(_ a: [Account]) -> [Account]    // rank; rank 2 by blocking reset (unparseable last); else input order
   static func figures(_ u: UsageRecord?) -> [Figure] // session, weekly, then other percent ≥ 0 in order; each (label, left = 100 - percent)
   static func figuresText(_ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
@@ -809,8 +812,10 @@ lapsed, which no answer proves. Tooltip lines: `email · plan ·
 current` (`plan`: "no plan" while unsubscribed, since the saved plan is the
 token document's stale claim); "Usage not probed yet" | note or "No limits reported" | one line
 per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
-"2 limit resets available" while `resets` > 0; "Probed 12 min ago"; then "Click to log in to this account again" (dead) or
-"Click to switch <title> to this account" (not active).
+"2 limit resets available" while `resets` > 0; "Probed 12 min ago"; then "Click to log in to this account again" (`relogin`) or
+"Click to switch <title> to this account" (not active). A throttled saved
+row offers a fresh login like a dead one, replacing the token whose usage
+checks are rate limited.
 
 ### Add account (LoginRunner)
 
@@ -1021,13 +1026,13 @@ default 120, min 15).
   once and an open does not repeat it. The status error is separate: set
   by a failed read, cleared by the next good one.
 - Actions (`busy` guards all):
-  `use(p, name)` — a dead row starts `add(p, name.email)` instead;
+  `use(p, name)` — a `Rows.relogin` row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
   probes every provider and counts accounts per outcome: refreshed (the
   provider answered: record `ok`, `unknown` or `unsubscribed`, or a dead
   Claude row, `Rows.maybeFree`), waiting (record `expired`
   on a row probed as live: its CLI refreshes the token, kiba never does),
-  failed (any other record `expired`, `error` or `revoked`: no fresh
+  failed (any other record `expired`, `error`, `revoked` or `throttled`: no fresh
   usage), removed (`.revoked`) and not probed (a row shown with no
   outcome: its provider could not be probed, or its login changed before
   its usage was recorded). Each row shown when the probe ends and each

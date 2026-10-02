@@ -40,7 +40,7 @@ public struct ClaudeProbe: Sendable {
         case HTTPStatus.forbidden where Self.noPlan(r.body):
             return done(.unsubscribed, Note.unsubscribed)
         case HTTPStatus.tooManyRequests:
-            return done(.error, Note.throttled)
+            return done(.throttled, Note.throttled)
         default:
             return done(.error, ProbeNote.answered(Note.usage, r.status))
         }

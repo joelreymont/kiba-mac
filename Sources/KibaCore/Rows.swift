@@ -74,6 +74,13 @@ public enum Rows {
         return u.state == .revoked || (u.state == .expired && !active)
     }
 
+    /// A click logs the account in again instead of switching to it: the
+    /// saved login is dead, or its usage checks are rate limited and a
+    /// fresh login replaces the throttled token.
+    public static func relogin(_ u: UsageRecord?, active: Bool) -> Bool {
+        dead(u, active: active) || (u?.state == .throttled && !active)
+    }
+
     /// A dead Claude row: it reads "free?", a guess that the plan lapsed,
     /// and a probe counts it as answered. A dead Codex row asks to log in
     /// again.
@@ -205,7 +212,7 @@ public enum Rows {
         } else {
             lines.append(Copy.unprobed)
         }
-        if dead(a.usage, active: a.active) {
+        if relogin(a.usage, active: a.active) {
             lines.append(Copy.relogin)
         } else if !a.active {
             lines.append("Click to switch \(p.title) to this account")

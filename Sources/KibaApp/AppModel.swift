@@ -502,10 +502,11 @@ final class AppModel {
         retain(old)
     }
 
-    /// Switches to a saved account; a dead one is logged in again instead.
+    /// Switches to a saved account; a dead or rate-limited one is logged in
+    /// again instead.
     func use(_ p: Provider, _ n: SlotName) {
         guard let a = account(p, n), !a.active else { return }
-        if Rows.dead(a.usage, active: a.active) {
+        if Rows.relogin(a.usage, active: a.active) {
             add(p, email: n.email)
             return
         }
@@ -801,7 +802,7 @@ final class AppModel {
                             waiting += 1
                         case _ where Rows.maybeFree(p, u, active: a.live):
                             refreshed += 1
-                        case .expired, .error, .revoked:
+                        case .expired, .error, .revoked, .throttled:
                             failed += 1
                             lines.append("\(p.title): \(a.name.raw): \(u.note)")
                         }

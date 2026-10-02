@@ -32,7 +32,7 @@ public struct CodexProbe: Sendable {
             case HTTPStatus.unauthorized:
                 return done(.expired, Note.rejected)
             case HTTPStatus.tooManyRequests:
-                return done(.error, Note.throttled)
+                return done(.throttled, Note.throttled)
             default:
                 return done(.error, ProbeNote.answered(Note.usage, r.status))
             }

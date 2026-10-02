@@ -504,6 +504,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     /// A refusal whose description runs past `detailMax` over two lines, and its detail on one.
     static let long = #"{"error":"invalid_grant","error_description":"line one\n"# + String(repeating: "x", count: 130) + #""}"#
     static let longDetail = "400 invalid_grant: line one " + String(repeating: "x", count: 130)
+    static let throttled = "Anthropic is rate limiting usage checks; try again later"
     static func refused(_ detail: String) -> String {
         "access token expired and the refresh was refused (\(detail)); log in again"
     }
@@ -535,7 +536,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         ProbeCase(provider: .claude, login: fresh, answers: [down],
                   state: .error, note: "Anthropic's usage endpoint could not be reached"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],
-                  state: .error, note: "Anthropic is rate limiting usage checks; try again later"),
+                  state: .throttled, note: throttled),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, noOAuth)],
                   state: .unsubscribed, note: noPlan),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, "{}")],
@@ -549,7 +550,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         ProbeCase(provider: .codex, login: auth, answers: [answer(Status.serverError, "")],
                   state: .error, note: "OpenAI's usage endpoint answered 500"),
         ProbeCase(provider: .codex, login: auth, answers: [answer(Status.tooMany, "{}")],
-                  state: .error, note: "OpenAI is rate limiting usage checks; try again later"),
+                  state: .throttled, note: "OpenAI is rate limiting usage checks; try again later"),
     ]
 }
 
@@ -808,6 +809,57 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         "b@x · max", ProbeCase.refused("400 invalid_grant: Refresh token not found or invalid"),
         "Probed just now", "Click to log in to this account again",
     ])
+}
+
+/// Anthropic rate limits a saved login's usage checks: the probe counts it
+/// as failed, its hover lines offer a fresh login, and a click logs it in
+/// again in place of switching to it, replacing the throttled token.
+@MainActor @Test func rowsOfferThrottledLoginAgain() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+    let prof = profile("a@x", org: "org-a")
+    let creds = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+    let profB = profile("b@x", org: "org-b")
+    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: creds, profile: prof)
+    try w.seed(.claude, bx, Identity(email: "b@x", plan: "max", org: "org-b"),
+               login: claudeCreds("xb", plan: "max", expires: Fixed.now + Fixed.day), profile: profB)
+    try w.writeClaude(config: claudeConfig(prof), creds: creds)
+    let http = StubHTTP([
+        answer(Status.ok, claudeUsage(session: 30, week: 60)),
+        answer(Status.tooMany, "{}"),
+        answer(Status.ok, claudeUsage(session: 10, week: 20)),
+    ])
+    let fresh = claudeCreds("nb", plan: "max", expires: Fixed.now + Fixed.day)
+    try w.fakeCLI("claude", """
+        printf '%s' '\(text(fresh))' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+        printf '%s' '\(text(claudeConfig(profB)))' > "$CLAUDE_CONFIG_DIR/.claude.json"
+        """)
+    let core = CoreBackend(
+        switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
+        runner: try w.runner(http, keychain: FakeKeychain(items: [:])))
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await settle(model)
+    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 failed\nClaude Code: b@x: \(ProbeCase.throttled)")
+
+    let rows = try #require(model.sections.first { $0.id == .claude }).accounts
+    try #require(rows.map(\.name) == [ax, bx])
+    let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
+    #expect(Rows.tooltip(.claude, rows[1], now: now) == [
+        "b@x · max", ProbeCase.throttled, "Probed just now", "Click to log in to this account again",
+    ])
+
+    model.use(.claude, bx)
+    try await settle(model)
+    #expect(model.message == "Added b@x")
+    #expect(w.calls() == ["claude auth login --email b@x"])
+    #expect(try w.store.fetch(.claude, bx)?.login == fresh)
+    #expect(try w.store.fetch(.claude, bx)?.usage?.state == .ok)
+    #expect(w.read(w.paths.claudeCredsFile(root: nil)) == creds)
 }
 
 /// A probed row's hover lines count the limit resets it offers, after its
