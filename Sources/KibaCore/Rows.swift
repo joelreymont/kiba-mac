@@ -137,14 +137,20 @@ public enum Rows {
     }
 
     /// Whether the account can take work now; nil while its usage is unknown.
-    /// The status dot's verdict, and a drained bar when false: a limited
-    /// account has no usable limit left, whatever its other windows hold.
+    /// The status dot's verdict.
     public static func usable(_ s: RowState) -> Bool? {
         switch s {
         case .ok, .tight: return true
         case .blocked, .dead, .unsubscribed: return false
         case .unknown: return nil
         }
+    }
+
+    /// The bar shows every window empty: the login is gone or has no plan,
+    /// so no window holds anything usable. A limited account keeps its
+    /// windows' levels, since one used-up window leaves the others open.
+    public static func drained(_ s: RowState) -> Bool {
+        s == .dead || s == .unsubscribed
     }
 
     /// `"72% · 40% · 9%"`, or `"limit"` while a window is used up.

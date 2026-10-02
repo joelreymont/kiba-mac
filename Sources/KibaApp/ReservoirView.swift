@@ -3,9 +3,10 @@ import SwiftUI
 
 /// The signature: a 4 pt bar under an account row showing the usable limit
 /// left, one segment per window, each filled from the left to the share of
-/// its window left and colored by its own level, on a grey track. A drained
-/// bar (the account is limited or dead: nothing usable) shows every window
-/// as an empty track, and a row with no figures yet shows the two windows
+/// its window left and colored by its own level, on a grey track; a used-up
+/// window is an empty track. A drained bar (`Rows.drained`: the login is
+/// dead or has no plan) shows every window as an empty track, and a row
+/// with no figures yet shows the two windows
 /// every provider reports, session and week, as empty tracks.
 struct ReservoirView: View {
     let figures: [Figure]

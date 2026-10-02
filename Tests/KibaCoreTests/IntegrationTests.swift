@@ -716,6 +716,10 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let accounts = try #require(claude).accounts
         try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x"])
         #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok])
+        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false])
+        #expect(Rows.figures(accounts[1].usage) == [
+            Figure(label: "Session (5-hour)", left: 0), Figure(label: "Weekly (7-day)", left: 40),
+        ])
         #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "c@x", "b@x", "a@x"])
         #expect(Rows.figures(accounts[3].usage) == [
             Figure(label: "Session (5-hour)", left: 90), Figure(label: "Weekly (7-day)", left: 80),

@@ -1171,7 +1171,7 @@ no add row. Cursor order: Dismiss, Retry, then per section add, accounts
 │ ● joel@x.com (max)            72% · 40% · 9% │  dot · name · plan · figures
 │ ████████░░  ████░░░░░░  █░░░░░░░░░           │  reservoir: usable limit left
 │ ● other@x.com (pro, 5d)            limit (2) │  red dot: limited; 2 resets
-│ ░░░░░░░░░░  ░░░░░░░░░░                       │  drained: nothing usable
+│ ███████░░░  █████░░░░░  ░░░░░░░░░░           │  limited: used-up window empty
 │ Save the current login                       │  action row
 │ Codex                                      + │
 │ ● me@y.com (plus)                  88% · 61% │
@@ -1186,12 +1186,13 @@ into one segment per window (session, week, each model window, in figure
 order), 3 pt gaps, radius 2, track `track`, fill from the left = left/100,
 each segment in its own color: `room` with half or more left, `low` under
 half (`Rows.isLow`); a remainder too thin to see still draws a sliver as
-wide as the bar is tall. The track is always grey. The bar shows the
-**usable** limit left: when the account cannot take work (`Rows.usable`
-false: a window at its limit, dead, or without a plan) it is drained, every segment an
-empty track, because a limited account has no usable limit left whatever
-its other windows hold. A row with no figures yet (unknown usage) shows two
-empty tracks, session and week, so the bar is never missing. The verdict is
+wide as the bar is tall. The track is always grey. A limited account
+keeps every window's level, its used-up window an empty track, because one
+spent window (a model's week) leaves the others open. When the login is
+dead or has no plan (`Rows.drained`) the bar is drained, every segment an
+empty track: no window holds anything usable. A row with no figures yet
+(unknown usage) shows two empty tracks, session and week, so the bar is
+never missing. The verdict is
 the **status dot** before the name (8 pt): `room` green when the account
 can take work (ok or tight), `out` red when it is limited, dead or without
 a plan, `idle`

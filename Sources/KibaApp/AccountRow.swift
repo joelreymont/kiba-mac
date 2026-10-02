@@ -48,7 +48,7 @@ struct AccountRow: View {
                     figures(Rows.figuresText(account.usage), red)
                     badgeSpot
                 }
-                ReservoirView(figures: Rows.figures(account.usage), drained: red)
+                ReservoirView(figures: Rows.figures(account.usage), drained: Rows.drained(state))
             }
             .modifier(Slab(fill: fill))
         }
