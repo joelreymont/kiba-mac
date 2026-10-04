@@ -718,14 +718,34 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x"])
         #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok])
         #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false])
-        #expect(Rows.figures(accounts[1].usage) == [
+        #expect(Rows.figures(.claude, accounts[1].usage) == [
             Figure(label: "Session (5-hour)", left: 0), Figure(label: "Weekly (7-day)", left: 40),
         ])
         #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "c@x", "b@x", "a@x"])
-        #expect(Rows.figures(accounts[3].usage) == [
+        #expect(Rows.figures(.claude, accounts[3].usage) == [
             Figure(label: "Session (5-hour)", left: 90), Figure(label: "Weekly (7-day)", left: 80),
             Figure(label: "Opus Weekly", left: 60),
         ])
+    }
+}
+
+/// Claude's session draws from its weekly allowance: with the weekly window
+/// used up, the session's bar and spoken figure read nothing left, while
+/// the model window keeps its own level.
+@Test func rowsSpendClaudeSessionWithItsWeek() async throws {
+    try await scratch { w in
+        try w.seed(.claude, try slot("a@x"), Identity(email: "a@x", plan: "max", org: "org-a"),
+                   login: claudeCreds("a", plan: "max", expires: Fixed.now + Fixed.day), profile: profile("a@x", org: "org-a"))
+        let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 100, opus: 40))])
+        #expect(await w.switcher(http).probeAll(.claude).providerError == nil)
+
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        let a = try #require(claude?.accounts.first)
+        #expect(Rows.figures(.claude, a.usage) == [
+            Figure(label: "Session (5-hour)", left: 0), Figure(label: "Weekly (7-day)", left: 0),
+            Figure(label: "Opus Weekly", left: 60),
+        ])
+        #expect(Rows.figuresText(.claude, a.usage) == "limit")
     }
 }
 
@@ -765,7 +785,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     #expect(Rows.usable(.unsubscribed) == false)
     #expect(Rows.rank(.unsubscribed) == Rows.rank(.dead))
     #expect(Rows.planText(.claude, a, now: now) == "(no plan)")
-    #expect(Rows.figuresText(a.usage) == "")
+    #expect(Rows.figuresText(.claude, a.usage) == "")
     #expect(Rows.tooltip(.claude, a, now: now) == ["a@x · no plan · current", ProbeCase.noPlan, "Probed just now"])
 }
 

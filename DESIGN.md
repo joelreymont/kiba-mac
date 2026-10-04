@@ -788,8 +788,8 @@ public enum Rows {
   static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead/unsubscribed 2, unknown 3
   static func drained(_ s: RowState) -> Bool         // dead or unsubscribed: every bar segment an empty track
   static func sorted(_ a: [Account]) -> [Account]    // rank; rank 2 by blocking reset (unparseable last); else input order
-  static func figures(_ u: UsageRecord?) -> [Figure] // session, weekly, then other percent ≥ 0 in order; each (label, left = 100 - percent)
-  static func figuresText(_ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
+  static func figures(_ p: Provider, _ u: UsageRecord?) -> [Figure] // session, weekly, then other percent ≥ 0 in order; each (label, left = 100 - percent); Claude's session left 0 while its weekly is at 100
+  static func figuresText(_ p: Provider, _ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
   static func plan(_ a: Account) -> String           // the saved plan; "no plan" while unsubscribed
   static func planText(_ p: Provider, _ a: Account, now: Date) -> String // "(pro)", "(pro, 5d)", "(pro, log in again)", "(free?)" when maybeFree, "(no plan)", ""
   static func tooltip(_ p: Provider, _ a: Account, now: Date) -> [String]
@@ -1193,7 +1193,9 @@ each segment in its own color: `room` with half or more left, `low` under
 half (`Rows.isLow`); a remainder too thin to see still draws a sliver as
 wide as the bar is tall. The track is always grey. A limited account
 keeps every window's level, its used-up window an empty track, because one
-spent window (a model's week) leaves the others open. When the login is
+spent window (a model's week) leaves the others open. Claude's session
+draws from its weekly allowance, so while the weekly is used up the
+session segment is an empty track too (`Rows.figures`). When the login is
 dead or has no plan (`Rows.drained`) the bar is drained, every segment an
 empty track: no window holds anything usable. A row with no figures yet
 (unknown usage) shows two empty tracks, session and week, so the bar is

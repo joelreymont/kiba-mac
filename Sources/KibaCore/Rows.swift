@@ -127,11 +127,15 @@ public enum Rows {
     }
 
     /// Session, weekly, then every other window with a reading, in order.
-    public static func figures(_ u: UsageRecord?) -> [Figure] {
+    /// Claude's session draws from its weekly allowance, so a used-up
+    /// weekly window leaves the session nothing: it reads 0 left.
+    public static func figures(_ p: Provider, _ u: UsageRecord?) -> [Figure] {
         guard let u else { return [] }
         let s = first(u, long: false), w = first(u, long: true)
+        let weekOut = p == .claude && w.map { u.limits[$0].percent >= Level.full } == true
         var out: [Figure] = []
-        for i in [s, w].compactMap({ $0 }) { out.append(figure(u.limits[i])) }
+        if let s { out.append(weekOut ? Figure(label: u.limits[s].label, left: 0) : figure(u.limits[s])) }
+        if let w { out.append(figure(u.limits[w])) }
         for (i, l) in u.limits.enumerated() where i != s && i != w && l.percent >= 0 {
             out.append(figure(l))
         }
@@ -161,9 +165,9 @@ public enum Rows {
     }
 
     /// `"72% · 40% · 9%"`, or `"limit"` while a window is used up.
-    public static func figuresText(_ u: UsageRecord?) -> String {
+    public static func figuresText(_ p: Provider, _ u: UsageRecord?) -> String {
         if state(u, active: false) == .blocked { return Copy.limit }
-        return figures(u).map { "\($0.left)%" }.joined(separator: Copy.figureSep)
+        return figures(p, u).map { "\($0.left)%" }.joined(separator: Copy.figureSep)
     }
 
     /// The saved plan, or "no plan" for an unsubscribed row: the token

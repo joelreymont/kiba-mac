@@ -45,10 +45,10 @@ struct AccountRow: View {
                     name(red).layoutPriority(Theme.nameFirst)
                     plan(red)
                     Spacer(minLength: Theme.gap)
-                    figures(Rows.figuresText(account.usage), red)
+                    figures(Rows.figuresText(provider, account.usage), red)
                     badgeSpot
                 }
-                ReservoirView(figures: Rows.figures(account.usage), drained: Rows.drained(state))
+                ReservoirView(figures: Rows.figures(provider, account.usage), drained: Rows.drained(state))
             }
             .modifier(Slab(fill: fill))
         }
@@ -128,7 +128,7 @@ struct AccountRow: View {
         var parts: [String] = []
         if state != .unsubscribed, !account.plan.isEmpty { parts.append(account.plan + Copy.planWord) }
         parts.append(verdict(state))
-        parts += Rows.figures(u).map { "\($0.label): \(max($0.left, 0))\(Copy.left)" }
+        parts += Rows.figures(provider, u).map { "\($0.label): \(max($0.left, 0))\(Copy.left)" }
         if let at = u?.fetchedAt, at > 0 { parts.append(Copy.probed + Rows.age(at, now: model.now)) }
         return parts.joined(separator: Copy.sep)
     }
