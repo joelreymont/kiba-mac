@@ -407,7 +407,9 @@ import os
     }
 }
 
-@Test func probeRemovesRevokedSavedCodexLogin() async throws {
+/// A saved Codex login a later login revoked stays listed, dead and asking
+/// to log in again, so the account is not forgotten.
+@Test func probeKeepsRevokedSavedCodexLogin() async throws {
     try await scratch { w in
         let liveAuth = codexAuth("live@y", plan: "plus", account: "acct-l", tag: "l")
         try w.writeCodex(liveAuth)
@@ -420,17 +422,24 @@ import os
             answer(Status.unauthorized, revoked),
         ])
 
+        let gone = codexAuth("gone@y", plan: "plus", account: "acct-g", tag: "g")
         let report = await w.switcher(http).probeAll(.codex)
 
         #expect(report.accounts.map(\.name.raw) == ["gone@y", "live@y"])
-        #expect(report.accounts.first?.outcome == .revoked(note: "login revoked by a later `codex login`"))
         #expect(http.requests.map(\.method) == ["GET", "POST", "GET"])
         #expect(http.requests.map { $0.headers[Header.auth] } == ["Bearer at-g", nil, "Bearer at-l"])
         let rows = try w.store.list(.codex)
-        #expect(rows.map(\.name.raw) == ["live@y"])
-        #expect(rows.first?.usage?.state == .expired)
-        #expect(rows.first?.login == liveAuth)
+        #expect(rows.map(\.name.raw) == ["gone@y", "live@y"])
+        #expect(rows.map(\.login) == [gone, liveAuth])
+        #expect(rows.map { $0.usage?.state } == [.revoked, .expired])
         #expect(w.read(w.paths.codexAuthFile(root: nil)) == liveAuth)
+
+        let codex = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .codex }
+        let row = try #require(codex?.accounts.first)
+        let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
+        #expect(Rows.state(row.usage, active: row.active) == .dead)
+        #expect(Rows.planText(.codex, row, now: now) == "(plus, log in again)")
+        #expect(Rows.tooltip(.codex, row, now: now).last == "Click to log in to this account again")
     }
 }
 
@@ -1735,9 +1744,10 @@ enum Fixed {
     static let overtake = Duration.milliseconds(200)
     /// The database and the files SQLite keeps beside it in WAL mode.
     static let dbFiles = ["", "-wal", "-shm"]
-    /// Why the store refuses to delete an account once `keepRows` has run.
-    static let kept = "accounts are kept"
-    static let keepRows = "CREATE TRIGGER keep BEFORE DELETE ON account BEGIN SELECT RAISE(ABORT, '\(kept)'); END;"
+    /// Why the store refuses to write b@y's usage once `freezeB` has run.
+    static let frozen = "usage is frozen"
+    static let freezeB =
+        "CREATE TRIGGER freeze BEFORE UPDATE OF usage ON account WHEN NEW.name = 'b@y' BEGIN SELECT RAISE(ABORT, '\(frozen)'); END;"
     /// The store layout before pending installs had owners.
     static let storeV1 = """
         PRAGMA user_version = 1;
@@ -2521,19 +2531,15 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(try w.store.fetch(.claude, cx)?.login == credsC)
 }
 
-/// A revoked login whose removal the store refused is still saved: the
-/// probe names it as not recorded and counts it as not probed, not removed.
-@MainActor @Test func appModelCountsOnlyRecordedRemovals() async throws {
+/// A usage record the store refused to write: the probe names it as not
+/// recorded and counts the account as not probed.
+@MainActor @Test func appModelCountsOnlyRecordedOutcomes() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
     let usage = answer(Status.ok, codexUsage(session: 20, week: 45))
-    let revoked = [
-        answer(Status.unauthorized, #"{"error":{"code":"token_revoked","message":"Token revoked"}}"#),
-        answer(Status.unauthorized, #"{"error":"invalid_grant"}"#),
-    ]
-    let (core, ay, by) = try codexPair(w, [usage] + revoked + [usage] + revoked)
-    try w.storeSQL(Fixed.keepRows)
-    let unrecorded = "\(by.raw): usage not recorded: \(KibaError.db("remove: \(Fixed.kept)").reason)"
+    let (core, ay, by) = try codexPair(w, [usage, usage, usage, usage])
+    try w.storeSQL(Fixed.freezeB)
+    let unrecorded = "\(by.raw): usage not recorded: \(KibaError.db("set usage: \(Fixed.frozen)").reason)"
 
     let report = await core.probeAll(.codex)
     #expect(report.accounts.map(\.name) == [ay])
@@ -2646,17 +2652,17 @@ func members(_ body: Data?) throws -> [String: String] {
 }
 
 /// The probe the panel starts on opening adds to what is held and takes
-/// nothing away: a removed account's line and a provider's error and fault
+/// nothing away: a failed account's line and a provider's error and fault
 /// stay, and the open says nothing it did not find new.
 @MainActor @Test func appModelOpeningKeepsHeldNotes() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
-    let (core, _, _) = try codexPair(w, [
-        answer(Status.ok, codexUsage(session: 20, week: 45)),
+    let usage = answer(Status.ok, codexUsage(session: 20, week: 45))
+    let revoked = [
         answer(Status.unauthorized, #"{"error":{"code":"token_revoked","message":"Token revoked"}}"#),
         answer(Status.unauthorized, #"{"error":"invalid_grant"}"#),
-        answer(Status.ok, codexUsage(session: 20, week: 45)),
-    ])
+    ]
+    let (core, _, _) = try codexPair(w, [usage] + revoked + [usage] + revoked)
     let orphanCreds = w.paths.claudeCredsFile(root: nil)
     try claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day).write(to: orphanCreds)
     let model = AppModel(connect: { core })
@@ -2667,8 +2673,8 @@ func members(_ body: Data?) throws -> [String: String] {
 
     model.probeUsage()
     try await settle(model)
-    let held = "Usage refreshed for 1 of 2 accounts: 1 removed\n"
-        + "Codex: removed b@y, login revoked by a later `codex login`"
+    let held = "Usage refreshed for 1 of 2 accounts: 1 failed\n"
+        + "Codex: b@y: login revoked by a later `codex login`"
     let why = "Claude Code: " + KibaError.orphanLive(w.paths.claudeConfigFile(root: nil)).reason
     #expect(model.note == held)
     #expect(model.error == why)

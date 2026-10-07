@@ -73,7 +73,7 @@ public final class Switcher: Sendable {
     /// provider whose accounts or live login cannot be read, whose install is
     /// pending, or whose add's live item waits to go back is not probed at
     /// all. The live login is probed as live, so its tokens are never
-    /// refreshed, and it is never removed. An outcome whose row was replaced
+    /// refreshed. No outcome removes a login. An outcome whose row was replaced
     /// or forgotten meanwhile is neither written nor reported; one whose
     /// write failed is named in the provider error only.
     public func probeAll(_ p: Provider) async -> ProbeReport {
@@ -101,7 +101,7 @@ public final class Switcher: Sendable {
             let isLive = live.contains(row.name)
             let outcome = await run(p, row, live: isLive)
             do {
-                guard try record(p, row, outcome, live: isLive) else { continue }
+                guard try record(p, row, outcome) else { continue }
                 accounts.append(Probed(name: row.name, outcome: outcome, live: isLive))
             } catch {
                 unrecorded.append("\(row.name.raw): usage not recorded: \(StatusReader.reason(error))")
@@ -157,7 +157,7 @@ public final class Switcher: Sendable {
     func probeInTurn(_ p: Provider, _ n: SlotName, live: Bool) async throws -> ProbeOutcome {
         guard let row = try store.fetch(p, n) else { throw KibaError.noAccount(p, n.raw) }
         let outcome = await run(p, row, live: live)
-        try record(p, row, outcome, live: live)
+        try record(p, row, outcome)
         return outcome
     }
 
@@ -251,23 +251,15 @@ public final class Switcher: Sendable {
         }
     }
 
-    /// Writes a probe's outcome: the usage record and any refreshed login, or
-    /// the removal of a saved login the provider revoked. The live login is
-    /// never removed: a revoked one keeps its row with the revocation as its
-    /// usage, because the live files are what to fix. False, with nothing
-    /// written, when the row no longer holds the login the probe read.
+    /// Writes a probe's outcome: the usage record and any refreshed login. A
+    /// login the provider revoked keeps its row, dead, so the account stays
+    /// listed until the user forgets it. False, with nothing written, when
+    /// the row no longer holds the login the probe read.
     @discardableResult
-    func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome, live: Bool) throws -> Bool {
+    func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome) throws -> Bool {
         try unchanged(p, row) { tx in
-            switch outcome {
-            case .record(let usage, let doc):
-                try tx.setUsage(p, row.name, usage)
-                if doc != row.login { try tx.setLogin(p, row.name, doc) }
-            case .revoked(let note):
-                guard live else { return try tx.remove(p, row.name) }
-                let usage = UsageRecord(fetchedAt: epochSeconds(clock()), state: .revoked, note: note, limits: [])
-                try tx.setUsage(p, row.name, usage)
-            }
+            try tx.setUsage(p, row.name, outcome.usage)
+            if outcome.doc != row.login { try tx.setLogin(p, row.name, outcome.doc) }
         }
     }
 

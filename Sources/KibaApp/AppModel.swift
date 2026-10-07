@@ -105,7 +105,7 @@ struct ProbeRun: Equatable, Sendable {
 }
 
 /// What an action came to. A plain confirmation fades; a held result (an
-/// unexpected account, a removed login, a probe that missed accounts) and
+/// unexpected account, a probe that missed accounts) and
 /// every error stay until dismissed or superseded by the next action.
 struct Outcome: Equatable, Sendable {
     var text: String
@@ -763,20 +763,19 @@ final class AppModel {
 
     /// What probing every provider came to, counted per account: refreshed
     /// (the provider answered, or a saved Claude login is dead: its row
-    /// reads "free?"), failed (no fresh usage), removed (a later
-    /// login revoked it), waiting (the live login's token has expired; its
-    /// CLI refreshes it on its next run, kiba never does), and skipped (a
+    /// reads "free?"), failed (no fresh usage), waiting (the live login's
+    /// token has expired; its CLI refreshes it on its next run, kiba never
+    /// does), and skipped (a
     /// row shown that no outcome covers: its provider could not be probed,
     /// or its login changed before its usage was recorded).
     private struct Tally {
         var refreshed = 0
         var failed = 0
-        var removed = 0
         var waiting = 0
         var skipped = 0
         /// A provider could not be probed, or an account's usage not recorded.
         var unprobed = false
-        /// One line per failed or removed account.
+        /// One line per failed account.
         var lines: [String] = []
         /// Save-back and provider failures, and the providers they concern.
         var errors: [String] = []
@@ -792,23 +791,18 @@ final class AppModel {
                 let rows = shown.providers.first { $0.provider == p }?.accounts ?? []
                 skipped += rows.count(where: { !probed.contains($0.name) })
                 for a in r.accounts {
-                    switch a.outcome {
-                    case .record(let u, _):
-                        records[p, default: [:]][a.name] = u
-                        switch u.state {
-                        case .ok, .unknown, .unsubscribed:
-                            refreshed += 1
-                        case .expired where a.live:
-                            waiting += 1
-                        case _ where Rows.maybeFree(p, u, active: a.live):
-                            refreshed += 1
-                        case .expired, .error, .revoked, .throttled:
-                            failed += 1
-                            lines.append("\(p.title): \(a.name.raw): \(u.note)")
-                        }
-                    case .revoked(let note):
-                        removed += 1
-                        lines.append("\(p.title): removed \(a.name.raw), \(note)")
+                    let u = a.outcome.usage
+                    records[p, default: [:]][a.name] = u
+                    switch u.state {
+                    case .ok, .unknown, .unsubscribed:
+                        refreshed += 1
+                    case .expired where a.live:
+                        waiting += 1
+                    case _ where Rows.maybeFree(p, u, active: a.live):
+                        refreshed += 1
+                    case .expired, .error, .revoked, .throttled:
+                        failed += 1
+                        lines.append("\(p.title): \(a.name.raw): \(u.note)")
                     }
                 }
                 // Claude credentials without a config fail the save-back and the
@@ -822,17 +816,15 @@ final class AppModel {
 
         var clean: Bool { failed == 0 && waiting == 0 && !unprobed }
         /// Accounts an outcome reached.
-        var covered: Int { refreshed + failed + removed + waiting }
+        var covered: Int { refreshed + failed + waiting }
         var total: Int { covered + skipped }
 
         /// Every account refreshed, or nothing to probe, is plain; a probe
-        /// that missed any account is held, with one line per failed or
-        /// removed account.
+        /// that missed any account is held, with one line per failed account.
         var outcome: Outcome {
             let missed = total - refreshed
             var misses: [String] = []
             if failed > 0 { misses.append("\(failed) failed") }
-            if removed > 0 { misses.append("\(removed) removed") }
             if waiting > 0 { misses.append(Copy.waiting(waiting)) }
             if skipped > 0 { misses.append("\(skipped) not probed") }
             let tail = misses.joined(separator: Copy.listSep)

@@ -21,7 +21,7 @@ public struct ClaudeProbe: Sendable {
         func done(_ state: UsageState, _ note: String, _ limits: [Limit] = [], _ resets: ResetOffer? = nil)
             -> ProbeOutcome
         {
-            .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
+            ProbeOutcome(usage: UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
         }
 
         switch await fresh(doc, live: i.live, now: now) {

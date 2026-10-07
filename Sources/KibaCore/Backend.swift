@@ -16,13 +16,11 @@ public protocol Backend: Sendable {
     func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
 }
 
-/// What probing one saved login produced.
-public enum ProbeOutcome: Equatable, Sendable {
-    /// The usage record, and the login document (refreshed when the probe
-    /// renewed its tokens).
-    case record(UsageRecord, doc: Data)
-    /// A later login revoked this one.
-    case revoked(note: String)
+/// What probing one saved login produced: its usage record, and the login
+/// document (refreshed when the probe renewed its tokens).
+public struct ProbeOutcome: Equatable, Sendable {
+    public var usage: UsageRecord
+    public var doc: Data
 }
 
 /// What the provider made of a limit-reset request.

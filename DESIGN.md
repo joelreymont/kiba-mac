@@ -531,7 +531,7 @@ no bearer.
 
 ```swift
 public struct ProbeInput { provider, name: SlotName, doc: Data /* the row's login bytes */, live: Bool }
-public enum ProbeOutcome: Equatable { case record(UsageRecord, doc: Data /* possibly refreshed */); case revoked(note: String) }
+public struct ProbeOutcome: Equatable { public var usage: UsageRecord; public var doc: Data /* possibly refreshed */ }
 
 public struct ClaudeProbe { init(http: HTTPClient, clock: Clock); func run(_ i: ProbeInput) async -> ProbeOutcome }
 public struct CodexProbe  { same }
@@ -630,8 +630,8 @@ Codex:
    `tokens.id_token` (each if returned), top-level `last_refresh` = ISO now
    into the doc, each added at the end of its object when absent; then GET
    again (200 → ok, else the 401/429/other notes below). Refresh refused
-   (400/401): revokedFlag → `.revoked(note: "login revoked by a later
-   `codex login`")`; else `expired` "access token rejected and the refresh
+   (400/401): revokedFlag → `revoked` "login revoked by a later
+   `codex login`"; else `expired` "access token rejected and the refresh
    was refused; log in again". Refresh other →
    `error` "OpenAI's token endpoint answered <code>". 429 → `throttled` "OpenAI
    is rate limiting usage checks; try again later". Other → `error` "OpenAI's
@@ -724,8 +724,9 @@ replaced or forgotten meanwhile is never updated or removed.
   for every saved account: probe (`live` = name == live name, or, while
   the Claude files are mixed, the installed name); `write`, when the row
   still holds the probed login: `setUsage`, `setLogin` when the doc
-  changed, or on `.revoked` for a non-live account `remove`. The live
-  account is never refreshed and never removed. `accounts` holds only
+  changed. No probe removes a login: a revoked one stays listed as a dead
+  row until the user forgets it, so no account drops out of sight. The
+  live account is never refreshed. `accounts` holds only
   outcomes recorded: one whose row was replaced or forgotten meanwhile is
   not written and not in it, nor is one whose write failed, which
   `providerError` names ("<name>: usage not recorded: <reason>"). A pending
@@ -1033,17 +1034,17 @@ default 120, min 15).
   Claude row, `Rows.maybeFree`), waiting (record `expired`
   on a row probed as live: its CLI refreshes the token, kiba never does),
   failed (any other record `expired`, `error`, `revoked` or `throttled`: no fresh
-  usage), removed (`.revoked`) and not probed (a row shown with no
+  usage) and not probed (a row shown with no
   outcome: its provider could not be probed, or its login changed before
   its usage was recorded). Each row shown when the probe ends and each
   account a report names counts once, so a provider that fails whole
   still counts its rows. Wording: nothing saved "No saved
   accounts to refresh"; all refreshed "Usage refreshed for 2 accounts";
-  some "Usage refreshed for 1 of 3 accounts: 1 failed, 1 removed",
+  some "Usage refreshed for 1 of 3 accounts: 2 failed",
   "…: 1 live login waiting for its CLI" or "Usage refreshed for 2 of 4
   accounts: 2 not probed"; none "Usage not refreshed: 2
-  failed"; a failed or removed account adds "<Provider>: <name>: <note>" or
-  "<Provider>: removed <name>, <note>", and save-back and provider errors
+  failed"; a failed account adds "<Provider>: <name>: <note>", and
+  save-back and provider errors
   become errors, each line once. A result that missed any account is
   held, every other is plain; `lastProbe` records a run that reached any
 account, and one that reached none leaves the last standing, so the meta

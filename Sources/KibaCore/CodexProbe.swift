@@ -4,8 +4,7 @@ import Foundation
 /// (kiba `CODEX-PROBE`), and spends a credit on request. A saved login whose
 /// access token is rejected earns one refresh; the live login's token belongs
 /// to the running codex and is never refreshed. Writes nothing: a refreshed
-/// document comes back for the Switcher to store, and `.revoked` asks it to
-/// remove the saved login.
+/// document comes back for the Switcher to store.
 public struct CodexProbe: Sendable {
     private let http: any HTTPClient
     private let clock: Clock
@@ -21,7 +20,7 @@ public struct CodexProbe: Sendable {
         func done(_ state: UsageState, _ note: String, _ limits: [Limit] = [], _ resets: ResetOffer? = nil)
             -> ProbeOutcome
         {
-            .record(UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
+            ProbeOutcome(usage: UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
         }
         func result(_ got: HTTPOutcome) -> ProbeOutcome {
             guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
@@ -45,7 +44,6 @@ public struct CodexProbe: Sendable {
         if i.live { return done(.expired, Note.liveRejected) }
         switch await renewed(doc, rejection: r, now: now) {
         case .ready(let ready): doc = ready
-        case .stale(.revoked, let note): return .revoked(note: note)
         case .stale(let state, let note): return done(state, note)
         }
         guard let again = await usage(doc) else { return done(.error, ProbeNote.noAccess) }
