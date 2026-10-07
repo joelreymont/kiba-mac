@@ -58,8 +58,8 @@ public actor LoginRunner {
         defer { running.remove(p) }
         guard let cli = Subprocess.find(Self.command(p), path: searchPath) else { throw KibaError.noCLI(Self.command(p)) }
         let ops = switcher.ops(p)
-        await ops.enter()
-        defer { ops.leave() }
+        let held = try await ops.enter()
+        defer { ops.leave(held) }
         if p == .claude { try recover() }
         let root = paths.loginRoot(p)
         let old = try Self.removing(root) { try prepare(p, cli: cli, email: email, root: root) }

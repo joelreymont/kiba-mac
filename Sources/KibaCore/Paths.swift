@@ -45,6 +45,9 @@ public struct Paths: Sendable {
     /// Throwaway home for a provider login run by `add`.
     public func loginRoot(_ p: Provider) -> URL { Self.child(probe, Name.loginPrefix + p.rawValue) }
 
+    /// The empty file whose lock is a provider's turn, shared by every process.
+    public func turn(_ p: Provider) -> URL { Self.child(store, Name.turnPrefix + p.rawValue) }
+
     /// Keychain service of the Claude login `add` runs, which exports this
     /// config dir as `CLAUDE_CONFIG_DIR`.
     public var loginService: String {
@@ -123,6 +126,7 @@ public struct Paths: Sendable {
         static let db = "kiba.db"
         static let probe = "probe"
         static let loginPrefix = "login-"
+        static let turnPrefix = "turn-"
         static let claudeDir = ".claude"
         static let claudeConfig = ".claude.json"
         static let claudeCreds = ".credentials.json"

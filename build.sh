@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build build/Kiba.app and install it as ~/Applications/Kiba.app.
+# Build build/Kiba.app and install it as ~/Applications/Kiba.app, and the
+# kiba CLI as ~/.local/bin/kiba.
 set -eu
 
 cd "$(dirname "$0")"
@@ -14,6 +15,7 @@ for sig in HUP INT TERM; do
 done
 
 swift build -c release --product Kiba
+swift build -c release --product KibaCLI
 bin=$(swift build -c release --product Kiba --show-bin-path)
 
 app=build/Kiba.app
@@ -82,3 +84,9 @@ fi
 mv "$stage" "$dest"
 rm -rf "$old"
 echo "$dest"
+
+# The CLI the Claude Code auto-switch mod runs.
+cli=$HOME/.local/bin/kiba
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "$bin/KibaCLI" "$cli"
+echo "$cli"

@@ -15,6 +15,7 @@ public enum KibaError: Error, Equatable, Sendable {
     case superseded
     case unrepaired(Provider, String)
     case unrestored(Provider)
+    case turnBusy(Provider)
     case orphanLive(URL)
     case capacity(String)
     case unsafePath(URL)
@@ -55,6 +56,8 @@ extension KibaError {
             return "the \(p.title) switch to \(name) did not finish; nothing is probed or refreshed until a switch completes"
         case .unrestored(let p):
             return "the live \(p.title) login waits to be put back after an add; a new \(p.title) add or an app start does it"
+        case .turnBusy(let p):
+            return "another Kiba process holds the \(p.title) turn"
         case .orphanLive(let url):
             return "Claude credentials exist but \(url.path) is missing: nothing is probed or switched until it names their account"
         case .capacity(let what):

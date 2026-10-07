@@ -16,6 +16,7 @@ the spec.
 Package kiba-mac (SwiftPM, macOS 14+, Swift 6 language mode)
 ├── KibaCore   library: everything below the UI, no AppKit/SwiftUI
 ├── KibaApp    executable: NSStatusItem, popover, SwiftUI panel, AppModel
+├── KibaCLI    executable: `kiba`, the Claude Code auto-switch mod's view of KibaCore
 └── KibaCoreTests
 ```
 
@@ -63,6 +64,7 @@ public enum KibaError: Error, Equatable {
   case superseded                    // another Claude install noted its own pending marker first
   case unrepaired(Provider, String)  // this install is still pending: nothing is probed or refreshed until a switch completes
   case unrestored(Provider)          // an add's record of the live item waits: nothing is saved, switched or probed until it is settled
+  case turnBusy(Provider)            // another process held the provider's turn past the caller's wait bound
   case orphanLive(URL)               // Claude creds exist but the config naming their account is missing
   case capacity(String)              // >9 logins under one email, doc over 4 MiB
   case unsafePath(URL)               // symlink chain longer than 8 hops or ends in a link
@@ -91,6 +93,7 @@ public struct Paths: Sendable {
   public var db: URL                // store/kiba.db
   public var probe: URL             // store/probe
   public func loginRoot(_ p: Provider) -> URL            // store/probe/login-<provider>
+  public func turn(_ p: Provider) -> URL                 // store/turn-<provider>: the provider's turn (see Switcher)
   // HOME, CLAUDE_CONFIG_DIR, CODEX_HOME must be absolute when set:
   // a relative or `~` value throws io("<VAR> is not an absolute path: <value>");
   // nothing ever expands `~`.
@@ -296,12 +299,14 @@ posix_spawn with pipes; drains stdout/stderr concurrently; `setsid` sets
 
 ### Store
 
-One SQLite database, `paths.db`, holds every saved account. No lock file,
-no slot directories, no markers: a write transaction is the mutex and every
-row is whole or absent.
+One SQLite database, `paths.db`, holds every saved account. No slot
+directories, no markers: a write transaction is the row mutex and every row
+is whole or absent. The turn files beside it (`paths.turn(p)`) anchor the
+provider turns and hold no data; a transaction is still the row mutex and
+never spans a turn.
 
 ```sql
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 CREATE TABLE IF NOT EXISTS account (
   provider TEXT NOT NULL,          -- "claude" | "codex"
   name     TEXT NOT NULL,          -- SlotName.raw
@@ -314,8 +319,9 @@ CREATE TABLE IF NOT EXISTS account (
   PRIMARY KEY (provider, name)
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS live (
-  provider  TEXT PRIMARY KEY,      -- row absent: nothing installed yet
-  installed TEXT NOT NULL          -- name whose login is live
+  provider     TEXT PRIMARY KEY,   -- row absent: nothing installed yet
+  installed    TEXT NOT NULL,      -- name whose login is live
+  installed_at INTEGER             -- epoch seconds of the last install; NULL: none noted a time
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS pending (
   provider TEXT PRIMARY KEY,       -- row absent: no install in flight
@@ -346,6 +352,7 @@ public struct Store: Sendable {
   public func fetch(_ p: Provider, _ n: SlotName) throws -> SavedLogin?
   public func liveName(_ p: Provider, live: Identity) throws -> SlotName
   public func installed(_ p: Provider) throws -> SlotName?
+  public func installedAt(_ p: Provider) throws -> Int?          // epoch seconds of the last install; nil when none noted a time
   public func pending(_ p: Provider) throws -> SlotName?          // nil when no install is in flight
   public func adding(_ p: Provider) throws -> LiveItem?          // nil when no add is in flight
   public func write<T>(_ body: (Tx) throws -> T) throws -> T   // BEGIN IMMEDIATE … COMMIT; any throw rolls back and rethrows
@@ -356,7 +363,7 @@ public final class Tx {                             // only inside `write`: clos
   public func setLogin(_ p: Provider, _ n: SlotName, _ doc: Data) throws   // noAccount when absent
   public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws
   public func remove(_ p: Provider, _ n: SlotName) throws        // no-op when absent
-  public func noteInstalled(_ p: Provider, _ n: SlotName) throws // upsert into live
+  public func noteInstalled(_ p: Provider, _ n: SlotName, at: Int?) throws // upsert into live; at nil keeps the time noted
   public func notePending(_ p: Provider, _ n: SlotName) throws -> Claim   // upsert into pending under a new owner (UUID)
   public func owns(_ p: Provider, _ c: Claim) throws -> Bool     // the marker is still c's
   public func clearPending(_ p: Provider, _ c: Claim) throws     // deletes c's marker; no-op once another replaced it
@@ -388,7 +395,10 @@ it holds, owned by no install, stays until an install replaces it. A version
 1 or 2 store (its `adding` table has no `service`) gains that column by
 `ALTER TABLE adding ADD COLUMN service TEXT NOT NULL DEFAULT ''`, then every
 row gets the launch's `paths.keychainService`: an older build always put the
-item back there, so that is what its record meant.
+item back there, so that is what its record meant. A version 1 to 3 store
+(its `live` table has no `installed_at`) gains that column by
+`ALTER TABLE live ADD COLUMN installed_at INTEGER`; its row keeps NULL until
+the next install notes a time.
 
 `liveName` (kiba `LIVE-NAME`): candidates `email`, `email #2` … `email #9`.
 For each: no row → first free candidate remembered; row exists and its org
@@ -403,7 +413,7 @@ public struct ClaudeLive {
   public func identity() throws -> Identity?     // nil when no creds; orphanLive when creds exist without a config
   func login() throws -> LoginRead?              // one read of live(), then decode; nil as identity
   static func decode(_ config: Data, _ creds: Data) throws -> LoginRead   // identity, login = creds bytes, profile = exact oauthAccount object bytes
-  public func install(_ n: SlotName) throws
+  public func install(_ n: SlotName, at: Int) throws   // at: epoch seconds, noted with the name
   public func isMixed() throws -> Bool
 }
 ```
@@ -421,7 +431,7 @@ that ends with `claim = tx.notePending(n)`, committed before either live
 file changes. Then, in a second `store.write`: `tx.owns(claim)` else
 `superseded` (another install noted its own marker since; this one writes
 nothing and its preparation is dropped) → write config →
-`secrets.write(login)` → `tx.noteInstalled(n)` → `tx.clearPending(claim)`.
+`secrets.write(login)` → `tx.noteInstalled(n, at)` → `tx.clearPending(claim)`.
 Each file write returns only once it is on permanent storage (`PrivateFS`),
 so the marker is never cleared ahead of the files it vouches for. When
 either live write fails, the previous config bytes go back (the file is
@@ -465,7 +475,7 @@ public struct CodexLive {
   public init(paths: Paths, store: Store, root: URL? = nil)
   public func identity() throws -> Identity?     // nil when auth.json missing
   func login() throws -> LoginRead?              // one read: identity, login = live auth.json bytes, profile nil; nil as identity
-  public func install(_ n: SlotName) throws      // fetch (noAccount); email must belong to n else mismatch; inside store.write: write live auth.json, noteInstalled
+  public func install(_ n: SlotName, at: Int) throws   // fetch (noAccount); email must belong to n else mismatch; inside store.write: write live auth.json, noteInstalled(n, at)
 }
 ```
 
@@ -540,8 +550,8 @@ public struct CodexProbe  { same }
 A probe never writes: a refreshed document comes back in `.record(_, doc:)`
 and the Switcher persists it. The Switcher runs one operation per provider
 at a time, so a refresh is never overtaken by a switch that makes the login
-live; and it writes an outcome only while the row still holds the bytes the
-probe read.
+live; every writer of a saved row holds that turn, so the row a probe read
+is the row its outcome is written to.
 
 A pending Claude repair stops all Claude probes and refreshes until `use`
 completes it: a failed install can leave one saved login's credentials
@@ -677,7 +687,7 @@ endpoint failure is `remote(note)`):
 
 ```swift
 public final class Switcher: Sendable {
-  public init(paths: Paths, store: Store, http: HTTPClient, clock: Clock)
+  public init(paths: Paths, store: Store, http: HTTPClient, clock: Clock, turnWait: Duration?)   // nil: wait for a turn as long as it takes
   public func save(_ p: Provider) throws -> SlotName?          // nil when no live login
   public func use(_ p: Provider, _ n: SlotName) async throws
   public func forget(_ p: Provider, _ n: SlotName) throws
@@ -688,18 +698,27 @@ public struct ProbeReport { public var saveBackError: String?; public var provid
 public struct Probed { public let name: SlotName; public let outcome: ProbeOutcome; public let live: Bool }   // live: probed as the live login
 ```
 
-Each provider's operations run one at a time, first come first served:
-`use`, `probeAll`, `redeem`, `save`, `forget` and `LoginRunner.add` each
-hold the provider's turn from start to end (`add`: once its CLI is found),
-across every network wait; the import and probe `add` runs are
+Each provider's operations run one at a time across every process on this
+Mac: `use`, `probeAll`, `redeem`, `save`, `forget` and `LoginRunner.add`
+each hold the provider's turn from start to end (`add`: once its CLI is
+found), across every network wait; the import and probe `add` runs are
 `importInTurn` and `probeInTurn`, which take no turn of their own. So a
 probe that is spending a saved login's refresh token finishes before a
-switch can make that login live.
-The async operations suspend while they wait; the synchronous ones block
-their thread. Other processes are held off only by store transactions, so
-every probe outcome and refreshed login is written only while the row still
-holds the login bytes it was read with (compared inside the `write`); a row
-replaced or forgotten meanwhile is never updated or removed.
+switch, in the app or in `kiba`, can make that login live, and no two
+processes ever refresh one saved refresh token.
+The turn is an exclusive `flock` on `paths.turn(p)`, which each holder opens
+afresh (0600, `O_NOFOLLOW`, `O_CLOEXEC`) and closes to leave. A `flock` lock
+belongs to the open file, so two holders in one process exclude each other
+as two processes do, and the kernel releases the lock of a holder that
+dies. A waiter tries the lock every 100 ms (`LOCK_NB`): the async
+operations suspend between tries, the synchronous ones block their thread,
+and which waiter goes next is whichever tries first. `turnWait` bounds the
+wait: past it the operation throws `turnBusy`, which `probeAll` reports as
+its `providerError`; nil, as the app passes, waits as long as it takes.
+Once held, a turn is never given up before its operation ends. A waiter
+reads its rows only once it holds the turn, so it sees every write of the
+holder before it. Every writer of a saved row holds the turn, so no row
+changes between an operation's read and its write.
 
 - `save`: inside one `store.write`, an `adding` record → `unrestored`;
   `isMixed` → `mixed`; the provider's `login()` nil → nil; else `liveName`
@@ -713,7 +732,9 @@ replaced or forgotten meanwhile is never updated or removed.
   then `noteInstalled` the saved-back name, whose login the live files
   hold, so a crash between the install's two live writes leaves a pending
   install whose installed name owns the live tokens (`probeAll` treats it
-  as live); then install `n`; then probe `n` as live and `write` its
+  as live); that note keeps the time noted, so a failed install never
+  moves it; then install `n` at the clock's epoch seconds, noted with the
+  name; then probe `n` as live and `write` its
   usage; then, when the save-back named an account other than `n`, probe
   that one as saved and `write` it like `probeAll` does. Its usage came
   from a live probe, which never refreshes, so an expired token would
@@ -722,14 +743,12 @@ replaced or forgotten meanwhile is never updated or removed.
   Claude credentials without a config stop it here: `orphanLive` is both
   `saveBackError` and `providerError`, no account is probed. Then
   for every saved account: probe (`live` = name == live name, or, while
-  the Claude files are mixed, the installed name); `write`, when the row
-  still holds the probed login: `setUsage`, `setLogin` when the doc
-  changed. No probe removes a login: a revoked one stays listed as a dead
+  the Claude files are mixed, the installed name); `write`: `setUsage`,
+  `setLogin` when the doc changed. No probe removes a login: a revoked one stays listed as a dead
   row until the user forgets it, so no account drops out of sight. The
   live account is never refreshed. `accounts` holds only
-  outcomes recorded: one whose row was replaced or forgotten meanwhile is
-  not written and not in it, nor is one whose write failed, which
-  `providerError` names ("<name>: usage not recorded: <reason>"). A pending
+  outcomes recorded: one whose write failed is not in it, and
+  `providerError` names it ("<name>: usage not recorded: <reason>"). A pending
   Claude install stops it before any probe: `unrepaired` is the
   `providerError` (the `saveBackError` is `mixed`). An `adding` record
   stops it the same way: `unrestored` is both.
@@ -737,9 +756,8 @@ replaced or forgotten meanwhile is never updated or removed.
   `usage.resets.count > 0`. `live` = `n` in `liveNames(p, mixed:
   isMixed(p))`, as `probeAll` decides it; `unrepaired` while a Claude
   install is pending, `unrestored` while an `adding` record waits. The
-  provider's `redeem`; a changed doc is stored with `setLogin`, while the
-  row still holds the login it refreshed, before the result is read (a
-  refresh spends the old grant); a failure throws; after a 200,
+  provider's `redeem`; a changed doc is stored with `setLogin` before the
+  result is read (a refresh spends the old grant); a failure throws; after a 200,
   `probe(p, n, live:)` so the row's usage and offer show the result, then
   the outcome.
 - `importInTurn` (internal; only `add` calls it, in its turn): reads the
@@ -761,16 +779,17 @@ check it, and `StatusReader` reads no markers.
 ```swift
 public struct LiveLogin: Equatable, Sendable { public var email: String; public var plan: String }
 public struct Account: Equatable, Sendable, Identifiable { public var name: SlotName; public var plan: String; public var active: Bool; public var usage: UsageRecord?; public var id: String { name.raw } }
-public struct ProviderStatus: Equatable, Sendable { public var provider: Provider; public var live: LiveLogin?; public var accounts: [Account]; public var error: String? }
+public struct ProviderStatus: Equatable, Sendable { public var provider: Provider; public var live: LiveLogin?; public var installedAt: Int?; public var accounts: [Account]; public var error: String? }   // installedAt: epoch seconds of the last switch
 public struct Snapshot: Equatable, Sendable { public var providers: [ProviderStatus] }
 
 public struct StatusReader { public init(paths: Paths, store: Store); public func read() -> Snapshot }
 ```
 
 Per provider, in this order so a broken live file still lists the saved
-accounts: `store.list` (plan, usage); live identity; `active` = name ==
-`liveName(live)`. Any throw becomes `error` (`reason`) with `live = nil`,
-accounts kept. Never opens a write transaction.
+accounts: `store.list` (plan, usage); `store.installedAt`; live identity;
+`active` = name == `liveName(live)`. Any throw becomes `error` (`reason`)
+with `live = nil`, accounts and `installedAt` kept. Never opens a write
+transaction.
 
 ### Rows (port of Panel.qml, pure)
 
@@ -1286,6 +1305,35 @@ and eliding in the middle: "Forget <email>?" with **Forget** (destructive,
 `out`) and **Keep**; "Use a limit reset on <email>? (2 left)" with
 **Reset** (`accent`, not destructive) and **Keep**.
 
+## KibaCLI
+
+`kiba` is a thin CLI over KibaCore for the Claude Code auto-switch mod. Its
+product is `KibaCLI`: `kiba` would collide with the app's `Kiba` on a
+case-insensitive volume. It wires `Paths` from its own environment,
+`Store`, `StatusReader` and `Switcher` (`URLSessionClient`, `Date.init`)
+as `CoreBackend` does, with no `LoginRunner`: an add's record of the live
+item stays `unrestored` until the app next starts.
+
+- `kiba status --json`: the `Snapshot` as its `Codable` encoding writes it
+  (sorted keys; a nil optional is absent), plus `left` on every limit
+  `Rows.figures` gives a figure under its label: the percent left the panel
+  shows, so Claude's session reads 0 while its weekly is used up. Each
+  provider's `installedAt` is the epoch seconds of its last switch, absent
+  before one noted a time. Exit 0.
+- `kiba usage <provider>`: `probeAll`. Nothing on stdout; its
+  `saveBackError` and `providerError`, when set, one line each on stderr;
+  exit 1 when either is set, else 0.
+- `kiba use <provider> <name>`: `use`; exit 0.
+- Anything else, an unknown provider, or a name `SlotName` refuses: the
+  synopsis on stderr, exit 64 (`EX_USAGE`). Any thrown error: its `reason`
+  on stderr, exit 1.
+
+`Switcher` gets `turnWait` = 2 minutes: a command waits at most that long
+for the app or another `kiba` to leave the provider's turn, then exits 1
+with `turnBusy`, so the mod bounds a call without killing it. Once a
+command holds the turn it runs to the end: a kill during a refresh would
+lose the rotated token and leave the login dead.
+
 ## Build, bundle, test
 
 - `swift build` / `swift test` from the package root. Tests are
@@ -1300,7 +1348,8 @@ and eliding in the middle: "Forget <email>?" with **Forget** (destructive,
   io.github.joelreymont.kiba`, `LSUIElement` true, `LSMinimumSystemVersion
   14.0`, `NSHighResolutionCapable`; `Resources/AppIcon.icns` rendered by
   `Scripts/icon.swift`), `codesign --force --sign -`, then copy to
-  `~/Applications/Kiba.app` (replace via rename).
+  `~/Applications/Kiba.app` (replace via rename); then the release
+  `KibaCLI` goes to `~/.local/bin/kiba` (`install -m 0755`).
 - `test.sh`: `swift test` with the scratch env exported (defence in depth).
 
 ## Store layout
@@ -1308,6 +1357,7 @@ and eliding in the middle: "Forget <email>?" with **Forget** (destructive,
 ```
 ~/Library/Application Support/Kiba/     0700
   kiba.db                               0600, plus SQLite's -wal and -shm
+  turn-claude, turn-codex               0600, empty: each provider's turn (flock)
   probe/                                scratch: login-claude/, login-codex/
 ```
 
@@ -1336,5 +1386,6 @@ are written by `PrivateFS` temp + rename.
   tokens stay in the 0600 database rather than Keychain items: no
   subprocess per read, and tests check the bytes directly. Nothing moves in
   from an old kiba folder: accounts are added through the provider login.
-- No CLI, no Habu, no Forth: the app owns the logic; tests replace the
-  Forth suite.
+- No Habu, no Forth: the app owns the logic; tests replace the Forth
+  suite. The one CLI, `kiba`, is a thin view over KibaCore for the Claude
+  Code auto-switch mod: status, probe and switch, never add.

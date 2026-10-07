@@ -33,12 +33,15 @@ public struct Account: Codable, Equatable, Sendable, Identifiable {
 public struct ProviderStatus: Codable, Equatable, Sendable {
     public var provider: Provider
     public var live: LiveLogin?
+    /// Epoch seconds of the last switch; nil when none noted a time.
+    public var installedAt: Int?
     public var accounts: [Account]
     public var error: String?
 
-    public init(provider: Provider, live: LiveLogin?, accounts: [Account], error: String?) {
+    public init(provider: Provider, live: LiveLogin?, installedAt: Int?, accounts: [Account], error: String?) {
         self.provider = provider
         self.live = live
+        self.installedAt = installedAt
         self.accounts = accounts
         self.error = error
     }

@@ -56,11 +56,12 @@ public struct ClaudeLive {
     /// transaction first checks the marker is still this install's
     /// (`superseded`, nothing written, when another install has noted its
     /// own since), then gives the config the profile and the credentials the
-    /// login, notes `n` as installed and clears its own marker. When a live
-    /// write fails, the previous config goes back and the write's error is
-    /// thrown; the marker stays unless the live files are known to be the
-    /// pair from before, which no install had left pending.
-    public func install(_ n: SlotName) throws {
+    /// login, notes `n` as installed at `at` (epoch seconds) and clears its
+    /// own marker. When a live write fails, the previous config goes back and
+    /// the write's error is thrown; the marker stays unless the live files
+    /// are known to be the pair from before, which no install had left
+    /// pending.
+    public func install(_ n: SlotName, at: Int) throws {
         let (change, claim) = try store.write { tx in
             let change = try prepare(n)
             let claim = try tx.notePending(.claude, n)
@@ -75,7 +76,7 @@ public struct ClaudeLive {
                 if restored(change) { try tx.clearPending(.claude, claim) }
                 return error
             }
-            try tx.noteInstalled(.claude, n)
+            try tx.noteInstalled(.claude, n, at: at)
             try tx.clearPending(.claude, claim)
             return nil
         }

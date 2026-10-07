@@ -18,7 +18,7 @@ public struct CoreBackend: Backend {
     public init(env: [String: String], username: String) throws {
         let paths = try Paths(env: env, username: username)
         let store = try Store(paths: paths)
-        let switcher = Switcher(paths: paths, store: store, http: URLSessionClient(), clock: Date.init)
+        let switcher = Switcher(paths: paths, store: store, http: URLSessionClient(), clock: Date.init, turnWait: nil)
         self.init(
             switcher: switcher,
             reader: StatusReader(paths: paths, store: store),

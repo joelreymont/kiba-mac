@@ -16,19 +16,25 @@ public struct StatusReader: Sendable {
         Snapshot(providers: Provider.allCases.map(status))
     }
 
-    /// Saved accounts first, so a broken live login still lists them; then the
-    /// live identity and the account it is saved as. Any throw becomes `error`
-    /// with no live login and the accounts read so far.
+    /// Saved accounts and the last switch's time first, so a broken live
+    /// login still lists them; then the live identity and the account it is
+    /// saved as. Any throw becomes `error` with no live login and what was
+    /// read so far.
     func status(_ p: Provider) -> ProviderStatus {
         var accounts: [Account] = []
+        var at: Int?
         do {
             accounts = try store.list(p).map { Account(name: $0.name, plan: $0.identity.plan, active: false, usage: $0.usage) }
-            guard let live = try identity(p) else { return ProviderStatus(provider: p, live: nil, accounts: accounts, error: nil) }
+            at = try store.installedAt(p)
+            guard let live = try identity(p) else {
+                return ProviderStatus(provider: p, live: nil, installedAt: at, accounts: accounts, error: nil)
+            }
             let name = try store.liveName(p, live: live)
             for i in accounts.indices { accounts[i].active = accounts[i].name == name }
-            return ProviderStatus(provider: p, live: LiveLogin(email: live.email, plan: live.plan), accounts: accounts, error: nil)
+            return ProviderStatus(
+                provider: p, live: LiveLogin(email: live.email, plan: live.plan), installedAt: at, accounts: accounts, error: nil)
         } catch {
-            return ProviderStatus(provider: p, live: nil, accounts: accounts, error: Self.reason(error))
+            return ProviderStatus(provider: p, live: nil, installedAt: at, accounts: accounts, error: Self.reason(error))
         }
     }
 

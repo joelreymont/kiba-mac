@@ -56,11 +56,11 @@ import os
         #expect(http.requests.map { $0.headers[Header.agent] } == [Fixed.claudeAgent, Fixed.claudeAgent, "codex-cli", "codex-cli"])
 
         let want = [
-            ProviderStatus(provider: .claude, live: LiveLogin(email: "b@x", plan: "pro"), accounts: [
+            ProviderStatus(provider: .claude, live: LiveLogin(email: "b@x", plan: "pro"), installedAt: Fixed.now, accounts: [
                 Account(name: ax, plan: "max", active: false, usage: probed(windows(session: 10, week: 20))),
                 Account(name: bx, plan: "pro", active: true, usage: probed(windows(session: 30, week: 60))),
             ], error: nil),
-            ProviderStatus(provider: .codex, live: LiveLogin(email: "b@y", plan: "pro"), accounts: [
+            ProviderStatus(provider: .codex, live: LiveLogin(email: "b@y", plan: "pro"), installedAt: Fixed.now, accounts: [
                 Account(name: ay, plan: "plus", active: false, usage: probed(windows(session: 15, week: 25))),
                 Account(name: by, plan: "pro", active: true, usage: probed(windows(session: 20, week: 45))),
             ], error: nil),
@@ -150,9 +150,9 @@ import os
             answer(Status.ok, #"{"access_token":"at-xa5","refresh_token":"rt-xa5","expires_in":\#(Fixed.tokenLife)}"#),
             answer(Status.ok, claudeUsage(session: 10, week: 20)),
         ])
-        let later = Switcher(paths: w.paths, store: w.store, http: http) {
+        let later = Switcher(paths: w.paths, store: w.store, http: http, clock: {
             Date(timeIntervalSince1970: TimeInterval(Fixed.now + Fixed.later))
-        }
+        }, turnWait: nil)
         #expect(await later.probeAll(.claude).saveBackError == KibaError.mixed.reason)
         #expect(!http.requests.contains { $0.url.absoluteString == Endpoint.claudeToken })
         #expect(try w.store.list(.claude).map(\.login) == [refreshed, credsB])
@@ -179,7 +179,7 @@ import os
         try claudeCreds("xa2", plan: "max", expires: Fixed.now + Fixed.day).write(to: creds)
         try claudeConfig(profB).write(to: config)
         try FileManager.default.createSymbolicLink(at: w.paths.claudeCredsFile(root: nil), withDestinationURL: creds)
-        try w.store.write { try $0.noteInstalled(.claude, ax) }
+        try w.store.write { try $0.noteInstalled(.claude, ax, at: nil) }
         _ = try w.store.write { try $0.notePending(.claude, bx) }
         try FileManager.default.setAttributes([.posixPermissions: Fixed.lockedMode], ofItemAtPath: locked.path)
         defer { chmod(locked.path, mode_t(Fixed.openMode)) }
@@ -253,7 +253,7 @@ import os
             """)
         let store = try Store(paths: w.paths)
         let sw = Switcher(paths: w.paths, store: store, http: StubHTTP([answer(Status.ok, claudeUsage(session: 10, week: 20))]),
-                          clock: w.clock)
+                          clock: w.clock, turnWait: nil)
 
         #expect(throws: KibaError.mixed) { try sw.save(.claude) }
         try await sw.use(.claude, bx)
@@ -440,30 +440,6 @@ import os
         #expect(Rows.state(row.usage, active: row.active) == .dead)
         #expect(Rows.planText(.codex, row, now: now) == "(plus, log in again)")
         #expect(Rows.tooltip(.codex, row, now: now).last == "Click to log in to this account again")
-    }
-}
-
-@Test func revokedProbeKeepsTheLoginSavedMeanwhile() async throws {
-    try await scratch { w in
-        let name = try slot("b@y")
-        let fresh = codexAuth("b@y", plan: "plus", account: "acct-b", tag: "b2")
-        try w.seed(.codex, name, Identity(email: "b@y", plan: "plus", org: "acct-b"),
-                   login: codexAuth("b@y", plan: "plus", account: "acct-b", tag: "b1"), profile: nil)
-        let http = HeldHTTP(held: Endpoint.codexToken, answers: [
-            Endpoint.codexUsage: answer(Status.unauthorized, #"{"error":{"code":"token_revoked","message":"Token revoked"}}"#),
-            Endpoint.codexToken: answer(Status.unauthorized, #"{"error":"invalid_grant"}"#),
-        ])
-
-        // While the probe learns the old login was revoked, another Kiba
-        // saves the login that revoked it under the same name.
-        async let report = w.switcher(http).probeAll(.codex)
-        try await http.arrival()
-        try w.writeCodex(fresh)
-        #expect(try w.switcher(StubHTTP([])).save(.codex) == name)
-        http.release()
-
-        #expect(await report.accounts.isEmpty)
-        #expect(try w.store.list(.codex).map(\.login) == [fresh])
     }
 }
 
@@ -1442,7 +1418,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let m = try slot("m@x")
         let credsM = claudeCreds("m", plan: "pro", expires: Fixed.now + Fixed.day)
         try w.seed(.claude, m, Identity(email: "m@x", plan: "pro", org: "org-m"), login: credsM, profile: profile("m@x", org: "org-m"))
-        try w.store.write { try $0.noteInstalled(.claude, m) }
+        try w.store.write { try $0.noteInstalled(.claude, m, at: nil) }
         try w.writeClaude(config: claudeConfig(profile("o@x", org: "org-o")), creds: credsM)
         #expect(throws: KibaError.mixed) { try sw.save(.claude) }
         #expect(try w.store.list(.claude).map(\.name.raw) == ["m@x"])
@@ -1678,6 +1654,54 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+// MARK: - CLI
+
+/// The mod's view: `kiba status --json` is the snapshot plus the percent the
+/// panel shows as left, a bad command line exits 64, a refused probe 1 with
+/// its reason.
+@Test func cliPrintsStatusAndExitCodes() async throws {
+    try await scratch { w in
+        let (ax, bx, ay) = (try slot("a@x"), try slot("b@x"), try slot("a@y"))
+        let profA = profile("a@x", org: "org-a")
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        // Live Claude credentials in a file, so the CLI never asks the Keychain.
+        try w.writeClaude(config: claudeConfig(profA), creds: credsA)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA,
+                   usage: probed(windows(session: 30, week: 100)))
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"),
+                   login: claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day), profile: profile("b@x", org: "org-b"))
+        try w.writeCodex(codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya"))
+        try await w.switcher(StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45))])).use(.codex, ay)
+
+        let status = try w.kiba("status", "--json")
+        #expect(status.status == EXIT_SUCCESS)
+        let json = try #require(try JSONSerialization.jsonObject(with: status.stdout) as? [String: Any])
+        let providers = try #require(json["providers"] as? [[String: Any]])
+        #expect(providers.map { $0["provider"] as? String } == ["claude", "codex"])
+        // Only Codex was switched, at the frozen clock's time.
+        #expect(providers[0]["installedAt"] == nil)
+        #expect(providers[1]["installedAt"] as? Int == Fixed.now)
+        let claude = try #require(providers[0]["accounts"] as? [[String: Any]])
+        let codex = try #require(providers[1]["accounts"] as? [[String: Any]])
+        #expect(claude.map { $0["name"] as? String } == ["a@x", "b@x"])
+        #expect(codex.map { $0["name"] as? String } == ["a@y"])
+        // A used-up Claude week leaves its session nothing.
+        #expect(try lefts(claude[0]) == ["Session (5-hour) 0", "Weekly (7-day) 0"])
+        #expect(claude[1]["usage"] == nil)
+        #expect(try lefts(codex[0]) == ["Session (5-hour) 80", "Weekly (7-day) 55"])
+
+        #expect(try w.kiba().status == EX_USAGE)
+
+        // An add's record of the live item waits, so nothing is probed.
+        try w.noteAdding(credsA)
+        let usage = try w.kiba("usage", "claude")
+        #expect(usage.status == EXIT_FAILURE)
+        #expect(usage.stdout.isEmpty)
+        let reason = KibaError.unrestored(.claude).reason
+        #expect(text(usage.stderr) == "\(reason)\n\(reason)\n")
+    }
+}
+
 // MARK: - World
 
 enum Fixed {
@@ -1748,6 +1772,8 @@ enum Fixed {
     static let frozen = "usage is frozen"
     static let freezeB =
         "CREATE TRIGGER freeze BEFORE UPDATE OF usage ON account WHEN NEW.name = 'b@y' BEGIN SELECT RAISE(ABORT, '\(frozen)'); END;"
+    /// The `kiba` CLI's product, which `swift test` builds beside the test bundle.
+    static let cli = "KibaCLI"
     /// The store layout before pending installs had owners.
     static let storeV1 = """
         PRAGMA user_version = 1;
@@ -1826,7 +1852,13 @@ struct World: Sendable {
     }
 
     func switcher(_ http: any HTTPClient) -> Switcher {
-        Switcher(paths: paths, store: store, http: http, clock: clock)
+        Switcher(paths: paths, store: store, http: http, clock: clock, turnWait: nil)
+    }
+
+    /// Runs the `kiba` CLI with `args` in this world.
+    func kiba(_ args: String...) throws -> Subprocess.Result {
+        let cli = Bundle(for: Gate.self).bundleURL.deletingLastPathComponent().appending(component: Fixed.cli)
+        return try Subprocess.run(cli, args, stdin: nil, env: env, setsid: false)
     }
 
     /// `during` stands for what the provider login does outside its home;
@@ -2164,6 +2196,15 @@ func probed(_ limits: [Limit], resets: ResetOffer? = nil) -> UsageRecord {
     UsageRecord(fetchedAt: Fixed.now, state: .ok, note: "", limits: limits, resets: resets)
 }
 
+/// Each limit of an account in `kiba status --json`, as `"<label> <left>"`.
+func lefts(_ account: [String: Any]) throws -> [String] {
+    let usage = try #require(account["usage"] as? [String: Any])
+    return try #require(usage["limits"] as? [[String: Any]]).map { limit in
+        let label = try #require(limit["label"] as? String), left = try #require(limit["left"] as? Int)
+        return "\(label) \(left)"
+    }
+}
+
 /// A request body's members, which must all be strings.
 func members(_ body: Data?) throws -> [String: String] {
     try JSONDecoder().decode([String: String].self, from: try #require(body))
@@ -2491,7 +2532,7 @@ func members(_ body: Data?) throws -> [String: String] {
     try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
     try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"), login: credsC, profile: profile("c@x", org: "org-c"))
     try w.writeClaude(config: claudeConfig(profA), creds: credsA)
-    try w.store.write { try $0.noteInstalled(.claude, ax) }
+    try w.store.write { try $0.noteInstalled(.claude, ax, at: nil) }
     let usage = answer(Status.ok, claudeUsage(session: 30, week: 60, resets: juniperBlock(available: true)))
     let http = StubHTTP([usage, usage])
     let core = CoreBackend(
@@ -2620,25 +2661,14 @@ func members(_ body: Data?) throws -> [String: String] {
 }
 
 /// A probe is complete only while every row shown holds the usage it
-/// recorded: a login saved again while the probe runs, or an account saved
-/// after it, leaves that row unprobed.
+/// recorded: an account saved after it leaves that row unprobed.
 @MainActor @Test func appModelProbeCoversEveryRowShown() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
-    let (core, http, _, by) = try heldCodexPair(w)
+    let (core, _, _) = try codexPair(w)
     let model = AppModel(connect: { core })
     model.start()
     try await settle(model)
-
-    // Another Kiba saves b@y again while the probe waits on a@y.
-    model.probeUsage()
-    try await http.arrival()
-    try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"),
-               login: codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb2"), profile: nil)
-    http.release()
-    try await settle(model)
-    #expect(model.note == "Usage refreshed for 1 of 2 accounts: 1 not probed")
-    #expect(model.meta == "Some usage probed just now")
 
     model.probeUsage()
     try await settle(model)

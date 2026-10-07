@@ -1,26 +1,30 @@
 import Foundation
-import os
 
 /// Saves, installs, forgets and probes saved logins (kiba `save`, `use`,
 /// `forget`, `usage`), and spends their limit resets. Every store change runs in a `Store.write`
 /// transaction; `probeAll` is the one place a failure is kept per account
-/// instead of thrown. Each provider's operations run one at a time, in the
-/// order they began, each to its end across every network wait: a probe
-/// spending a saved login's refresh token finishes before a switch can make
-/// that login live. The synchronous ones block their thread while they wait.
+/// instead of thrown. Each provider's operations, in this process or any
+/// other, run one at a time, each to its end across every network wait: a
+/// probe spending a saved login's refresh token finishes before a switch can
+/// make that login live. The synchronous ones block their thread while they
+/// wait.
 public final class Switcher: Sendable {
     let paths: Paths
     let store: Store
     let http: any HTTPClient
     let clock: Clock
-    let claudeOps = Serial()
-    let codexOps = Serial()
+    let claudeOps: Turn
+    let codexOps: Turn
 
-    public init(paths: Paths, store: Store, http: any HTTPClient, clock: @escaping Clock) {
+    /// `turnWait` bounds how long an operation waits for the provider's turn
+    /// (`turnBusy` past it); nil waits as long as it takes.
+    public init(paths: Paths, store: Store, http: any HTTPClient, clock: @escaping Clock, turnWait: Duration?) {
         self.paths = paths
         self.store = store
         self.http = http
         self.clock = clock
+        claudeOps = Turn(file: paths.turn(.claude), provider: .claude, wait: turnWait)
+        codexOps = Turn(file: paths.turn(.codex), provider: .codex, wait: turnWait)
     }
 
     /// Saves the live login under the name it belongs to; nil when there is
@@ -28,8 +32,8 @@ public final class Switcher: Sendable {
     /// accounts: saving them would file one account's tokens under another;
     /// `unrestored` while an add's login may still hold the live item.
     public func save(_ p: Provider) throws -> SlotName? {
-        ops(p).enterBlocking()
-        defer { ops(p).leave() }
+        let held = try ops(p).enterBlocking()
+        defer { ops(p).leave(held) }
         return try saveLive(p)
     }
 
@@ -37,31 +41,32 @@ public final class Switcher: Sendable {
     /// when the live files are mixed: the install repairs them) and notes it
     /// as installed, since the live files hold its login: a crash inside the
     /// install then leaves a pending install whose installed name still owns
-    /// the live tokens, which `probeAll` never refreshes. Installs `n`, then
-    /// probes it as the live login and records its usage. A live login that
+    /// the live tokens, which `probeAll` never refreshes. That note keeps the
+    /// time of the last install; installing `n` notes the clock's. Then
+    /// probes `n` as the live login and records its usage. A live login that
     /// cannot be read or saved stops the switch before anything is written,
     /// so no login is overwritten unsaved. The login saved back is then
     /// probed as saved: its usage came from a live probe, which never
     /// refreshes, so an expired token would leave it looking dead.
     public func use(_ p: Provider, _ n: SlotName) async throws {
-        await ops(p).enter()
-        defer { ops(p).leave() }
+        let held = try await ops(p).enter()
+        defer { ops(p).leave(held) }
         let old: SlotName?
         do {
             old = try saveLive(p)
         } catch KibaError.mixed {
             old = nil
         }
-        if let old { try store.write { try $0.noteInstalled(p, old) } }
-        try live(p).install(n)
+        if let old { try store.write { try $0.noteInstalled(p, old, at: nil) } }
+        try live(p).install(n, at: epochSeconds(clock()))
         try await probeInTurn(p, n, live: true)
         if let old, old != n { try await probeInTurn(p, old, live: false) }
     }
 
     /// `noAccount` when there is no such saved login.
     public func forget(_ p: Provider, _ n: SlotName) throws {
-        ops(p).enterBlocking()
-        defer { ops(p).leave() }
+        let held = try ops(p).enterBlocking()
+        defer { ops(p).leave(held) }
         try store.write { tx in
             guard try store.fetch(p, n) != nil else { throw KibaError.noAccount(p, n.raw) }
             try tx.remove(p, n)
@@ -70,15 +75,19 @@ public final class Switcher: Sendable {
 
     /// Saves the live login back, then probes every saved login and records
     /// each outcome. A save-back failure is reported and the probe goes on; a
-    /// provider whose accounts or live login cannot be read, whose install is
-    /// pending, or whose add's live item waits to go back is not probed at
-    /// all. The live login is probed as live, so its tokens are never
-    /// refreshed. No outcome removes a login. An outcome whose row was replaced
-    /// or forgotten meanwhile is neither written nor reported; one whose
-    /// write failed is named in the provider error only.
+    /// provider whose turn cannot be taken, whose accounts or live login
+    /// cannot be read, whose install is pending, or whose add's live item
+    /// waits to go back is not probed at all. The live login is probed as
+    /// live, so its tokens are never refreshed. No outcome removes a login.
+    /// An outcome whose write failed is named in the provider error only.
     public func probeAll(_ p: Provider) async -> ProbeReport {
-        await ops(p).enter()
-        defer { ops(p).leave() }
+        let held: Int32
+        do {
+            held = try await ops(p).enter()
+        } catch {
+            return ProbeReport(saveBackError: nil, providerError: StatusReader.reason(error), accounts: [])
+        }
+        defer { ops(p).leave(held) }
         var backError: String?
         var mixed = false
         do {
@@ -101,7 +110,7 @@ public final class Switcher: Sendable {
             let isLive = live.contains(row.name)
             let outcome = await run(p, row, live: isLive)
             do {
-                guard try record(p, row, outcome) else { continue }
+                try record(p, row, outcome)
                 accounts.append(Probed(name: row.name, outcome: outcome, live: isLive))
             } catch {
                 unrecorded.append("\(row.name.raw): usage not recorded: \(StatusReader.reason(error))")
@@ -130,12 +139,12 @@ public final class Switcher: Sendable {
     /// login, `noResets` when its last probe offered none, `unrepaired` while
     /// an install is pending, `unrestored` while an add's live item waits to
     /// go back. A saved login's token is refreshed when it has expired or is
-    /// rejected, and the new one is kept even when the reset then fails,
-    /// unless the row was replaced meanwhile; a live login's never is, so a
-    /// live name is decided as `probeAll` decides it.
+    /// rejected, and the new one is kept even when the reset then fails; a
+    /// live login's never is, so a live name is decided as `probeAll`
+    /// decides it.
     public func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome {
-        await ops(p).enter()
-        defer { ops(p).leave() }
+        let held = try await ops(p).enter()
+        defer { ops(p).leave(held) }
         guard let row = try store.fetch(p, n) else { throw KibaError.noAccount(p, n.raw) }
         guard let offer = row.usage?.resets, offer.count > 0 else { throw KibaError.noResets(p, n.raw) }
         let live = try liveNames(p, mixed: isMixed(p)).contains(n)
@@ -145,7 +154,7 @@ public final class Switcher: Sendable {
         case .claude: spent = await ClaudeProbe(http: http, clock: clock).redeem(input, offer: offer, org: row.identity.org)
         case .codex: spent = await CodexProbe(http: http, clock: clock).redeem(input)
         }
-        if spent.doc != row.login { _ = try unchanged(p, row) { try $0.setLogin(p, n, spent.doc) } }
+        if spent.doc != row.login { try store.write { try $0.setLogin(p, n, spent.doc) } }
         let outcome = try spent.result.get()
         try await probeInTurn(p, n, live: live)
         return outcome
@@ -162,7 +171,7 @@ public final class Switcher: Sendable {
     }
 
     /// The turn `p`'s operations take one at a time.
-    func ops(_ p: Provider) -> Serial {
+    func ops(_ p: Provider) -> Turn {
         switch p {
         case .claude: return claudeOps
         case .codex: return codexOps
@@ -253,24 +262,11 @@ public final class Switcher: Sendable {
 
     /// Writes a probe's outcome: the usage record and any refreshed login. A
     /// login the provider revoked keeps its row, dead, so the account stays
-    /// listed until the user forgets it. False, with nothing written, when
-    /// the row no longer holds the login the probe read.
-    @discardableResult
-    func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome) throws -> Bool {
-        try unchanged(p, row) { tx in
+    /// listed until the user forgets it.
+    func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome) throws {
+        try store.write { tx in
             try tx.setUsage(p, row.name, outcome.usage)
             if outcome.doc != row.login { try tx.setLogin(p, row.name, outcome.doc) }
-        }
-    }
-
-    /// Runs `body` in one transaction while the row named `row.name` still
-    /// holds the login `row` was read with; false, with nothing written, once
-    /// another write has replaced or removed it.
-    func unchanged(_ p: Provider, _ row: SavedLogin, _ body: (Tx) throws -> Void) throws -> Bool {
-        try store.write { tx in
-            guard try store.fetch(p, row.name)?.login == row.login else { return false }
-            try body(tx)
-            return true
         }
     }
 
@@ -283,7 +279,8 @@ public final class Switcher: Sendable {
 protocol LiveFiles {
     func identity() throws -> Identity?
     func login() throws -> LoginRead?
-    func install(_ n: SlotName) throws
+    /// Makes `n`'s login live, noting it installed at `at` (epoch seconds).
+    func install(_ n: SlotName, at: Int) throws
 }
 
 /// A login as one read of its files: what `put` saves, less the name.
@@ -296,51 +293,89 @@ struct LoginRead {
 extension ClaudeLive: LiveFiles {}
 extension CodexLive: LiveFiles {}
 
-/// Operations that must not overlap: one runs at a time, the rest wait in
-/// the order they came, and a turn lasts across suspension points.
-final class Serial: Sendable {
-    private let state = OSAllocatedUnfairLock(initialState: Queue())
+/// One provider's turn, shared by every process on this Mac: an exclusive
+/// `flock` on the provider's turn file, polled so a wait can be bounded.
+/// Each holder opens the file afresh, and a `flock` lock belongs to the open
+/// file, so two holders in one process exclude each other as two processes
+/// do. A turn lasts across suspension points until `leave`, never given up
+/// early; the kernel releases the lock of a holder that dies. Which waiter
+/// goes next is whichever polls first.
+struct Turn: Sendable {
+    let file: URL
+    let provider: Provider
+    /// How long `enter` waits before `turnBusy`; nil: as long as it takes.
+    let wait: Duration?
 
-    private struct Queue {
-        var busy = false
-        var waiting: [@Sendable () -> Void] = []
+    /// How often a waiter tries the lock again.
+    static let poll = Duration.milliseconds(100)
+    /// The file holds no data: created 0600, never through a link, never
+    /// inherited by a child.
+    static let flags = O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
+
+    init(file: URL, provider: Provider, wait: Duration?) {
+        self.file = file
+        self.provider = provider
+        self.wait = wait
     }
 
-    /// Suspends until it is the caller's turn.
-    func enter() async {
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            if take({ c.resume() }) { c.resume() }
+    /// Suspends until the caller holds the turn; the descriptor it returns
+    /// goes back to `leave`. A cancelled wait is `io`.
+    func enter() async throws -> Int32 {
+        let fd = try openFile()
+        do {
+            let deadline = deadline()
+            while try !take(fd, by: deadline) { try await Task.sleep(for: Self.poll) }
+        } catch {
+            close(fd)
+            throw error is CancellationError ? KibaError.io("wait for \(file.path) cancelled") : error
+        }
+        return fd
+    }
+
+    /// Blocks the thread until the caller holds the turn; the descriptor it
+    /// returns goes back to `leave`.
+    func enterBlocking() throws -> Int32 {
+        let fd = try openFile()
+        do {
+            let deadline = deadline()
+            while try !take(fd, by: deadline) { Thread.sleep(forTimeInterval: Self.poll / .seconds(1)) }
+        } catch {
+            close(fd)
+            throw error
+        }
+        return fd
+    }
+
+    /// Ends the turn `enter` gave: closing the descriptor releases the lock.
+    func leave(_ fd: Int32) {
+        // The descriptor holds no data, so closing it cannot fail in a way that matters.
+        close(fd)
+    }
+
+    /// When a wait that starts now ends; nil when it never does.
+    private func deadline() -> ContinuousClock.Instant? {
+        wait.map { ContinuousClock.now + $0 }
+    }
+
+    /// The turn file, opened afresh.
+    private func openFile() throws -> Int32 {
+        while true {
+            let fd = open(file.path, Self.flags, PrivateFS.fileMode)
+            if fd >= 0 { return fd }
+            guard errno == EINTR else { throw KibaError.io(PrivateFS.failure("open", file.path)) }
         }
     }
 
-    /// Blocks the thread until it is the caller's turn.
-    func enterBlocking() {
-        let woken = DispatchSemaphore(value: 0)
-        if !take({ woken.signal() }) { woken.wait() }
-    }
-
-    /// Ends the caller's turn and hands it to the first waiter, if any.
-    func leave() {
-        let next = state.withLock { q -> (@Sendable () -> Void)? in
-            guard !q.waiting.isEmpty else {
-                q.busy = false
-                return nil
-            }
-            return q.waiting.removeFirst()
-        }
-        next?()
-    }
-
-    /// Takes the turn when it is free (true); else queues `wake` to run
-    /// when the turn is handed over.
-    private func take(_ wake: @escaping @Sendable () -> Void) -> Bool {
-        state.withLock { q in
-            guard q.busy else {
-                q.busy = true
-                return true
-            }
-            q.waiting.append(wake)
+    /// Locks `fd` when the turn is free (true); false while another holder
+    /// has it, until `deadline` has passed: then `turnBusy`.
+    private func take(_ fd: Int32, by deadline: ContinuousClock.Instant?) throws -> Bool {
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            if code == EINTR { continue }
+            guard code == EWOULDBLOCK else { throw KibaError.io(PrivateFS.failure("flock", file.path, code)) }
+            if let deadline, ContinuousClock.now >= deadline { throw KibaError.turnBusy(provider) }
             return false
         }
+        return true
     }
 }

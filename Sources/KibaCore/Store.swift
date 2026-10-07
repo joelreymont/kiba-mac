@@ -36,7 +36,7 @@ public struct LiveItem: Equatable, Sendable {
 
 /// Every saved account, in one SQLite database. The value holds only the
 /// database URL and every call opens its own connection, so it is `Sendable`
-/// without a mutex; a write transaction is the cross-process mutex.
+/// without a mutex; a write transaction is the cross-process mutex of rows.
 public struct Store: Sendable {
     let db: URL
 
@@ -46,7 +46,7 @@ public struct Store: Sendable {
     static let suffixMark = " #"
     static let columns = "name, email, org, plan, login, profile, usage"
     static let schema = """
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
         CREATE TABLE IF NOT EXISTS account (
           provider TEXT NOT NULL,
           name     TEXT NOT NULL,
@@ -59,8 +59,9 @@ public struct Store: Sendable {
           PRIMARY KEY (provider, name)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS live (
-          provider  TEXT PRIMARY KEY,
-          installed TEXT NOT NULL
+          provider     TEXT PRIMARY KEY,
+          installed    TEXT NOT NULL,
+          installed_at INTEGER
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS pending (
           provider TEXT PRIMARY KEY,
@@ -83,6 +84,10 @@ public struct Store: Sendable {
     static let serviceColumn = "SELECT 1 FROM pragma_table_info('adding') WHERE name = 'service'"
     static let addService = "ALTER TABLE adding ADD COLUMN service TEXT NOT NULL DEFAULT ''"
     static let fillService = "UPDATE adding SET service = ?"
+    /// A version 1 to 3 store's `live` table lacks the install time. Its row
+    /// keeps none until the next install notes one.
+    static let installedAtColumn = "SELECT 1 FROM pragma_table_info('live') WHERE name = 'installed_at'"
+    static let addInstalledAt = "ALTER TABLE live ADD COLUMN installed_at INTEGER"
 
     /// Creates the store directory (0700) and the database (0600) when missing,
     /// and applies the schema in one transaction, adding what an older store lacks.
@@ -96,6 +101,7 @@ public struct Store: Sendable {
                 try tx.conn.exec(Self.addService, "schema")
                 try tx.run(Self.fillService, "schema", [.text(paths.keychainService)])
             }
+            if try !Self.found(tx, Self.installedAtColumn) { try tx.conn.exec(Self.addInstalledAt, "schema") }
         }
     }
 
@@ -147,6 +153,15 @@ public struct Store: Sendable {
     /// The name whose login was installed last; nil before the first install.
     public func installed(_ p: Provider) throws -> SlotName? {
         try name("SELECT installed FROM live WHERE provider = ?", "installed", p)
+    }
+
+    /// Epoch seconds of the last install; nil before the first one noted a time.
+    public func installedAt(_ p: Provider) throws -> Int? {
+        var at: Int?
+        try Connection(db).query("SELECT installed_at FROM live WHERE provider = ?", "installed at", [.text(p.rawValue)]) {
+            at = $0.int(0)
+        }
+        return at
     }
 
     /// The name whose install began and has not finished; nil when none is in flight.
@@ -260,12 +275,15 @@ public final class Tx {
         try run("DELETE FROM account WHERE provider = ? AND name = ?", "remove", [.text(p.rawValue), .text(n.raw)])
     }
 
-    public func noteInstalled(_ p: Provider, _ n: SlotName) throws {
+    /// Notes `n` as the installed name, installed at `at` (epoch seconds);
+    /// nil keeps the time already noted.
+    public func noteInstalled(_ p: Provider, _ n: SlotName, at: Int?) throws {
         try run(
             """
-            INSERT INTO live (provider, installed) VALUES (?, ?)
-            ON CONFLICT (provider) DO UPDATE SET installed = excluded.installed
-            """, "note installed", [.text(p.rawValue), .text(n.raw)])
+            INSERT INTO live (provider, installed, installed_at) VALUES (?, ?, ?)
+            ON CONFLICT (provider) DO UPDATE SET
+              installed = excluded.installed, installed_at = coalesce(excluded.installed_at, live.installed_at)
+            """, "note installed", [.text(p.rawValue), .text(n.raw), .int(at)])
     }
 
     /// Records an install of `n` as begun under a new claim, replacing any
@@ -404,13 +422,14 @@ final class Connection {
 enum Value {
     case text(String?)
     case blob(Data?)
+    case int(Int?)
 
     /// SQLite copies every bound value before the call returns.
     static var transient: sqlite3_destructor_type { unsafeBitCast(-1, to: sqlite3_destructor_type.self) }
 
     func bind(_ stmt: OpaquePointer, _ i: Int32) -> Int32 {
         switch self {
-        case .text(nil), .blob(nil):
+        case .text(nil), .blob(nil), .int(nil):
             return sqlite3_bind_null(stmt, i)
         case .text(let s?):
             return sqlite3_bind_text(stmt, i, s, Int32(s.utf8.count), Self.transient)
@@ -418,6 +437,8 @@ enum Value {
             // An empty buffer may have no address, which would bind NULL.
             guard !d.isEmpty else { return sqlite3_bind_zeroblob(stmt, i, 0) }
             return d.withUnsafeBytes { sqlite3_bind_blob(stmt, i, $0.baseAddress, Int32($0.count), Self.transient) }
+        case .int(let n?):
+            return sqlite3_bind_int64(stmt, i, sqlite3_int64(n))
         }
     }
 }
@@ -429,6 +450,11 @@ struct Row {
     func text(_ i: Int32) -> String? {
         guard let p = sqlite3_column_text(stmt, i) else { return nil }
         return String(decoding: UnsafeRawBufferPointer(start: p, count: Int(sqlite3_column_bytes(stmt, i))), as: UTF8.self)
+    }
+
+    func int(_ i: Int32) -> Int? {
+        guard sqlite3_column_type(stmt, i) != SQLITE_NULL else { return nil }
+        return Int(sqlite3_column_int64(stmt, i))
     }
 
     func blob(_ i: Int32) -> Data? {

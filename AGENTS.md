@@ -13,13 +13,16 @@ layout, UI spec. Read it before changing anything.
   DESIGN.md section (`Paths.swift`, `StoreLock.swift`, `ClaudeProbe.swift`…).
 - `Sources/KibaApp/` — `AppModel`, status item, popover, `PanelView`,
   `Theme`, `GaugeIcon`.
+- `Sources/KibaCLI/` — `kiba`, the CLI the Claude Code auto-switch mod
+  runs: `main.swift` over KibaCore (`status --json`, `usage`, `use`).
 - `Tests/KibaCoreTests/` — integration tests only: each test drives a real
   entry point (`Switcher`, `StatusReader`, `LoginRunner`, `AppModel`) on a
   scratch store with stubbed HTTP and a throwaway Keychain item, and checks
   what the user would see. No per-type unit tests; a module is proven by the
   flow that uses it.
 - `Scripts/` — `icon.swift` (app icon renderer). `build.sh` builds and
-  installs `~/Applications/Kiba.app`; `test.sh` runs the suite.
+  installs `~/Applications/Kiba.app` and `~/.local/bin/kiba`; `test.sh`
+  runs the suite.
 - Store: `~/Library/Application Support/Kiba/kiba.db`, one SQLite file
   under HOME, local to this Mac and never shared. No kiba-specific
   environment variables: tests move HOME.
@@ -68,4 +71,5 @@ layout, UI spec. Read it before changing anything.
   `plutil -lint` and `codesign -dv` pass. The user runs it.
 - Read-only checks against the real store are fine (the app's status read).
   Never trigger switch, save, add, forget, or probe against the real HOME
-  while testing.
+  while testing. `kiba status --json` on the real store is a status read
+  and fine; never run `kiba usage` or `kiba use` outside a scratch HOME.
