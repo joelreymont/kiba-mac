@@ -80,7 +80,7 @@ public struct CodexProbe: Sendable {
 
     /// `doc` with its refresh grant spent after `rejection` refused its access
     /// token; `.stale(.revoked, …)` when the refresh is refused and the
-    /// rejection said a later login revoked the token.
+    /// rejection said a sign-out revoked the token.
     private func renewed(_ doc: Data, rejection: HTTPResponse, now: Int) async -> Fresh {
         let revoked = JSONFields(rejection.body)?.obj(Wire.error)?.str(Wire.code) == Wire.tokenRevoked
         guard let grant = JSONFields(doc)?.obj(Key.tokens)?.str(Key.refreshToken) else {
@@ -223,7 +223,7 @@ public struct CodexProbe: Sendable {
         static let liveRejected = "access token rejected; run codex once to refresh it"
         static let noGrant = "access token rejected and no refresh token is saved; log in again"
         static let refused = "access token rejected and the refresh was refused; log in again"
-        static let revoked = "login revoked by a later `codex login`"
+        static let revoked = "login revoked by a sign-out at chatgpt.com or in codex; log in again"
         static let rejected = "login rejected by OpenAI; log in again"
         static let throttled = "OpenAI is rate limiting usage checks; try again later"
         static let resetThrottled = "OpenAI is rate limiting limit resets; try again later"

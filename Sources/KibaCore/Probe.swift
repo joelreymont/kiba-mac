@@ -65,8 +65,8 @@ extension Decimal {
 enum Fresh {
     /// The document, refreshed when its token had to be renewed.
     case ready(Data)
-    /// No usable token: the state and note to record. `revoked` means a later
-    /// login revoked this one.
+    /// No usable token: the state and note to record. `revoked` means a
+    /// sign-out revoked this one.
     case stale(UsageState, String)
 }
 

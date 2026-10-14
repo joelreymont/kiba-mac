@@ -642,12 +642,22 @@ Codex:
    `tokens.id_token` (each if returned), top-level `last_refresh` = ISO now
    into the doc, each added at the end of its object when absent; then GET
    again (200 → ok, else the 401/429/other notes below). Refresh refused
-   (400/401): revokedFlag → `revoked` "login revoked by a later
-   `codex login`"; else `expired` "access token rejected and the refresh
-   was refused; log in again". Refresh other →
+   (400/401): revokedFlag → `revoked` "login revoked by a sign-out at
+   chatgpt.com or in codex; log in again"; else `expired` "access token
+   rejected and the refresh was refused; log in again". Refresh other →
    `error` "OpenAI's token endpoint answered <code>". 429 → `throttled` "OpenAI
    is rate limiting usage checks; try again later". Other → `error` "OpenAI's
    usage endpoint answered <code>".
+
+   OpenAI revokes a login's tokens everywhere, saved copies included, when
+   that sign-in ends: a sign-out at chatgpt.com in the browser that signed
+   it in, the ChatGPT or Codex app's Log out, `codex logout`, or a
+   `codex login` over it in the same `CODEX_HOME` (codex rust-v0.162.1
+   `login/src/auth/revoke.rs`, `login.rs:126-160`; openai/codex #22577,
+   #25449, PR #27674). On 2026-10-14 three saved logins died after one
+   chatgpt.com sign-out. Only a new sign-in restores one. Adds keep the
+   browser flow, as Claude's do (Joel, 2026-10-14), so a sign-out in that
+   browser revokes every saved login it signed in.
 
 `fetchedAt` = now for every record.
 

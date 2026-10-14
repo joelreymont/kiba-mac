@@ -407,7 +407,7 @@ import os
     }
 }
 
-/// A saved Codex login a later login revoked stays listed, dead and asking
+/// A saved Codex login a sign-out revoked stays listed, dead and asking
 /// to log in again, so the account is not forgotten.
 @Test func probeKeepsRevokedSavedCodexLogin() async throws {
     try await scratch { w in
@@ -2705,7 +2705,7 @@ func members(_ body: Data?) throws -> [String: String] {
     model.probeUsage()
     try await settle(model)
     let held = "Usage refreshed for 1 of 2 accounts: 1 failed\n"
-        + "Codex: b@y: login revoked by a later `codex login`"
+        + "Codex: b@y: login revoked by a sign-out at chatgpt.com or in codex; log in again"
     let why = "Claude Code: " + KibaError.orphanLive(w.paths.claudeConfigFile(root: nil)).reason
     #expect(model.note == held)
     #expect(model.error == why)
