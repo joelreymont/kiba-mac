@@ -262,11 +262,12 @@ public final class Tx {
         guard changed > 0 else { throw KibaError.noAccount(p, n.raw) }
     }
 
+    /// Sets the usage record, and the plan when `plan` is not nil.
     /// `noAccount` when there is no such row.
-    public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws {
+    public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord, plan: String?) throws {
         let changed = try run(
-            "UPDATE account SET usage = ? WHERE provider = ? AND name = ?", "set usage",
-            [.text(Self.usageText(u)), .text(p.rawValue), .text(n.raw)])
+            "UPDATE account SET usage = ?, plan = coalesce(?, plan) WHERE provider = ? AND name = ?", "set usage",
+            [.text(Self.usageText(u)), .text(plan), .text(p.rawValue), .text(n.raw)])
         guard changed > 0 else { throw KibaError.noAccount(p, n.raw) }
     }
 

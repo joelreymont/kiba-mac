@@ -17,17 +17,19 @@ public struct CodexProbe: Sendable {
     public func run(_ i: ProbeInput) async -> ProbeOutcome {
         let now = epochSeconds(clock())
         var doc = i.doc
-        func done(_ state: UsageState, _ note: String, _ limits: [Limit] = [], _ resets: ResetOffer? = nil)
-            -> ProbeOutcome
-        {
-            ProbeOutcome(usage: UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc)
+        func done(
+            _ state: UsageState, _ note: String, _ limits: [Limit] = [], _ resets: ResetOffer? = nil, plan: String? = nil
+        ) -> ProbeOutcome {
+            ProbeOutcome(
+                usage: UsageRecord(fetchedAt: now, state: state, note: note, limits: limits, resets: resets), doc: doc,
+                plan: plan)
         }
         func result(_ got: HTTPOutcome) -> ProbeOutcome {
             guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
             switch r.status {
             case HTTPStatus.ok:
                 guard let body = JSONFields(r.body) else { return done(.error, ProbeNote.unreadable(Note.usage)) }
-                return done(.ok, "", limits(body), resets(body))
+                return done(.ok, "", limits(body), resets(body), plan: body.str(Usage.plan))
             case HTTPStatus.unauthorized:
                 return done(.expired, Note.rejected)
             case HTTPStatus.tooManyRequests:
@@ -188,6 +190,8 @@ public struct CodexProbe: Sendable {
 
     /// Members of the usage endpoint's answer.
     private enum Usage {
+        /// The account's current plan, which the login's id_token only knew at sign-in.
+        static let plan = "plan_type"
         static let rateLimit = "rate_limit"
         static let windows = ["primary_window", "secondary_window"]
         static let used = "used_percent"

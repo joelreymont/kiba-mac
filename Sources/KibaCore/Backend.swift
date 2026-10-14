@@ -16,11 +16,13 @@ public protocol Backend: Sendable {
     func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
 }
 
-/// What probing one saved login produced: its usage record, and the login
-/// document (refreshed when the probe renewed its tokens).
+/// What probing one saved login produced: its usage record, the login
+/// document (refreshed when the probe renewed its tokens), and the plan the
+/// provider's answer named, nil when it named none.
 public struct ProbeOutcome: Equatable, Sendable {
     public var usage: UsageRecord
     public var doc: Data
+    public var plan: String? = nil
 }
 
 /// What the provider made of a limit-reset request.

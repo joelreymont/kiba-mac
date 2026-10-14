@@ -35,7 +35,7 @@ import os
         let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60)),
                              answer(Status.ok, claudeUsage(session: 10, week: 20)),
                              answer(Status.ok, codexUsage(session: 20, week: 45)),
-                             answer(Status.ok, codexUsage(session: 15, week: 25))])
+                             answer(Status.ok, codexUsage(session: 15, week: 25, plan: "pro"))])
         let sw = w.switcher(http)
         try await sw.use(.claude, bx)
         try await sw.use(.codex, by)
@@ -61,7 +61,7 @@ import os
                 Account(name: bx, plan: "pro", active: true, usage: probed(windows(session: 30, week: 60))),
             ], error: nil),
             ProviderStatus(provider: .codex, live: LiveLogin(email: "b@y", plan: "pro"), installedAt: Fixed.now, accounts: [
-                Account(name: ay, plan: "plus", active: false, usage: probed(windows(session: 15, week: 25))),
+                Account(name: ay, plan: "pro", active: false, usage: probed(windows(session: 15, week: 25))),
                 Account(name: by, plan: "pro", active: true, usage: probed(windows(session: 20, week: 45))),
             ], error: nil),
         ]
@@ -2180,10 +2180,11 @@ func juniperBlock(available: Bool) -> String {
 
 /// ChatGPT's usage answer: a 5-hour and a 7-day window, and `credits` limit
 /// resets when given.
-func codexUsage(session: Int, week: Int, credits: Int? = nil) -> String {
+func codexUsage(session: Int, week: Int, credits: Int? = nil, plan: String? = nil) -> String {
     let sessionAt = Fixed.now + Fixed.hour, weekAt = Fixed.now + Fixed.weekResetDays * Fixed.day
     let resets = credits.map { #","rate_limit_reset_credits":{"available_count":\#($0)}"# } ?? ""
-    return #"{"rate_limit":{"primary_window":{"used_percent":\#(session),"limit_window_seconds":18000,"reset_at":\#(sessionAt)},"#
+    let planType = plan.map { #""plan_type":"\#($0)","# } ?? ""
+    return #"{\#(planType)"rate_limit":{"primary_window":{"used_percent":\#(session),"limit_window_seconds":18000,"reset_at":\#(sessionAt)},"#
         + #""secondary_window":{"used_percent":\#(week),"limit_window_seconds":604800,"reset_at":\#(weekAt)}}\#(resets)}"#
 }
 

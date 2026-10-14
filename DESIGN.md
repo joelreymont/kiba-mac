@@ -361,7 +361,7 @@ public struct Claim: Equatable, Sendable { let owner: String }   // one install'
 public final class Tx {                             // only inside `write`: closed when `body` ends
   public func put(_ p: Provider, _ s: SavedLogin) throws        // upsert; an existing row keeps its usage when s.usage is nil
   public func setLogin(_ p: Provider, _ n: SlotName, _ doc: Data) throws   // noAccount when absent
-  public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord) throws
+  public func setUsage(_ p: Provider, _ n: SlotName, _ u: UsageRecord, plan: String?) throws   // plan nil keeps the plan column
   public func remove(_ p: Provider, _ n: SlotName) throws        // no-op when absent
   public func noteInstalled(_ p: Provider, _ n: SlotName, at: Int?) throws // upsert into live; at nil keeps the time noted
   public func notePending(_ p: Provider, _ n: SlotName) throws -> Claim   // upsert into pending under a new owner (UUID)
@@ -541,7 +541,7 @@ no bearer.
 
 ```swift
 public struct ProbeInput { provider, name: SlotName, doc: Data /* the row's login bytes */, live: Bool }
-public struct ProbeOutcome: Equatable { public var usage: UsageRecord; public var doc: Data /* possibly refreshed */ }
+public struct ProbeOutcome: Equatable { public var usage: UsageRecord; public var doc: Data /* possibly refreshed */; public var plan: String? /* the answer's plan; nil when it named none */ }
 
 public struct ClaudeProbe { init(http: HTTPClient, clock: Clock); func run(_ i: ProbeInput) async -> ProbeOutcome }
 public struct CodexProbe  { same }
@@ -630,7 +630,9 @@ Codex:
    label Session when `limit_window_seconds ≤ 21600` else Weekly; `reset_at`
    epoch → ISO 8601 UTC. `rate_limit_reset_credits.available_count` N →
    `ResetOffer(count: N, program: "", grant: "")`; absent → nil (codex
-   rust-v0.157.0 `backend-client/src/types.rs`). 401 on live → `expired`
+   rust-v0.157.0 `backend-client/src/types.rs`). Top-level `plan_type` →
+   `plan`, so an account upgraded since its login shows the new plan at
+   the next check (rust-v0.162.1 `RateLimitStatusPayload`). 401 on live → `expired`
    "access token rejected; run
    codex once to refresh it". 401 on saved → revokedFlag = body
    `error.code == "token_revoked"`; refresh: POST
@@ -743,8 +745,8 @@ changes between an operation's read and its write.
   Claude credentials without a config stop it here: `orphanLive` is both
   `saveBackError` and `providerError`, no account is probed. Then
   for every saved account: probe (`live` = name == live name, or, while
-  the Claude files are mixed, the installed name); `write`: `setUsage`,
-  `setLogin` when the doc changed. No probe removes a login: a revoked one stays listed as a dead
+  the Claude files are mixed, the installed name); `write`: `setUsage`
+  with the outcome's plan, `setLogin` when the doc changed. No probe removes a login: a revoked one stays listed as a dead
   row until the user forgets it, so no account drops out of sight. The
   live account is never refreshed. `accounts` holds only
   outcomes recorded: one whose write failed is not in it, and

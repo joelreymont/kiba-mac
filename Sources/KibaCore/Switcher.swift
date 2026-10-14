@@ -260,12 +260,12 @@ public final class Switcher: Sendable {
         }
     }
 
-    /// Writes a probe's outcome: the usage record and any refreshed login. A
-    /// login the provider revoked keeps its row, dead, so the account stays
-    /// listed until the user forgets it.
+    /// Writes a probe's outcome: the usage record, the plan the provider
+    /// named, and any refreshed login. A login the provider revoked keeps its
+    /// row, dead, so the account stays listed until the user forgets it.
     func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome) throws {
         try store.write { tx in
-            try tx.setUsage(p, row.name, outcome.usage)
+            try tx.setUsage(p, row.name, outcome.usage, plan: outcome.plan)
             if outcome.doc != row.login { try tx.setLogin(p, row.name, outcome.doc) }
         }
     }
