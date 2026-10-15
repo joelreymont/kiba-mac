@@ -39,6 +39,8 @@ public enum UsageState: String, Codable, Sendable {
     case unsubscribed
     /// The provider is rate limiting this login's usage checks.
     case throttled
+    /// The saved login holds no token to check or renew with.
+    case missing
 }
 
 /// A saved account's `usage.json`: the result of its last probe.

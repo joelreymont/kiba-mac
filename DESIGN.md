@@ -483,9 +483,10 @@ public struct CodexLive {
 
 ```swift
 public struct Limit: Codable, Equatable, Sendable { public var label: String; public var percent: Int; public var resetsAt: String }
-public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown, unsubscribed, throttled }
+public enum UsageState: String, Codable, Sendable { case ok, expired, revoked, error, unknown, unsubscribed, throttled, missing }
 // unsubscribed: the login works, but the organization has no plan the CLI may use
 // throttled: the provider is rate limiting this login's usage checks
+// missing: the saved login holds no token to check or renew with
 public struct ResetOffer: Codable, Equatable, Sendable {
   public var count: Int              // resets available now
   public var program: String         // Claude: "cedar_ember" (banked grants) | "juniper_tide" (one per week); Codex: ""
@@ -566,7 +567,7 @@ in, whose tokens are not the live ones.
 Claude:
 1. Expired = `claudeAiOauth.expiresAt/1000 < now + 60`. If expired: live →
    `expired` "access token expired; Claude Code refreshes it on its next
-   run"; no `refreshToken` → `expired` "…no refresh token is saved; log in
+   run"; no `refreshToken` → `missing` "…no refresh token is saved; log in
    again"; else refresh: POST
    `https://platform.claude.com/v1/oauth/token` JSON
    `{grant_type:"refresh_token", refresh_token, client_id:"9d1c250a-e61b-44d9-88ed-5944d1962f5e"}`.
@@ -621,7 +622,7 @@ Claude:
    present: a 429 can outlast a renewed token, and its words say which
    limit hit. Other →
    `error` "Anthropic's usage endpoint answered <code>". No `accessToken` →
-   `expired` "no access token saved; log in again", nothing sent. A token
+   `missing` "no access token saved; log in again", nothing sent. A token
    member that is "" counts as absent: a blanked document (both tokens "",
    `expiresAt` 0) otherwise sent an empty Bearer, which Anthropic answers
    429, so the dead login read as rate limited.
@@ -819,9 +820,9 @@ public enum Rows {
   static func weekly(_ u: UsageRecord?) -> Limit?    // first isLong with percent ≥ 0
   static func blocking(_ u: UsageRecord?) -> Limit?  // among percent ≥ 100: latest parseable reset, else the first
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
-  static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, or expired && !active
+  static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, missing, or expired && !active
   static func relogin(_ u: UsageRecord?, active: Bool) -> Bool // dead, or throttled && !active: a click logs in again
-  static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool // claude && dead
+  static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool // claude && expired && !active
   static func state(_ u: UsageRecord?, active: Bool) -> RowState
   static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead/unsubscribed 2, unknown 3
   static func drained(_ s: RowState) -> Bool         // dead or unsubscribed: every bar segment an empty track
@@ -844,9 +845,11 @@ public struct Figure: Equatable { public var label: String; public var left: Int
 State: dead → `.dead`; record `unsubscribed` → `.unsubscribed`; no usage or
 no limits → `.unknown`; any percent ≥ 100
 → `.blocked`; headline left < 50 → `.tight`; any long window other than the
-weekly with left < 50 → `.tight`; else `.ok`. A dead Claude row's plan
-text is "(free?)", not "(<plan>, log in again)": a guess that the plan
-lapsed, which no answer proves. Tooltip lines: `email · plan ·
+weekly with left < 50 → `.tight`; else `.ok`. A saved Claude row whose
+record is `expired` (Anthropic turned the login away) reads "(free?)", not
+"(<plan>, log in again)": a guess that the plan lapsed, which no answer
+proves. A `missing` login drew no answer, so it reads "(<plan>, log in
+again)". Tooltip lines: `email · plan ·
 current` (`plan`: "no plan" while unsubscribed, since the saved plan is the
 token document's stale claim); "Usage not probed yet" | note or "No limits reported" | one line
 per limit `"<label>: 72% left · resets in 5 h 12 min"` (or "limit reached");
@@ -1069,11 +1072,11 @@ default 120, min 15).
   `use(p, name)` — a `Rows.relogin` row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
   probes every provider and counts accounts per outcome: refreshed (the
-  provider answered: record `ok`, `unknown` or `unsubscribed`, or a dead
-  Claude row, `Rows.maybeFree`), waiting (record `expired`
-  on a row probed as live: its CLI refreshes the token, kiba never does),
-  failed (any other record `expired`, `error`, `revoked` or `throttled`: no fresh
-  usage) and not probed (a row shown with no
+  provider answered: record `ok`, `unknown` or `unsubscribed`, or a saved
+  Claude row Anthropic turned away, `Rows.maybeFree`), waiting (record
+  `expired` on a row probed as live: its CLI refreshes the token, kiba
+  never does), failed (any other record `expired`, `error`, `revoked`,
+  `throttled` or `missing`: no fresh usage) and not probed (a row shown with no
   outcome: its provider could not be probed, or its login changed before
   its usage was recorded). Each row shown when the probe ends and each
   account a report names counts once, so a provider that fails whole
@@ -1282,7 +1285,7 @@ in the middle ("nfnht45…leid.com") so both ends still name the account, as
 the original kiba did. The whole name is in the tooltip and the VoiceOver
 label. Blocked, dead and unsubscribed names are `idle`; blocked figures
 read `limit`; dead plan text carries "log in again", or is "free?" on
-Claude; an unsubscribed row's
+a Claude row Anthropic turned away (`Rows.maybeFree`); an unsubscribed row's
 plan text is "no plan", never the saved plan. VoiceOver reads a row as
 one button: label "<Provider>: <name>" plus ", current account"; value the
 plan (none while unsubscribed), the verdict ("has room"; "limit reached, resets in 5 h 12 min";

@@ -28,7 +28,7 @@ public struct ClaudeProbe: Sendable {
         case .ready(let ready): doc = ready
         case .stale(let state, let note): return done(state, note)
         }
-        guard let token = accessToken(doc) else { return done(.expired, Note.noToken) }
+        guard let token = accessToken(doc) else { return done(.missing, Note.noToken) }
         let got = await http.send(.get(Endpoint.usage, bearer: token, agent: Endpoint.agent, extra: Endpoint.beta))
         guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
         switch r.status {
@@ -107,7 +107,7 @@ public struct ClaudeProbe: Sendable {
     /// `error`, not `expired`: the hold may lift, so the login stays saved.
     private func renewed(_ doc: Data, now: Int) async -> Fresh {
         guard let grant = token(doc, Key.refreshToken) else {
-            return .stale(.expired, Note.noGrant)
+            return .stale(.missing, Note.noGrant)
         }
         switch await refresh(doc, grant: grant, now: now) {
         case .fresh(let refreshed): return .ready(refreshed)

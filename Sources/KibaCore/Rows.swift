@@ -68,10 +68,11 @@ public enum Rows {
     }
 
     /// The saved login no longer works. An expired live token is the CLI's
-    /// to refresh, so only a saved one counts.
+    /// to refresh, so only a saved one counts; a revoked or missing token is
+    /// dead either way.
     public static func dead(_ u: UsageRecord?, active: Bool) -> Bool {
         guard let u else { return false }
-        return u.state == .revoked || (u.state == .expired && !active)
+        return u.state == .revoked || u.state == .missing || (u.state == .expired && !active)
     }
 
     /// A click logs the account in again instead of switching to it: the
@@ -81,11 +82,11 @@ public enum Rows {
         dead(u, active: active) || (u?.state == .throttled && !active)
     }
 
-    /// A dead Claude row: it reads "free?", a guess that the plan lapsed,
-    /// and a probe counts it as answered. A dead Codex row asks to log in
-    /// again.
+    /// A saved Claude login Anthropic turned away: it reads "free?", a guess
+    /// that the plan lapsed, and a probe counts it as answered. Every other
+    /// dead row asks to log in again.
     public static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool {
-        p == .claude && dead(u, active: active)
+        p == .claude && u?.state == .expired && !active
     }
 
     public static func state(_ u: UsageRecord?, active: Bool) -> RowState {
@@ -177,7 +178,7 @@ public enum Rows {
     }
 
     /// `"(pro)"`, `"(pro, 5d)"` while blocked, `"(pro, log in again)"` when
-    /// dead, `"(free?)"` in its place on Claude, `"(no plan)"` when
+    /// dead, `"(free?)"` in its place when `maybeFree`, `"(no plan)"` when
     /// unsubscribed, or "".
     public static func planText(_ p: Provider, _ a: Account, now: Date) -> String {
         if maybeFree(p, a.usage, active: a.active) { return "(" + Copy.free + ")" }

@@ -762,12 +762,12 @@ final class AppModel {
     }
 
     /// What probing every provider came to, counted per account: refreshed
-    /// (the provider answered, or a saved Claude login is dead: its row
-    /// reads "free?"), failed (no fresh usage), waiting (the live login's
-    /// token has expired; its CLI refreshes it on its next run, kiba never
-    /// does), and skipped (a
-    /// row shown that no outcome covers: its provider could not be probed,
-    /// or its login changed before its usage was recorded).
+    /// (the provider answered, or Anthropic turned a saved Claude login away:
+    /// its row reads "free?"), failed (no fresh usage), waiting (the live
+    /// login's token has expired; its CLI refreshes it on its next run, kiba
+    /// never does), and skipped (a row shown that no outcome covers: its
+    /// provider could not be probed, or its login changed before its usage
+    /// was recorded).
     private struct Tally {
         var refreshed = 0
         var failed = 0
@@ -800,7 +800,7 @@ final class AppModel {
                         waiting += 1
                     case _ where Rows.maybeFree(p, u, active: a.live):
                         refreshed += 1
-                    case .expired, .error, .revoked, .throttled:
+                    case .expired, .error, .revoked, .throttled, .missing:
                         failed += 1
                         lines.append("\(p.title): \(a.name.raw): \(u.note)")
                     }

@@ -523,9 +523,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         ProbeCase(provider: .claude, login: stale, answers: [answer(Status.serverError, "")],
                   state: .error, note: "Anthropic's token endpoint answered 500"),
         ProbeCase(provider: .claude, login: noRefresh, answers: [],
-                  state: .expired, note: "access token expired and no refresh token is saved; log in again"),
+                  state: .missing, note: "access token expired and no refresh token is saved; log in again"),
         ProbeCase(provider: .claude, login: blank, answers: [],
-                  state: .expired, note: "no access token saved; log in again"),
+                  state: .missing, note: "no access token saved; log in again"),
         ProbeCase(provider: .claude, login: fresh, answers: [down],
                   state: .error, note: "Anthropic's usage endpoint could not be reached"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],
@@ -788,17 +788,20 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 /// Anthropic refused a saved login's refresh and says nothing of why: the
 /// row reads "free?" where it read the plan and "log in again", and the
 /// probe counts it as answered, not failed. Its hover lines keep the plan,
-/// Anthropic's answer and the offer to log in again.
+/// Anthropic's answer and the offer to log in again. The live login's tokens
+/// are blank: nothing was sent and Claude Code has nothing to refresh, so it
+/// reads its plan and "log in again" and fails.
 @MainActor @Test func rowsShowRefusedClaudeLoginAsFree() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
-    let (ax, bx) = (try slot("a@x"), try slot("b@x"))
-    let prof = profile("a@x", org: "org-a")
-    let creds = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
-    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: creds, profile: prof)
+    let (ax, bx, cx) = (try slot("a@x"), try slot("b@x"), try slot("c@x"))
+    let profC = profile("c@x", org: "org-c")
+    try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"),
+               login: claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day), profile: profile("a@x", org: "org-a"))
     try w.seed(.claude, bx, Identity(email: "b@x", plan: "max", org: "org-b"),
                login: claudeCreds("xb", plan: "max", expires: Fixed.now - Fixed.hour), profile: profile("b@x", org: "org-b"))
-    try w.writeClaude(config: claudeConfig(prof), creds: creds)
+    try w.seed(.claude, cx, Identity(email: "c@x", plan: "pro", org: "org-c"), login: ProbeCase.blank, profile: profC)
+    try w.writeClaude(config: claudeConfig(profC), creds: ProbeCase.blank)
     let http = StubHTTP([
         answer(Status.ok, claudeUsage(session: 30, week: 60)),
         answer(Status.badRequest, #"{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}"#),
@@ -812,15 +815,15 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
     model.probeUsage()
     try await settle(model)
-    #expect(model.message == "Usage refreshed for 2 accounts")
-    #expect(model.note == "")
+    #expect(model.note == "Usage refreshed for 2 of 3 accounts: 1 failed\nClaude Code: c@x: no access token saved; log in again")
     #expect(model.error == "")
-    #expect(model.meta == "All usage probed just now")
+    #expect(model.meta == "Some usage probed just now")
 
     let rows = try #require(model.sections.first { $0.id == .claude }).accounts
-    try #require(rows.map(\.name) == [ax, bx])
+    try #require(rows.map(\.name) == [ax, bx, cx])
+    try #require(rows.map(\.active) == [false, false, true])
     let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
-    #expect(rows.map { Rows.planText(.claude, $0, now: now) } == ["(max)", "(free?)"])
+    #expect(rows.map { Rows.planText(.claude, $0, now: now) } == ["(max)", "(free?)", "(pro, log in again)"])
     #expect(Rows.tooltip(.claude, rows[1], now: now) == [
         "b@x · max", ProbeCase.refused("400 invalid_grant: Refresh token not found or invalid"),
         "Probed just now", "Click to log in to this account again",
