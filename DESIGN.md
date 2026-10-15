@@ -674,6 +674,18 @@ Codex:
    browser flow, as Claude's do (Joel, 2026-10-14), so a sign-out in that
    browser revokes every saved login it signed in.
 
+   A switch reaches only Codex processes that start after it. Each one
+   keeps the account it loaded; when its token needs a refresh it rereads
+   `auth.json` and, finding another account there, refuses with "you have
+   since logged out or signed in to another account" without asking OpenAI
+   (codex rust-v0.162.1 `login/src/auth/manager.rs`,
+   `reload_if_account_id_matches`). Codex's shared app-server daemon, which
+   every `codex` without `--no-daemon` joins, so fails every new session
+   once its cached token ages out after a switch (2026-10-15: a daemon up
+   for six days failed every turn the day after one). Joel's config turns
+   it off (`features.daemon_auto_start = false`; a running one stops with
+   `codex app-server daemon stop`); a running session is restarted by hand.
+
 `fetchedAt` = now for every record.
 
 Both probes share one token step with redeem: Claude's `fresh` (the expiry
