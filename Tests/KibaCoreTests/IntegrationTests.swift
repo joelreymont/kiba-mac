@@ -477,6 +477,10 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     /// Expired, so the check starts with a refresh.
     static let stale = claudeCreds("s", plan: "pro", expires: Fixed.now - Fixed.hour)
     static let fresh = claudeCreds("s", plan: "pro", expires: Fixed.now + Fixed.day)
+    /// A login whose tokens were blanked: empty strings, expiry 0.
+    static let blank = Data(#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"subscriptionType":"pro"}}"#.utf8)
+    /// An expired login whose refresh token was blanked.
+    static let noRefresh = Data(#"{"claudeAiOauth":{"accessToken":"at-s","refreshToken":"","expiresAt":\#((Fixed.now - Fixed.hour) * Fixed.msPerSecond),"subscriptionType":"pro"}}"#.utf8)
     static let auth = codexAuth(email, plan: "pro", account: "org-s", tag: "s")
     /// A rejected access token the provider has not revoked: it earns a refresh.
     static let rejected = answer(Status.unauthorized, #"{"error":{"code":"token_expired"}}"#)
@@ -518,6 +522,10 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
                   state: .error, note: onHold("https://claude.ai/restricted")),
         ProbeCase(provider: .claude, login: stale, answers: [answer(Status.serverError, "")],
                   state: .error, note: "Anthropic's token endpoint answered 500"),
+        ProbeCase(provider: .claude, login: noRefresh, answers: [],
+                  state: .expired, note: "access token expired and no refresh token is saved; log in again"),
+        ProbeCase(provider: .claude, login: blank, answers: [],
+                  state: .expired, note: "no access token saved; log in again"),
         ProbeCase(provider: .claude, login: fresh, answers: [down],
                   state: .error, note: "Anthropic's usage endpoint could not be reached"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],

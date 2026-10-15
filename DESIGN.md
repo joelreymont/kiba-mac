@@ -618,7 +618,10 @@ Claude:
    is not shown for such a row (see Rows). 429 → `throttled`
    "Anthropic is rate limiting usage checks; try again later". Other →
    `error` "Anthropic's usage endpoint answered <code>". No `accessToken` →
-   `error` "no access token saved".
+   `expired` "no access token saved; log in again", nothing sent. A token
+   member that is "" counts as absent: a blanked document (both tokens "",
+   `expiresAt` 0) otherwise sent an empty Bearer, which Anthropic answers
+   429, so the dead login read as rate limited.
 
 Codex:
 1. `OPENAI_API_KEY` present and no `tokens.id_token` → `unknown` "API-key

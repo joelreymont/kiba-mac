@@ -28,7 +28,7 @@ public struct ClaudeProbe: Sendable {
         case .ready(let ready): doc = ready
         case .stale(let state, let note): return done(state, note)
         }
-        guard let token = accessToken(doc) else { return done(.error, ProbeNote.noAccess) }
+        guard let token = accessToken(doc) else { return done(.expired, Note.noToken) }
         let got = await http.send(.get(Endpoint.usage, bearer: token, agent: Endpoint.agent, extra: Endpoint.beta))
         guard case .response(let r) = got else { return done(.error, ProbeNote.unreachable(Note.usage)) }
         switch r.status {
@@ -101,7 +101,7 @@ public struct ClaudeProbe: Sendable {
     /// `doc` with its saved refresh grant spent. An account on hold is an
     /// `error`, not `expired`: the hold may lift, so the login stays saved.
     private func renewed(_ doc: Data, now: Int) async -> Fresh {
-        guard let grant = JSONFields(doc)?.obj(Key.oauth)?.str(Key.refreshToken) else {
+        guard let grant = token(doc, Key.refreshToken) else {
             return .stale(.expired, Note.noGrant)
         }
         switch await refresh(doc, grant: grant, now: now) {
@@ -146,7 +146,14 @@ public struct ClaudeProbe: Sendable {
     }
 
     private func accessToken(_ doc: Data) -> String? {
-        JSONFields(doc)?.obj(Key.oauth)?.str(Key.accessToken)
+        token(doc, Key.accessToken)
+    }
+
+    /// The token member `key` of `doc`; nil when absent or "", as in a
+    /// document whose tokens were blanked.
+    private func token(_ doc: Data, _ key: String) -> String? {
+        guard let value = JSONFields(doc)?.obj(Key.oauth)?.str(key), !value.isEmpty else { return nil }
+        return value
     }
 
     /// The request for `offer`'s program; nil for a program kiba does not know.
@@ -400,6 +407,7 @@ public struct ClaudeProbe: Sendable {
         static let reset = "Anthropic's reset endpoint"
         static let liveExpired = "access token expired; Claude Code refreshes it on its next run"
         static let noGrant = "access token expired and no refresh token is saved; log in again"
+        static let noToken = "no access token saved; log in again"
         /// The longest server-supplied text a note carries.
         static let detailMax = 120
         static let ellipsis = "…"
