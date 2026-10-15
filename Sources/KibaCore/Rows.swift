@@ -91,7 +91,7 @@ public enum Rows {
 
     public static func state(_ u: UsageRecord?, active: Bool) -> RowState {
         if dead(u, active: active) { return .dead }
-        if u?.state == .unsubscribed { return .unsubscribed }
+        if u?.state == .unsubscribed || u?.state == .free { return .unsubscribed }
         guard let u, !u.limits.isEmpty else { return .unknown }
         if u.limits.contains(where: { $0.percent >= Level.full }) { return .blocked }
         if let h = headline(u), Level.full - h.percent < Level.half { return .tight }
@@ -171,15 +171,20 @@ public enum Rows {
         return figures(p, u).map { "\($0.left)%" }.joined(separator: Copy.figureSep)
     }
 
-    /// The saved plan, or "no plan" for an unsubscribed row: the token
-    /// document still claims the plan the organization no longer has.
+    /// The saved plan, "no plan" for an unsubscribed row, or "free" for one
+    /// on the free plan: the token document still claims the plan the
+    /// organization no longer has.
     public static func plan(_ a: Account) -> String {
-        a.usage?.state == .unsubscribed ? Copy.noPlan : a.plan
+        switch a.usage?.state {
+        case .unsubscribed: Copy.noPlan
+        case .free: Copy.freePlan
+        default: a.plan
+        }
     }
 
     /// `"(pro)"`, `"(pro, 5d)"` while blocked, `"(pro, log in again)"` when
     /// dead, `"(free?)"` in its place when `maybeFree`, `"(no plan)"` when
-    /// unsubscribed, or "".
+    /// unsubscribed, `"(free)"` on the free plan, or "".
     public static func planText(_ p: Provider, _ a: Account, now: Date) -> String {
         if maybeFree(p, a.usage, active: a.active) { return "(" + Copy.free + ")" }
         var parts: [String] = []
@@ -324,6 +329,7 @@ public enum Rows {
         static let again = "log in again"
         static let free = "free?"
         static let noPlan = "no plan"
+        static let freePlan = "free"
         static let current = "current"
         static let unprobed = "Usage not probed yet"
         static let noLimits = "No limits reported"

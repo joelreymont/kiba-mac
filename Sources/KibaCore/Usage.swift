@@ -41,6 +41,8 @@ public enum UsageState: String, Codable, Sendable {
     case throttled
     /// The saved login holds no token to check or renew with.
     case missing
+    /// The organization is on the free plan: no usage to read.
+    case free
 }
 
 /// A saved account's `usage.json`: the result of its last probe.

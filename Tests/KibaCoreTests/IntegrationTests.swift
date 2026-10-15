@@ -494,6 +494,11 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     static let long = #"{"error":"invalid_grant","error_description":"line one\n"# + String(repeating: "x", count: 130) + #""}"#
     static let longDetail = "400 invalid_grant: line one " + String(repeating: "x", count: 130)
     static let throttled = "Anthropic is rate limiting usage checks; try again later"
+    /// Anthropic's profile answers after a 429: a paid organization, and one
+    /// whose type Claude Code maps to no plan.
+    static let paidOrg = answer(Status.ok, #"{"organization":{"organization_type":"claude_max"}}"#)
+    static let freeOrg = answer(Status.ok, #"{"organization":{"organization_type":null}}"#)
+    static let freePlan = "free plan: Anthropic's profile shows no paid plan for this organization"
     static func refused(_ detail: String) -> String {
         "access token expired and the refresh was refused (\(detail)); log in again"
     }
@@ -528,10 +533,14 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
                   state: .missing, note: "no access token saved; log in again"),
         ProbeCase(provider: .claude, login: fresh, answers: [down],
                   state: .error, note: "Anthropic's usage endpoint could not be reached"),
-        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}"), paidOrg],
                   state: .throttled, note: throttled),
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}"), answer(Status.ok, "{}")],
+                  state: .throttled, note: throttled),
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}"), freeOrg],
+                  state: .free, note: freePlan),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(
-            Status.tooMany, #"{"type":"error","error":{"type":"rate_limit_error","message":"Too many\nrequests"}}"#)],
+            Status.tooMany, #"{"type":"error","error":{"type":"rate_limit_error","message":"Too many\nrequests"}}"#), down],
                   state: .throttled, note: "Anthropic is rate limiting usage checks (Too many requests); try again later"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, noOAuth)],
                   state: .unsubscribed, note: noPlan),
@@ -748,16 +757,19 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 /// A lapsed subscription: Anthropic answers the usage check with a 403 that
 /// bars the organization from OAuth. The row reads "no plan" in place of the
 /// plan the token document still claims, cannot take work, and the probe
-/// counts it as answered, not failed.
+/// counts it as answered, not failed. A free organization's check draws a
+/// 429 and a profile with no paid plan: that row reads "free", alike.
 @MainActor @Test func rowsShowNoPlanWhenTheSubscriptionLapsed() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
-    let ax = try slot("a@x")
+    let (ax, bx) = (try slot("a@x"), try slot("b@x"))
     let prof = profile("a@x", org: "org-a")
     let creds = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
     try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: creds, profile: prof)
+    try w.seed(.claude, bx, Identity(email: "b@x", plan: "max", org: "org-b"),
+               login: claudeCreds("xb", plan: "max", expires: Fixed.now + Fixed.day), profile: profile("b@x", org: "org-b"))
     try w.writeClaude(config: claudeConfig(prof), creds: creds)
-    let http = StubHTTP([answer(Status.forbidden, ProbeCase.noOAuth)])
+    let http = StubHTTP([answer(Status.forbidden, ProbeCase.noOAuth), answer(Status.tooMany, "{}"), ProbeCase.freeOrg])
     let core = CoreBackend(
         switcher: w.switcher(http), reader: StatusReader(paths: w.paths, store: w.store),
         runner: try w.runner(StubHTTP([]), keychain: FakeKeychain(items: [:])))
@@ -767,14 +779,21 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
     model.probeUsage()
     try await settle(model)
-    #expect(model.message == "Usage refreshed for 1 account")
+    #expect(model.message == "Usage refreshed for 2 accounts")
     #expect(model.note == "")
     #expect(model.error == "")
     #expect(model.iconValue.contains("Claude Code: none left"))
+    #expect(http.requests.last?.url.absoluteString == "https://api.anthropic.com/api/oauth/profile")
+    #expect(http.requests.last?.headers[Header.agent] == "kiba")
+    #expect(http.requests.last?.headers[Header.auth] == "Bearer at-xb")
 
     let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
-    let a = try #require(claude?.accounts.first)
+    let (a, b) = (try #require(claude?.accounts.first), try #require(claude?.accounts.last))
     let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
+    #expect(b.usage == UsageRecord(fetchedAt: Fixed.now, state: .free, note: ProbeCase.freePlan, limits: []))
+    #expect(Rows.state(b.usage, active: false) == .unsubscribed)
+    #expect(Rows.planText(.claude, b, now: now) == "(free)")
+    #expect(Rows.tooltip(.claude, b, now: now).prefix(2) == ["b@x · free", ProbeCase.freePlan])
     #expect(a.active)
     #expect(a.usage == UsageRecord(fetchedAt: Fixed.now, state: .unsubscribed, note: ProbeCase.noPlan, limits: []))
     #expect(Rows.state(a.usage, active: true) == .unsubscribed)
@@ -847,6 +866,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     let http = StubHTTP([
         answer(Status.ok, claudeUsage(session: 30, week: 60)),
         answer(Status.tooMany, "{}"),
+        ProbeCase.paidOrg,
         answer(Status.ok, claudeUsage(session: 10, week: 20)),
     ])
     let fresh = claudeCreds("nb", plan: "max", expires: Fixed.now + Fixed.day)

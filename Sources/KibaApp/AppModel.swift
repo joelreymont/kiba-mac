@@ -794,7 +794,7 @@ final class AppModel {
                     let u = a.outcome.usage
                     records[p, default: [:]][a.name] = u
                     switch u.state {
-                    case .ok, .unknown, .unsubscribed:
+                    case .ok, .unknown, .unsubscribed, .free:
                         refreshed += 1
                     case .expired where a.live:
                         waiting += 1

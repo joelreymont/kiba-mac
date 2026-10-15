@@ -40,10 +40,21 @@ public struct ClaudeProbe: Sendable {
         case HTTPStatus.forbidden where Self.noPlan(r.body):
             return done(.unsubscribed, Note.unsubscribed)
         case HTTPStatus.tooManyRequests:
+            if await onFreePlan(token) { return done(.free, Note.free) }
             return done(.throttled, Note.throttled(Self.message(r.body)))
         default:
             return done(.error, ProbeNote.answered(Note.usage, r.status))
         }
+    }
+
+    /// Anthropic answers a free organization's usage check with the 429 of
+    /// a rate limit; its profile tells the two apart. True only when the
+    /// profile names the organization and a type Claude Code maps to no plan.
+    private func onFreePlan(_ token: String) async -> Bool {
+        guard case .response(let r) = await http.send(.get(Endpoint.profile, bearer: token)),
+              r.status == HTTPStatus.ok, let org = JSONFields(r.body)?.obj(Profile.organization)
+        else { return false }
+        return !Profile.paid.contains(org.str(Profile.type) ?? "")
     }
 
     /// An API error answer's `error.message` on one line; "" when absent.
@@ -262,6 +273,7 @@ public struct ClaudeProbe: Sendable {
         static let usage = URL(
             string: "https://api.anthropic.com/api/oauth/usage?\(Reset.banked)=\(Reset.on)&\(Reset.atWall)=\(Reset.on)")!
         static let token = URL(string: "https://platform.claude.com/v1/oauth/token")!
+        static let profile = URL(string: "https://api.anthropic.com/api/oauth/profile")!
         /// Followed by the organization UUID and `resetPath`.
         static let organizations = URL(string: "https://api.anthropic.com/api/organizations")!
         static let resetPath = "reset_rate_limits"
@@ -293,6 +305,14 @@ public struct ClaudeProbe: Sendable {
         static let accessToken = "access_token"
         static let expiresIn = "expires_in"
         static let refreshExpiresIn = "refresh_token_expires_in"
+    }
+
+    /// Members of the profile endpoint's answer, and the organization types
+    /// Claude Code maps to a plan.
+    private enum Profile {
+        static let organization = "organization"
+        static let type = "organization_type"
+        static let paid: Set = ["claude_max", "claude_pro", "claude_team", "claude_enterprise"]
     }
 
     /// Members of the usage endpoint's answer.
@@ -425,6 +445,7 @@ public struct ClaudeProbe: Sendable {
                 : "Anthropic is rate limiting usage checks (\(message)); try again later"
         }
         static let unsubscribed = "no plan for Claude Code: Anthropic does not allow this organization's OAuth login"
+        static let free = "free plan: Anthropic's profile shows no paid plan for this organization"
         static let resetThrottled = "Anthropic is rate limiting limit resets; try again later"
 
         static func refused(_ detail: String) -> String {
