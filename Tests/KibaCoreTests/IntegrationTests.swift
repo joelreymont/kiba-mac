@@ -530,6 +530,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
                   state: .error, note: "Anthropic's usage endpoint could not be reached"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.tooMany, "{}")],
                   state: .throttled, note: throttled),
+        ProbeCase(provider: .claude, login: fresh, answers: [answer(
+            Status.tooMany, #"{"type":"error","error":{"type":"rate_limit_error","message":"Too many\nrequests"}}"#)],
+                  state: .throttled, note: "Anthropic is rate limiting usage checks (Too many requests); try again later"),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, noOAuth)],
                   state: .unsubscribed, note: noPlan),
         ProbeCase(provider: .claude, login: fresh, answers: [answer(Status.forbidden, "{}")],

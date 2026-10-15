@@ -40,10 +40,15 @@ public struct ClaudeProbe: Sendable {
         case HTTPStatus.forbidden where Self.noPlan(r.body):
             return done(.unsubscribed, Note.unsubscribed)
         case HTTPStatus.tooManyRequests:
-            return done(.throttled, Note.throttled)
+            return done(.throttled, Note.throttled(Self.message(r.body)))
         default:
             return done(.error, ProbeNote.answered(Note.usage, r.status))
         }
+    }
+
+    /// An API error answer's `error.message` on one line; "" when absent.
+    private static func message(_ body: Data) -> String {
+        oneLine(JSONFields(body)?.obj(Fail.error)?.str(Fail.message) ?? "")
     }
 
     /// The usage endpoint's 403 for an organization whose plan does not
@@ -317,6 +322,7 @@ public struct ClaudeProbe: Sendable {
         /// The organization has no plan Claude Code may use.
         static let noOAuth = "oauth_not_allowed_for_organization"
         static let type = "type"
+        static let message = "message"
         static let description = "error_description"
         static let uri = "error_uri"
     }
@@ -412,7 +418,12 @@ public struct ClaudeProbe: Sendable {
         static let detailMax = 120
         static let ellipsis = "…"
         static let rejected = "login rejected by Anthropic; log in again"
-        static let throttled = "Anthropic is rate limiting usage checks; try again later"
+        /// Anthropic's own words, when its answer gives them, say which limit hit.
+        static func throttled(_ message: String) -> String {
+            message.isEmpty
+                ? "Anthropic is rate limiting usage checks; try again later"
+                : "Anthropic is rate limiting usage checks (\(message)); try again later"
+        }
         static let unsubscribed = "no plan for Claude Code: Anthropic does not allow this organization's OAuth login"
         static let resetThrottled = "Anthropic is rate limiting limit resets; try again later"
 

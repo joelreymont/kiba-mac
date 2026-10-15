@@ -616,7 +616,10 @@ Claude:
    no plan Claude Code may use. A lapsed subscription answers so, while the
    token document still claims its old `subscriptionType`, so the saved plan
    is not shown for such a row (see Rows). 429 → `throttled`
-   "Anthropic is rate limiting usage checks; try again later". Other →
+   "Anthropic is rate limiting usage checks; try again later", with the
+   answer's `error.message`, one line, in parentheses after "checks" when
+   present: a 429 can outlast a renewed token, and its words say which
+   limit hit. Other →
    `error` "Anthropic's usage endpoint answered <code>". No `accessToken` →
    `expired` "no access token saved; log in again", nothing sent. A token
    member that is "" counts as absent: a blanked document (both tokens "",
