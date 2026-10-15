@@ -11,7 +11,7 @@ public protocol Backend: Sendable {
     func forget(_ p: Provider, _ n: SlotName) throws
     /// Never throws: failures land in the report.
     func probeAll(_ p: Provider) async -> ProbeReport
-    func add(_ p: Provider, expected: String?) async throws -> AddResult
+    func add(_ p: Provider, expected: SlotName?) async throws -> AddResult
     /// Spends one limit reset of the saved login `n`, then re-probes it.
     func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome
 }
@@ -77,12 +77,12 @@ public struct Probed: Sendable {
 /// What an added login was saved as.
 public struct AddResult: Equatable, Sendable {
     public var saved: SlotName
-    /// The email the user asked to sign in as, if any.
-    public var expected: String?
-    /// An email was expected and another account signed in.
+    /// The saved login the user asked to log in to again, if any.
+    public var expected: SlotName?
+    /// A login was expected and this one was saved under another name.
     public var differs: Bool
 
-    public init(saved: SlotName, expected: String?, differs: Bool) {
+    public init(saved: SlotName, expected: SlotName?, differs: Bool) {
         self.saved = saved
         self.expected = expected
         self.differs = differs

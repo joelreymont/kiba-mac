@@ -942,8 +942,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             printf '%s' '\(text(otherCreds))' > "$CLAUDE_CONFIG_DIR/.credentials.json"
             printf '%s' '\(text(claudeConfig(otherProfile)))' > "$CLAUDE_CONFIG_DIR/.claude.json"
             """)
-        let other = try await w.runner(http, keychain: keychain).add(.claude, expected: "x@y")
-        #expect(other == AddResult(saved: try slot("other@y"), expected: "x@y", differs: true))
+        let other = try await w.runner(http, keychain: keychain).add(.claude, expected: try slot("x@y"))
+        #expect(other == AddResult(saved: try slot("other@y"), expected: try slot("x@y"), differs: true))
         let otherRow = try w.store.fetch(.claude, try slot("other@y"))
         #expect(otherRow?.login == otherCreds)
         #expect(otherRow?.profile == otherProfile)
@@ -955,8 +955,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             printf '%s' '\(text(claudeConfig(profile("k@y", org: "org-k"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
             """)
         let runner = try w.runner(http, keychain: keychain) { try live.write(newCreds) }
-        let added = try await runner.add(.claude, expected: "k@y")
-        #expect(added == AddResult(saved: try slot("k@y"), expected: "k@y", differs: false))
+        // Logging in again to `k@y #2` that signs in to another organization is told apart.
+        let added = try await runner.add(.claude, expected: try slot("k@y #2"))
+        #expect(added == AddResult(saved: try slot("k@y"), expected: try slot("k@y #2"), differs: true))
         #expect(try w.store.fetch(.claude, try slot("k@y"))?.login == newCreds)
         #expect(try live.read() == liveCreds)
 
@@ -967,8 +968,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         try w.fakeCLI("claude", """
             printf '%s' '\(text(claudeConfig(profile("f@y", org: "org-f"))))' > "$CLAUDE_CONFIG_DIR/.claude.json"
             """)
-        let created = try await w.runner(http, keychain: keychain) { try live.write(itemCreds) }.add(.claude, expected: "f@y")
-        #expect(created == AddResult(saved: try slot("f@y"), expected: "f@y", differs: false))
+        let created = try await w.runner(http, keychain: keychain) { try live.write(itemCreds) }.add(.claude, expected: try slot("f@y"))
+        #expect(created == AddResult(saved: try slot("f@y"), expected: try slot("f@y"), differs: false))
         #expect(try w.store.fetch(.claude, try slot("f@y"))?.login == itemCreds)
         #expect(try live.read() == nil)
 
@@ -995,9 +996,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let http = StubHTTP([answer(Status.ok, claudeUsage(session: 30, week: 60))])
         let runner = try w.runner(http, keychain: keychain) { try leftover.write(newCreds) }
 
-        let added = try await runner.add(.claude, expected: "n@y")
+        let added = try await runner.add(.claude, expected: try slot("n@y"))
 
-        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        #expect(added == AddResult(saved: try slot("n@y"), expected: try slot("n@y"), differs: false))
         #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == newCreds)
         #expect(try leftover.read() == nil)
         #expect(try keychain.item(w.paths.keychainService).read() == liveCreds)
@@ -1023,7 +1024,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         // Only the other profile's item changes: the login produced nothing.
         let refreshed = claudeCreds("p1", plan: "pro", expires: Fixed.now + Fixed.day)
         let idle = try w.runner(StubHTTP([]), keychain: keychain) { try other.write(refreshed) }
-        await #expect(throws: KibaError.loginProducedNothing(.claude)) { try await idle.add(.claude, expected: "n@y") }
+        await #expect(throws: KibaError.loginProducedNothing(.claude)) { try await idle.add(.claude, expected: try slot("n@y")) }
         #expect(try other.read() == refreshed)
         #expect(try login.read() == nil)
         #expect(try live.read() == liveCreds)
@@ -1037,8 +1038,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             try other.write(again)
             try login.write(newCreds)
         }
-        let added = try await both.add(.claude, expected: "n@y")
-        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        let added = try await both.add(.claude, expected: try slot("n@y"))
+        #expect(added == AddResult(saved: try slot("n@y"), expected: try slot("n@y"), differs: false))
         #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == newCreds)
         #expect(try other.read() == again)
         #expect(try login.read() == nil)
@@ -1069,7 +1070,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
         try w.fakeCLI("claude", "exit 3")
         let failing = try w.runner(StubHTTP([]), keychain: keychain) { try live.write(refreshed) }
-        await #expect(throws: KibaError.loginFailed(3)) { try await failing.add(.claude, expected: "x@y") }
+        await #expect(throws: KibaError.loginFailed(3)) { try await failing.add(.claude, expected: try slot("x@y")) }
         #expect(try live.read() == refreshed)
         #expect(try w.store.adding(.claude) == nil)
 
@@ -1082,7 +1083,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let legacy = try w.runner(StubHTTP([]), keychain: keychain) {
             try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
         }
-        await #expect(throws: KibaError.loginFailed(3)) { try await legacy.add(.claude, expected: "x@y") }
+        await #expect(throws: KibaError.loginFailed(3)) { try await legacy.add(.claude, expected: try slot("x@y")) }
         #expect(try live.read() == refreshed)
         #expect(try w.store.adding(.claude) == nil)
         #expect(try w.store.list(.claude).isEmpty)
@@ -1107,8 +1108,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             try live.write(refreshed)
             try login.write(itemCreds)
         }
-        let added = try await viaItem.add(.claude, expected: "n@y")
-        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        let added = try await viaItem.add(.claude, expected: try slot("n@y"))
+        #expect(added == AddResult(saved: try slot("n@y"), expected: try slot("n@y"), differs: false))
         #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == itemCreds)
         #expect(try live.read() == refreshed)
         #expect(try login.read() == nil)
@@ -1121,8 +1122,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             """)
         let again = claudeCreds("live3", plan: "max", expires: Fixed.now + Fixed.day)
         let viaFile = try w.runner(http, keychain: keychain) { try live.write(again) }
-        let filed = try await viaFile.add(.claude, expected: "f@y")
-        #expect(filed == AddResult(saved: try slot("f@y"), expected: "f@y", differs: false))
+        let filed = try await viaFile.add(.claude, expected: try slot("f@y"))
+        #expect(filed == AddResult(saved: try slot("f@y"), expected: try slot("f@y"), differs: false))
         #expect(try w.store.fetch(.claude, try slot("f@y"))?.login == fileCreds)
         #expect(try live.read() == again)
 
@@ -1141,7 +1142,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         try w.fakeCLI("claude", "printf '%s' \"$$\" > '\(cliPid.path)'\nsleep \(Fixed.stall)")
         let refreshed = claudeCreds("live2", plan: "max", expires: Fixed.now + Fixed.day)
         let runner = try w.runner(StubHTTP([]), keychain: keychain, background: true) { try live.write(refreshed) }
-        let add = Task { try await runner.add(.claude, expected: "x@y") }
+        let add = Task { try await runner.add(.claude, expected: try slot("x@y")) }
         try await until("the login to start") { w.read(cliPid) != nil }
 
         add.cancel()
@@ -1257,7 +1258,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let failing = try w.runner(StubHTTP([]), keychain: locked) {
             try live.write(claudeCreds("x", plan: "pro", expires: Fixed.now + Fixed.day))
         }
-        await #expect(throws: LockedSecret.refusal) { try await failing.add(.claude, expected: "x@y") }
+        await #expect(throws: LockedSecret.refusal) { try await failing.add(.claude, expected: try slot("x@y")) }
         #expect(w.read(w.paths.claudeConfigFile(root: root)) == config)
         #expect(try w.store.adding(.claude) != nil)
 
@@ -1654,8 +1655,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         try w.noteAdding(liveCreds)
         try w.writeLoginConfig(claudeConfig(profile("x@y", org: "org-x")))
 
-        let added = try await runner.add(.claude, expected: "n@y")
-        #expect(added == AddResult(saved: try slot("n@y"), expected: "n@y", differs: false))
+        let added = try await runner.add(.claude, expected: try slot("n@y"))
+        #expect(added == AddResult(saved: try slot("n@y"), expected: try slot("n@y"), differs: false))
         #expect(try w.store.fetch(.claude, try slot("n@y"))?.login == itemCreds)
         #expect(try live.read() == liveCreds)
         #expect(try w.store.adding(.claude) == nil)
@@ -2928,7 +2929,7 @@ struct GatedBackend: Backend {
         await core.probeAll(p)
     }
 
-    func add(_ p: Provider, expected: String?) async throws -> AddResult {
+    func add(_ p: Provider, expected: SlotName?) async throws -> AddResult {
         try await core.add(p, expected: expected)
     }
 

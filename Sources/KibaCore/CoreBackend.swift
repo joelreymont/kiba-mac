@@ -72,7 +72,7 @@ public struct CoreBackend: Backend {
         await switcher.probeAll(p)
     }
 
-    public func add(_ p: Provider, expected: String?) async throws -> AddResult {
+    public func add(_ p: Provider, expected: SlotName?) async throws -> AddResult {
         try await runner.add(p, expected: expected)
     }
 

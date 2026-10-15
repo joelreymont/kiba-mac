@@ -484,7 +484,7 @@ final class AppModel {
         case .use(let p, let n): use(p, n)
         case .redeem(let p, let n): ask(.reset, p, n)
         case .save(let p): save(p)
-        case .add(let p): add(p, email: nil)
+        case .add(let p): add(p, expected: nil)
         case .confirm(let p, let n): confirm(p, n)
         case .keep: keep()
         case .retry: refresh(force: true)
@@ -507,7 +507,7 @@ final class AppModel {
     func use(_ p: Provider, _ n: SlotName) {
         guard let a = account(p, n), !a.active else { return }
         if Rows.relogin(a.usage, active: a.active) {
-            add(p, email: n.email)
+            add(p, expected: n)
             return
         }
         run("Switching \(p.title) to \(n.raw)…") { b in
@@ -524,15 +524,15 @@ final class AppModel {
     }
 
     /// Runs the provider's login in Terminal; the panel closes first.
-    func add(_ p: Provider, email: String?) {
+    func add(_ p: Provider, expected: SlotName?) {
         guard !busy else { return }
         if panelOpen {
             closePanel()
             closed()
         }
         run("Adding a \(p.title) account…") { b in
-            let r = try await b.add(p, expected: email)
-            if r.differs, let e = r.expected { return Outcome(text: "Added \(r.saved.raw), not \(e)", held: true) }
+            let r = try await b.add(p, expected: expected)
+            if r.differs, let e = r.expected { return Outcome(text: "Added \(r.saved.raw), not \(e.raw)", held: true) }
             return Outcome(text: "Added \(r.saved.raw)")
         }
     }

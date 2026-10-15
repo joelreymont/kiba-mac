@@ -859,10 +859,10 @@ public protocol TerminalLauncher: Sendable { func open(_ script: URL) throws }
 public protocol Keychain: Sendable {
   func item(_ service: String) -> SecretStore            // the generic-password item of a service
 }
-public struct AddResult: Equatable { public var saved: SlotName; public var expected: String?; public var differs: Bool }
+public struct AddResult: Equatable { public var saved: SlotName; public var expected: SlotName?; public var differs: Bool }
 public actor LoginRunner {
   public init(paths: Paths, switcher: Switcher, terminal: TerminalLauncher, keychain: Keychain, searchPath: String) throws
-  public func add(_ p: Provider, expected email: String?) async throws -> AddResult
+  public func add(_ p: Provider, expected: SlotName?) async throws -> AddResult
 }
 ```
 
@@ -971,9 +971,11 @@ the held turn shows nowhere.
    are the source item (6b) deleted and root removed: a failed import leaves
    both in place and throws its error, until the next add (1, 3) removes
    them. Then probe the new account (`probeInTurn`, `live: false`) and
-   `write` its usage. `differs` = expected email given and `saved.email !=
-   expected`. Any failure before 7 removes root, except a stop (4) or a
-   restore (5) that fails.
+   `write` its usage. `differs` = expected name given and `saved != expected`:
+   another account, or the same email in another organization (Claude
+   Code's login cannot be pinned to one, and both of an email's
+   organizations can bear the same name), lands in another row. Any failure
+   before 7 removes root, except a stop (4) or a restore (5) that fails.
 
 Stopping a login: claim `root/pid` by an exclusive create. When that
 succeeds the script has not filed its pid and, its link failing, exits
@@ -1011,7 +1013,7 @@ public protocol Backend: Sendable {
   func save(_ p: Provider) throws -> SlotName?
   func forget(_ p: Provider, _ n: SlotName) throws
   func probeAll(_ p: Provider) async -> ProbeReport
-  func add(_ p: Provider, expected: String?) async throws -> AddResult
+  func add(_ p: Provider, expected: SlotName?) async throws -> AddResult
   func redeem(_ p: Provider, _ n: SlotName) async throws -> ResetOutcome  // spend one limit reset, re-probe
 }
 public enum ResetOutcome: String, Equatable, Sendable {

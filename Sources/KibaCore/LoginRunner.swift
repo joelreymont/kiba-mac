@@ -45,15 +45,16 @@ public actor LoginRunner {
     /// Logs in, saves the new login, probes it, and removes the throwaway
     /// home, all in `p`'s turn, so no switch or probe of `p` runs between the
     /// snapshot of the live login and the probe of the new one. `differs`
-    /// when `email` was given and another account signed in; `loginRunning`
-    /// while another add for `p` waits on its login. A failure removes the
-    /// throwaway home, except where the login may still run, the live item
-    /// could not be put back, or the import failed: the home is the evidence
-    /// the next start restores by, and the login's source goes only once the
-    /// import has committed. A Claude add first undoes the one a failed stop
-    /// or restore left, as `init` does, so the record of the live item is
-    /// settled before a new one replaces it.
-    public func add(_ p: Provider, expected email: String?) async throws -> AddResult {
+    /// when `expected` was given and the login was saved under another name:
+    /// another account signed in, or the same email in another organization;
+    /// `loginRunning` while another add for `p` waits on its login. A failure
+    /// removes the throwaway home, except where the login may still run, the
+    /// live item could not be put back, or the import failed: the home is the
+    /// evidence the next start restores by, and the login's source goes only
+    /// once the import has committed. A Claude add first undoes the one a
+    /// failed stop or restore left, as `init` does, so the record of the live
+    /// item is settled before a new one replaces it.
+    public func add(_ p: Provider, expected: SlotName?) async throws -> AddResult {
         guard running.insert(p).inserted else { throw KibaError.loginRunning(p) }
         defer { running.remove(p) }
         guard let cli = Subprocess.find(Self.command(p), path: searchPath) else { throw KibaError.noCLI(Self.command(p)) }
@@ -62,14 +63,14 @@ public actor LoginRunner {
         defer { ops.leave(held) }
         if p == .claude { try recover() }
         let root = paths.loginRoot(p)
-        let old = try Self.removing(root) { try prepare(p, cli: cli, email: email, root: root) }
+        let old = try Self.removing(root) { try prepare(p, cli: cli, email: expected?.email, root: root) }
         let ended = try await run(root)
         let found = try settle(old, ended, root: root)
         let saved = try switcher.importInTurn(p, root: root, claudeCreds: found.creds)
         try found.item?.remove()
         try PrivateFS.removeTree(root)
         try await switcher.probeInTurn(p, saved, live: false)
-        return AddResult(saved: saved, expected: email, differs: email.map { saved.email != $0 } ?? false)
+        return AddResult(saved: saved, expected: expected, differs: expected.map { saved != $0 } ?? false)
     }
 
     /// Makes the throwaway home afresh with this run's nonce and the login
