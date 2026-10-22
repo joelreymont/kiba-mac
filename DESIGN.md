@@ -838,7 +838,7 @@ public enum Rows {
   static func isLong(_ label: String) -> Bool        // contains week|7-day|month|30-day (case-insensitive)
   static func session(_ u: UsageRecord?) -> Limit?   // first !isLong with percent ≥ 0
   static func weekly(_ u: UsageRecord?) -> Limit?    // first isLong with percent ≥ 0
-  static func blocking(_ u: UsageRecord?) -> Limit?  // among percent ≥ 100: latest parseable reset, else the first
+  static func blocking(_ u: UsageRecord?) -> Limit?  // among session and weekly at percent ≥ 100: latest parseable reset, else the first
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
   static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, missing, or expired && !active
   static func relogin(_ u: UsageRecord?, active: Bool) -> Bool // dead, or throttled && !active: a click logs in again
@@ -863,9 +863,11 @@ public struct Figure: Equatable { public var label: String; public var left: Int
 ```
 
 State: dead → `.dead`; record `unsubscribed` or `free` → `.unsubscribed`; no usage or
-no limits → `.unknown`; any percent ≥ 100
-→ `.blocked`; headline left < 50 → `.tight`; any long window other than the
-weekly with left < 50 → `.tight`; else `.ok`. A saved Claude row whose
+no limits → `.unknown`; session or weekly at percent ≥ 100
+→ `.blocked`; headline left < 50 → `.tight`; any window other than the session
+and weekly (a model's, such as Fable) with left < 50 → `.tight`; else `.ok`. A model window bars
+only that model, so a used-up one leaves the row usable, ranked after rows
+with room everywhere. A saved Claude row whose
 record is `expired` (Anthropic turned the login away) reads "(free?)", not
 "(<plan>, log in again)": a guess that the plan lapsed, which no answer
 proves. A `missing` login drew no answer, so it reads "(<plan>, log in

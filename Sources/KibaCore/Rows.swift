@@ -4,9 +4,10 @@ import Foundation
 public enum RowState: Sendable {
     /// At least half of every deciding window is left.
     case ok
-    /// Under half of the session (or of a long model window) is left.
+    /// Under half of the session, or of a model window, is left; a model
+    /// window may be used up.
     case tight
-    /// A window is used up.
+    /// The session or the weekly window is used up.
     case blocked
     /// The saved login no longer works.
     case dead
@@ -45,13 +46,13 @@ public enum Rows {
         return u.limits[i]
     }
 
-    /// The used-up window that reopens last; the first used-up one when no
-    /// later reset parses.
+    /// The used-up deciding window that reopens last; the first used-up one
+    /// when no later reset parses.
     public static func blocking(_ u: UsageRecord?) -> Limit? {
         guard let u else { return nil }
         var worst: Limit?
         var worstAt: Date?
-        for l in u.limits where l.percent >= Level.full {
+        for l in deciding(u).map({ u.limits[$0] }) where l.percent >= Level.full {
             let at = parseISO(l.resetsAt)
             guard worst != nil else {
                 (worst, worstAt) = (l, at)
@@ -93,14 +94,21 @@ public enum Rows {
         if dead(u, active: active) { return .dead }
         if u?.state == .unsubscribed || u?.state == .free { return .unsubscribed }
         guard let u, !u.limits.isEmpty else { return .unknown }
-        if u.limits.contains(where: { $0.percent >= Level.full }) { return .blocked }
+        if blocking(u) != nil { return .blocked }
         if let h = headline(u), Level.full - h.percent < Level.half { return .tight }
-        let week = first(u, long: true)
+        let decide = deciding(u)
         for (i, l) in u.limits.enumerated()
-        where i != week && isLong(l.label) && Level.full - l.percent < Level.half {
+        where !decide.contains(i) && Level.full - l.percent < Level.half {
             return .tight
         }
         return .ok
+    }
+
+    /// The session and the weekly window: only they decide whether the
+    /// account can take work. A model window (Fable, Opus) bars only that
+    /// model, so a used-up one leaves the account usable, running low.
+    private static func deciding(_ u: UsageRecord) -> [Int] {
+        [first(u, long: false), first(u, long: true)].compactMap { $0 }
     }
 
     /// Room first, then running low, then used up, dead or without a plan,

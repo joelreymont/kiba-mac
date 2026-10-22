@@ -700,9 +700,12 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 // MARK: - Rows
 
+/// Only the session and weekly windows decide: e's used-up model window
+/// leaves it usable, running low, after the rows with room everywhere, its
+/// figures shown and no reset in its plan text.
 @Test func rowsSortRoomTightUsedUpThenDead() async throws {
     try await scratch { w in
-        for name in ["b@x", "c@x", "d@x"] {
+        for name in ["b@x", "c@x", "d@x", "e@x"] {
             try w.seed(.claude, try slot(name), Identity(email: name, plan: "pro", org: "org-\(name)"),
                        login: claudeCreds(name, plan: "pro", expires: Fixed.now + Fixed.day),
                        profile: profile(name, org: "org-\(name)"))
@@ -711,6 +714,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             answer(Status.ok, claudeUsage(session: 100, week: 60)),
             answer(Status.ok, claudeUsage(session: 70, week: 30)),
             answer(Status.ok, claudeUsage(session: 10, week: 20, opus: 40)),
+            answer(Status.ok, claudeUsage(session: 10, week: 20, opus: 100)),
         ])
         let report = await w.switcher(http).probeAll(.claude)
         #expect(report.providerError == nil)
@@ -720,13 +724,15 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
         let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
         let accounts = try #require(claude).accounts
-        try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x"])
-        #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok])
-        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false])
+        try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x", "e@x"])
+        #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok, .tight])
+        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false, false])
         #expect(Rows.figures(.claude, accounts[1].usage) == [
             Figure(label: "Session (5-hour)", left: 0), Figure(label: "Weekly (7-day)", left: 40),
         ])
-        #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "c@x", "b@x", "a@x"])
+        #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "c@x", "e@x", "b@x", "a@x"])
+        #expect(Rows.figuresText(.claude, accounts[4].usage) == "90% · 80% · 0%")
+        #expect(Rows.planText(.claude, accounts[4], now: Date(timeIntervalSince1970: TimeInterval(Fixed.now))) == "(pro)")
         #expect(Rows.figures(.claude, accounts[3].usage) == [
             Figure(label: "Session (5-hour)", left: 90), Figure(label: "Weekly (7-day)", left: 80),
             Figure(label: "Opus Weekly", left: 60),
