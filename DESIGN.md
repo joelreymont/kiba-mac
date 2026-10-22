@@ -844,9 +844,9 @@ public enum Rows {
   static func relogin(_ u: UsageRecord?, active: Bool) -> Bool // dead, or throttled && !active: a click logs in again
   static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool // claude && expired && !active
   static func state(_ u: UsageRecord?, active: Bool) -> RowState
-  static func rank(_ s: RowState) -> Int             // ok 0, tight 1, blocked/dead/unsubscribed 2, unknown 3
+  static func rank(_ u: UsageRecord?, active: Bool) -> Int // ok 0, tight 1, tight with a model window used up 2, blocked by the session 3, by the weekly 4, dead/unsubscribed 5, unknown 6
   static func drained(_ s: RowState) -> Bool         // dead or unsubscribed: every bar segment an empty track
-  static func sorted(_ a: [Account]) -> [Account]    // rank; rank 2 by blocking reset (unparseable last); else input order
+  static func sorted(_ a: [Account]) -> [Account]    // rank; ranks 3 and 4 by blocking reset (unparseable last); else input order
   static func figures(_ p: Provider, _ u: UsageRecord?) -> [Figure] // session, weekly, then other percent ≥ 0 in order; each (label, left = 100 - percent); Claude's session left 0 while its weekly is at 100
   static func figuresText(_ p: Provider, _ u: UsageRecord?) -> String   // "limit" when blocked, else "72% · 40% · 9%"
   static func plan(_ a: Account) -> String           // the saved plan; "no plan" while unsubscribed, "free" when free

@@ -700,9 +700,10 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 // MARK: - Rows
 
-/// Only the session and weekly windows decide: e's used-up model window
-/// leaves it usable, running low, after the rows with room everywhere, its
-/// figures shown and no reset in its plan text.
+/// Only the session and weekly windows decide: c's used-up model window
+/// leaves it usable, after the rows with Fable left, its figures shown and
+/// no reset in its plan text. Then the session used up (b), the week (f)
+/// though it reopens sooner, the dead login (a).
 @Test func rowsSortRoomTightUsedUpThenDead() async throws {
     try await scratch { w in
         for name in ["b@x", "c@x", "d@x", "e@x"] {
@@ -712,27 +713,31 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         }
         let http = StubHTTP([
             answer(Status.ok, claudeUsage(session: 100, week: 60)),
-            answer(Status.ok, claudeUsage(session: 70, week: 30)),
-            answer(Status.ok, claudeUsage(session: 10, week: 20, opus: 40)),
             answer(Status.ok, claudeUsage(session: 10, week: 20, opus: 100)),
+            answer(Status.ok, claudeUsage(session: 10, week: 20, opus: 40)),
+            answer(Status.ok, claudeUsage(session: 70, week: 30)),
         ])
         let report = await w.switcher(http).probeAll(.claude)
         #expect(report.providerError == nil)
         try w.seed(.claude, try slot("a@x"), Identity(email: "a@x", plan: "pro", org: "org-a"),
                    login: claudeCreds("a", plan: "pro", expires: Fixed.now + Fixed.day), profile: profile("a@x", org: "org-a"),
                    usage: UsageRecord(fetchedAt: Fixed.now, state: .revoked, note: "login revoked", limits: []))
+        try w.seed(.claude, try slot("f@x"), Identity(email: "f@x", plan: "pro", org: "org-f"),
+                   login: claudeCreds("f", plan: "pro", expires: Fixed.now + Fixed.day), profile: profile("f@x", org: "org-f"),
+                   usage: probed([Limit(label: "Session (5-hour)", percent: 30, resetsAt: Fixed.sessionReset),
+                                  Limit(label: "Weekly (7-day)", percent: 100, resetsAt: Fixed.soonReset)]))
 
         let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
         let accounts = try #require(claude).accounts
-        try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x", "e@x"])
-        #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok, .tight])
-        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false, false])
+        try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x", "e@x", "f@x"])
+        #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok, .tight, .blocked])
+        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false, false, false])
         #expect(Rows.figures(.claude, accounts[1].usage) == [
             Figure(label: "Session (5-hour)", left: 0), Figure(label: "Weekly (7-day)", left: 40),
         ])
-        #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "c@x", "e@x", "b@x", "a@x"])
-        #expect(Rows.figuresText(.claude, accounts[4].usage) == "90% · 80% · 0%")
-        #expect(Rows.planText(.claude, accounts[4], now: Date(timeIntervalSince1970: TimeInterval(Fixed.now))) == "(pro)")
+        #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "e@x", "c@x", "b@x", "f@x", "a@x"])
+        #expect(Rows.figuresText(.claude, accounts[2].usage) == "90% · 80% · 0%")
+        #expect(Rows.planText(.claude, accounts[2], now: Date(timeIntervalSince1970: TimeInterval(Fixed.now))) == "(pro)")
         #expect(Rows.figures(.claude, accounts[3].usage) == [
             Figure(label: "Session (5-hour)", left: 90), Figure(label: "Weekly (7-day)", left: 80),
             Figure(label: "Opus Weekly", left: 60),
@@ -804,7 +809,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     #expect(a.usage == UsageRecord(fetchedAt: Fixed.now, state: .unsubscribed, note: ProbeCase.noPlan, limits: []))
     #expect(Rows.state(a.usage, active: true) == .unsubscribed)
     #expect(Rows.usable(.unsubscribed) == false)
-    #expect(Rows.rank(.unsubscribed) == Rows.rank(.dead))
+    #expect(Rows.rank(a.usage, active: true) == Rows.rank(UsageRecord(fetchedAt: Fixed.now, state: .revoked, note: "", limits: []), active: false))
     #expect(Rows.planText(.claude, a, now: now) == "(no plan)")
     #expect(Rows.figuresText(.claude, a.usage) == "")
     #expect(Rows.tooltip(.claude, a, now: now) == ["a@x · no plan · current", ProbeCase.noPlan, "Probed just now"])
@@ -1800,6 +1805,8 @@ enum Fixed {
     /// `Fixed.now + hour` and `Fixed.now + 4 days` in ISO 8601.
     static let sessionReset = "2026-09-21T15:13:20Z"
     static let weekReset = "2026-09-25T14:13:20Z"
+    /// `Fixed.now + 30 minutes`: a window that reopens before `sessionReset`.
+    static let soonReset = "2026-09-21T14:43:20Z"
     static let weekResetDays = 4
     /// The Anthropic organization of the Claude login that redeems a reset.
     static let org = "5f1c2a9e-8d3b-4c7a-9e21-0b6d4f3a7c58"

@@ -111,23 +111,32 @@ public enum Rows {
         [first(u, long: false), first(u, long: true)].compactMap { $0 }
     }
 
-    /// Room first, then running low, then used up, dead or without a plan,
-    /// then unknown.
-    public static func rank(_ s: RowState) -> Int {
-        switch s {
+    /// A model window, one that does not decide, is used up.
+    private static func modelOut(_ u: UsageRecord?) -> Bool {
+        guard let u else { return false }
+        let decide = deciding(u)
+        return u.limits.indices.contains { !decide.contains($0) && u.limits[$0].percent >= Level.full }
+    }
+
+    /// Room first, then running low, then a model window (Fable) used up,
+    /// then the session used up, then the week, then dead or without a
+    /// plan, then unknown.
+    public static func rank(_ u: UsageRecord?, active: Bool) -> Int {
+        switch state(u, active: active) {
         case .ok: return Rank.ok
-        case .tight: return Rank.tight
-        case .blocked, .dead, .unsubscribed: return Rank.out
+        case .tight: return modelOut(u) ? Rank.model : Rank.tight
+        case .blocked: return weekly(u).map { $0.percent >= Level.full } == true ? Rank.week : Rank.session
+        case .dead, .unsubscribed: return Rank.out
         case .unknown: return Rank.unknown
         }
     }
 
-    /// By rank; used-up and dead rows by when they reopen, soonest first and
-    /// the ones with no parseable reset last; otherwise the input order.
+    /// By rank; limited rows by when they reopen, soonest first and the ones
+    /// with no parseable reset last; otherwise the input order.
     public static func sorted(_ a: [Account]) -> [Account] {
         let keyed = a.enumerated().map { (i, acc) -> (rank: Int, at: Double, idx: Int) in
-            let r = rank(state(acc.usage, active: acc.active))
-            guard r == Rank.out, let b = blocking(acc.usage), let at = parseISO(b.resetsAt) else {
+            let r = rank(acc.usage, active: acc.active)
+            guard r == Rank.session || r == Rank.week, let b = blocking(acc.usage), let at = parseISO(b.resetsAt) else {
                 return (r, .infinity, i)
             }
             return (r, at.timeIntervalSince1970, i)
@@ -324,8 +333,11 @@ public enum Rows {
     private enum Rank {
         static let ok = 0
         static let tight = 1
-        static let out = 2
-        static let unknown = 3
+        static let model = 2
+        static let session = 3
+        static let week = 4
+        static let out = 5
+        static let unknown = 6
     }
 
     private enum Mark {
