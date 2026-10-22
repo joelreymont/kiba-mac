@@ -955,6 +955,36 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+/// A model's own window never stands in for a missing account-wide one: with
+/// no weekly reading a used-up Fable Weekly (a) leaves the row usable, and
+/// with no session reading a used-up Fable Session (b) does too.
+@Test func rowsKeepModelWindowsFromDeciding() async throws {
+    try await scratch { w in
+        for name in ["a@x", "b@x"] {
+            try w.seed(.claude, try slot(name), Identity(email: name, plan: "max", org: "org-\(name)"),
+                       login: claudeCreds(name, plan: "max", expires: Fixed.now + Fixed.day),
+                       profile: profile(name, org: "org-\(name)"))
+        }
+        let fable = #""limits":[{"kind":"%@","percent":100,"resets_at":"\#(Fixed.weekReset)","scope":{"model":{"display_name":"Fable"}}}]"#
+        let http = StubHTTP([
+            answer(Status.ok, #"{"five_hour":{"utilization":20,"resets_at":"\#(Fixed.sessionReset)"},"#
+                + String(format: fable, "weekly") + "}"),
+            answer(Status.ok, #"{"seven_day":{"utilization":30,"resets_at":"\#(Fixed.weekReset)"},"#
+                + String(format: fable, "session") + "}"),
+        ])
+        #expect(await w.switcher(http).probeAll(.claude).providerError == nil)
+
+        let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
+        let accounts = try #require(claude).accounts
+        try #require(accounts.map(\.name.raw) == ["a@x", "b@x"])
+        #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.tight, .tight])
+        #expect(accounts.map { Rows.figuresText(.claude, $0.usage) } == ["80% · 0%", "70% · 0%"])
+        #expect(Rows.figures(.claude, accounts[1].usage) == [
+            Figure(label: "Weekly (7-day)", left: 70), Figure(label: "Fable Session", left: 0),
+        ])
+    }
+}
+
 /// A lapsed subscription: Anthropic answers the usage check with a 403 that
 /// bars the organization from OAuth. The row reads "no plan" in place of the
 /// plan the token document still claims, cannot take work, and the probe

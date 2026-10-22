@@ -1018,9 +1018,8 @@ transaction.
 ```swift
 public enum RowState: Sendable { case ok, tight, blocked, dead, unsubscribed, unknown }
 public enum Rows {
-  static func isLong(_ label: String) -> Bool        // contains week|7-day|month|30-day (case-insensitive)
-  static func session(_ u: UsageRecord?) -> Limit?   // first !isLong with percent ≥ 0
-  static func weekly(_ u: UsageRecord?) -> Limit?    // first isLong with percent ≥ 0
+  static func session(_ u: UsageRecord?) -> Limit?   // the "Session (5-hour)" window with percent ≥ 0; never a model's
+  static func weekly(_ u: UsageRecord?) -> Limit?    // the "Weekly (7-day)" window with percent ≥ 0; never a model's
   static func blocking(_ u: UsageRecord?) -> Limit?  // among session and weekly at percent ≥ 100: latest parseable reset, else the first
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
   static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, missing, or expired && !active

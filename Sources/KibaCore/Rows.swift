@@ -31,18 +31,13 @@ public struct Figure: Equatable, Sendable {
 /// Row logic of the panel (port of kiba `Panel.qml`): pure functions of
 /// usage records and the clock.
 public enum Rows {
-    /// A weekly or monthly window; anything else is a session.
-    public static func isLong(_ label: String) -> Bool {
-        Mark.long.contains { label.range(of: $0, options: .caseInsensitive) != nil }
-    }
-
     public static func session(_ u: UsageRecord?) -> Limit? {
-        guard let u, let i = first(u, long: false) else { return nil }
+        guard let u, let i = window(u, WindowLabel.session) else { return nil }
         return u.limits[i]
     }
 
     public static func weekly(_ u: UsageRecord?) -> Limit? {
-        guard let u, let i = first(u, long: true) else { return nil }
+        guard let u, let i = window(u, WindowLabel.weekly) else { return nil }
         return u.limits[i]
     }
 
@@ -108,7 +103,7 @@ public enum Rows {
     /// account can take work. A model window (Fable, Opus) bars only that
     /// model, so a used-up one leaves the account usable, running low.
     private static func deciding(_ u: UsageRecord) -> [Int] {
-        [first(u, long: false), first(u, long: true)].compactMap { $0 }
+        [window(u, WindowLabel.session), window(u, WindowLabel.weekly)].compactMap { $0 }
     }
 
     /// A model window, one that does not decide, is used up.
@@ -149,7 +144,7 @@ public enum Rows {
     /// weekly window leaves the session nothing: it reads 0 left.
     public static func figures(_ p: Provider, _ u: UsageRecord?) -> [Figure] {
         guard let u else { return [] }
-        let s = first(u, long: false), w = first(u, long: true)
+        let s = window(u, WindowLabel.session), w = window(u, WindowLabel.weekly)
         let weekOut = p == .claude && w.map { u.limits[$0].percent >= Level.full } == true
         var out: [Figure] = []
         if let s { out.append(weekOut ? Figure(label: u.limits[s].label, left: 0) : figure(u.limits[s])) }
@@ -308,8 +303,10 @@ public enum Rows {
         return Date(timeIntervalSince1970: Double(epoch) + frac)
     }
 
-    private static func first(_ u: UsageRecord, long: Bool) -> Int? {
-        u.limits.firstIndex { isLong($0.label) == long && $0.percent >= 0 }
+    /// The account-wide window under `label`, as both probes name it, when
+    /// it has a reading; a model's own window never stands in for it.
+    private static func window(_ u: UsageRecord, _ label: String) -> Int? {
+        u.limits.firstIndex { $0.label == label && $0.percent >= 0 }
     }
 
     private static func figure(_ l: Limit) -> Figure {
@@ -338,10 +335,6 @@ public enum Rows {
         static let week = 4
         static let out = 5
         static let unknown = 6
-    }
-
-    private enum Mark {
-        static let long = ["week", "7-day", "month", "30-day"]
     }
 
     private enum Copy {
