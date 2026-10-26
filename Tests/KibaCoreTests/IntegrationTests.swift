@@ -66,6 +66,33 @@ import os
             ], error: nil),
         ]
         #expect(StatusReader(paths: w.paths, store: w.store).read().providers == want)
+
+        // Each switch commits before its probes, all at the frozen time, so
+        // the shared order alone puts the destination's entry first. A switch
+        // names its destination as its row stood when installed.
+        let events = try w.history()
+        #expect(events.map { "\($0.provider) \($0.kind) \($0.name)" } == [
+            "claude switch b@x", "claude usage b@x", "claude usage a@x",
+            "codex switch b@y", "codex usage b@y", "codex usage a@y",
+        ])
+        #expect(events.map(\.usage?.live) == [nil, true, false, nil, true, false])
+        #expect(Set(events.map(\.atUs)) == [Fixed.now * Fixed.usPerSecond])
+        #expect(events.filter { $0.kind == Event.switchKind }.map { [$0.email, $0.org, $0.plan] }
+            == [["b@x", "org-b", "pro"], ["b@y", "acct-b", "pro"]])
+
+        // Reinstalling the live account once its token has expired is a
+        // switch of its own, and its one probe, as live, never refreshes it.
+        let again = StubHTTP([])
+        try await Switcher(paths: w.paths, store: w.store, http: again, clock: {
+            Date(timeIntervalSince1970: TimeInterval(Fixed.now + Fixed.later))
+        }, turnWait: nil).use(.claude, bx)
+        #expect(again.requests.isEmpty)
+        #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsB)
+        let reinstall = try w.history().dropFirst(events.count)
+        #expect(reinstall.map { "\($0.kind) \($0.name)" } == ["switch b@x", "usage b@x"])
+        #expect(reinstall.map(\.usage?.live) == [nil, true])
+        #expect(reinstall.map(\.atUs) == Array(repeating: (Fixed.now + Fixed.later) * Fixed.usPerSecond, count: 2))
+        #expect(try w.store.installedAt(.claude) == Fixed.now + Fixed.later)
     }
 }
 
@@ -129,6 +156,7 @@ import os
         #expect(w.read(config) == claudeConfig(profA))
         #expect(w.read(creds) == credsA)
         #expect(try w.store.installed(.claude) == ax)
+        #expect(try w.history().isEmpty)
 
         // Claude Code refreshes a@x's tokens; saving files them under a@x.
         let refreshed = claudeCreds("xa3", plan: "max", expires: Fixed.now + Fixed.day)
@@ -191,6 +219,7 @@ import os
         #expect(w.read(config) == claudeConfig(profB))
         #expect(throws: KibaError.mixed) { try sw.save(.claude) }
         #expect(try w.store.fetch(.claude, bx)?.login == credsB)
+        #expect(try w.history().isEmpty)
     }
 }
 
@@ -213,6 +242,10 @@ import os
         #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsC)
         #expect(try w.store.pending(.claude) == nil)
         #expect(try sw.save(.claude) == cx)
+        // The repair is a completed switch, probed only once it is done.
+        let events = try w.history()
+        #expect(events.map { "\($0.kind) \($0.name)" } == ["switch c@x", "usage c@x"])
+        #expect(events.map(\.usage?.live) == [nil, true])
     }
 }
 
@@ -234,6 +267,30 @@ import os
 
         await #expect(throws: KibaError.io("open \(dir.path): Permission denied")) { try await sw.use(.claude, bx) }
         #expect(throws: KibaError.mixed) { try sw.save(.claude) }
+        #expect(try w.history().isEmpty)
+    }
+}
+
+/// A switch commits before the probes that follow it: a usage event the
+/// store refuses fails the switch's caller, but the installed login and its
+/// switch event stay.
+@Test func switchOutlivesAnUnrecordedProbe() async throws {
+    try await scratch { w in
+        let (ay, by) = (try slot("a@y"), try slot("b@y"))
+        let authA = codexAuth("a@y", plan: "plus", account: "acct-a", tag: "ya")
+        let authB = codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb")
+        try w.writeCodex(authA)
+        try w.seed(.codex, ay, Identity(email: "a@y", plan: "plus", org: "acct-a"), login: authA, profile: nil)
+        try w.seed(.codex, by, Identity(email: "b@y", plan: "pro", org: "acct-b"), login: authB, profile: nil)
+        try w.storeSQL(Fixed.unloggedUsage)
+        let http = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45))])
+
+        await #expect(throws: KibaError.db("append usage: \(Fixed.unlogged)")) { try await w.switcher(http).use(.codex, by) }
+        #expect(w.read(w.paths.codexAuthFile(root: nil)) == authB)
+        #expect(try w.store.installed(.codex) == by)
+        #expect(try w.store.installedAt(.codex) == Fixed.now)
+        #expect(try w.store.fetch(.codex, by)?.usage == nil)
+        #expect(try w.history().map { "\($0.kind) \($0.name)" } == ["switch b@y"])
     }
 }
 
@@ -261,7 +318,7 @@ import os
         #expect(try sw.save(.claude) == bx)
         #expect(try store.list(.claude).map(\.login) == [credsA, credsB])
         #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsB)
-        #expect(try w.history().map(\.name) == ["b@x"])
+        #expect(try w.history().map { "\($0.kind) \($0.name)" } == ["switch b@x", "usage b@x"])
     }
 }
 
@@ -303,7 +360,7 @@ import os
         _ = try Store(paths: w.paths)
         let events = try w.history()
         #expect(events.map(\.name) == ["s@y"])
-        #expect(events.map(\.usage.live) == [true])
+        #expect(events.map(\.usage?.live) == [true])
         #expect(events.map(\.atUs) == [Fixed.now * Fixed.usPerSecond])
         #expect(reader.read().providers.first { $0.provider == .codex }?.accounts.map(\.usage)
             == [probed(windows(session: 20, week: 45))])
@@ -429,9 +486,9 @@ import os
         #expect(events.map(\.org) == ["org-a", "org-b", "org-c"])
         #expect(events.map(\.plan) == ["max", "pro", "pro"])
         #expect(events.map(\.atUs) == Array(repeating: Fixed.now * Fixed.usPerSecond, count: 3))
-        #expect(events.map(\.usage.live) == [true, false, false])
-        #expect(events.map(\.usage.state) == [.expired, .ok, .expired])
-        #expect(events.map(\.usage.limits.isEmpty) == [true, false, true])
+        #expect(events.map(\.usage?.live) == [true, false, false])
+        #expect(events.map(\.usage?.state) == [.expired, .ok, .expired])
+        #expect(events.map(\.usage?.limits.isEmpty) == [true, false, true])
         #expect(events.dropFirst().first?.details == #"{"fetchedAt":\#(Fixed.now),"limits":["#
             + #"{"label":"Session (5-hour)","left":70,"percent":30,"resetsAt":"\#(Fixed.sessionReset)"},"#
             + #"{"label":"Weekly (7-day)","left":40,"percent":60,"resetsAt":"\#(Fixed.weekReset)"}],"#
@@ -652,8 +709,8 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         ])
         // History keeps each window's own figure: the session is not spent with its week.
         let events = try w.history()
-        #expect(events.map(\.usage.resets) == status?.accounts.map(\.usage?.resets))
-        #expect(events.last?.usage.limits == [
+        #expect(events.map(\.usage?.resets) == status?.accounts.map(\.usage?.resets))
+        #expect(events.last?.usage?.limits == [
             Window(label: "Session (5-hour)", percent: 30, left: 70, resetsAt: Fixed.sessionReset),
             Window(label: "Weekly (7-day)", percent: 100, left: 0, resetsAt: Fixed.weekReset),
             Window(label: "Opus Weekly", percent: 40, left: 60, resetsAt: Fixed.weekReset),
@@ -684,7 +741,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(events[0].atUs == events[1].atUs)
         #expect(events[0].details == events[1].details)
         #expect(events.map(\.plan) == ["pro", "pro"])
-        #expect(events[0].usage.resets == ResetOffer(count: 3, program: "", grant: ""))
+        #expect(events[0].usage?.resets == ResetOffer(count: 3, program: "", grant: ""))
     }
 }
 
@@ -716,7 +773,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(status?.accounts.first?.usage == UsageRecord(
             fetchedAt: Fixed.now, state: .ok, note: "", limits: windows(session: 0, week: 40),
             resets: ResetOffer(count: 2, program: "", grant: "")))
-        #expect(try w.history().map(\.usage.resets?.count) == [3, 2])
+        #expect(try w.history().map(\.usage?.resets?.count) == [3, 2])
     }
 }
 
@@ -751,7 +808,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let row = try w.store.fetch(.claude, name)
         #expect(row?.login == claudeCreds("b2", plan: "max", expires: Fixed.now + Fixed.tokenLife))
         #expect(row?.usage == probed(windows(session: 30, week: 60), resets: offer))
-        #expect(try w.history().map(\.usage.live) == [false])
+        #expect(try w.history().map(\.usage?.live) == [false])
     }
 }
 
@@ -1567,7 +1624,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(events.map(\.name) == ["s@z", "s@z #2", "s@z", "s@z #2"])
         #expect(events.map(\.org) == ["org-1", "org-2", "org-1", "org-3"])
         #expect(events.map(\.plan) == ["plus", "team", "plus", "pro"])
-        #expect(events.map(\.usage.live) == [false, true, false, true])
+        #expect(events.map(\.usage?.live) == [false, true, false, true])
 
         // Claude Code swapped the account but the tokens are still m@x's.
         let m = try slot("m@x")
@@ -1682,7 +1739,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         _ = await w.switcher(http).probeAll(.claude)
 
         #expect(try w.store.fetch(.claude, slot("a@x"))?.usage == probed(windows(session: 0, week: 1)))
-        let limits = try w.history().map(\.usage.limits)
+        let limits = try w.history().compactMap(\.usage?.limits)
         #expect(limits.map { $0.map(\.percent) } == [[0, 1]])
         #expect(limits.map { $0.map(\.left) } == [[100, 99]])
     }
@@ -1860,6 +1917,33 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     }
 }
 
+/// `kiba use` and `kiba usage` record through the core: a switch, then
+/// each probe's outcome; `kiba status --json` records nothing. The logins'
+/// tokens are blank, so every probe ends before a request.
+@Test func cliRecordsSwitchesAndProbes() async throws {
+    try await scratch { w in
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        try w.writeClaude(config: claudeConfig(profA), creds: ProbeCase.blank)
+        try w.seed(.claude, try slot("b@x"), Identity(email: "b@x", plan: "pro", org: "org-b"),
+                   login: ProbeCase.blank, profile: profB)
+        func events() throws -> [String] {
+            try w.history().map { "\($0.kind) \($0.name) \($0.usage.map { "\($0.state) live=\($0.live)" } ?? "")" }
+        }
+
+        #expect(try w.kiba("status", "--json").status == EXIT_SUCCESS)
+        #expect(try w.history().isEmpty)
+
+        #expect(try w.kiba("use", "claude", "b@x").status == EXIT_SUCCESS)
+        #expect(w.read(w.paths.claudeConfigFile(root: nil)) == claudeConfig(profB))
+        let switched = ["switch b@x ", "usage b@x missing live=true", "usage a@x missing live=false"]
+        #expect(try events() == switched)
+
+        #expect(try w.kiba("usage", "claude").status == EXIT_SUCCESS)
+        #expect(try w.kiba("status", "--json").status == EXIT_SUCCESS)
+        #expect(try events() == switched + ["usage a@x missing live=false", "usage b@x missing live=true"])
+    }
+}
+
 // MARK: - World
 
 enum Fixed {
@@ -1936,6 +2020,9 @@ enum Fixed {
     static let unlogged = "history is frozen"
     static let unloggedB =
         "CREATE TRIGGER unlogged BEFORE INSERT ON history WHEN NEW.name = 'b@y' BEGIN SELECT RAISE(ABORT, '\(unlogged)'); END;"
+    /// Refuses every usage event the same way, and no switch.
+    static let unloggedUsage =
+        "CREATE TRIGGER unlogged BEFORE INSERT ON history WHEN NEW.kind = 'usage' BEGIN SELECT RAISE(ABORT, '\(unlogged)'); END;"
     /// A history event's `at_us` per second of the frozen clock.
     static let usPerSecond = 1_000_000
     /// A store version newer than this build knows.
@@ -2410,7 +2497,8 @@ func probed(_ limits: [Limit], resets: ResetOffer? = nil) -> UsageRecord {
     UsageRecord(fetchedAt: Fixed.now, state: .ok, note: "", limits: limits, resets: resets)
 }
 
-/// One history row, its `details` decoded as the report decodes a usage event.
+/// One history row, its `details` decoded as the report decodes them: a
+/// usage event's reading, a switch's empty object; any other kind is an error.
 struct Event {
     let id: Int
     let provider: String
@@ -2422,7 +2510,8 @@ struct Event {
     let plan: String
     /// The `details` JSON as stored.
     let details: String
-    let usage: Reading
+    /// Nil for a switch.
+    let usage: Reading?
 
     init(_ row: [String?]) throws {
         let cols = row.compactMap { $0 }
@@ -2431,10 +2520,17 @@ struct Event {
         }
         (self.id, provider, kind, self.atUs, name, email, org, plan, details) =
             (id, cols[1], cols[2], atUs, cols[4], cols[5], cols[6], cols[7], cols[8])
-        usage = try JSONDecoder().decode(Reading.self, from: Data(details.utf8))
+        switch kind {
+        case Self.usageKind: usage = try JSONDecoder().decode(Reading.self, from: Data(details.utf8))
+        case Self.switchKind where details == Self.noDetails: usage = nil
+        default: throw KibaError.db("history event: \(kind) \(details)")
+        }
     }
 
     static let columns = 9
+    static let usageKind = "usage"
+    static let switchKind = "switch"
+    static let noDetails = "{}"
 }
 
 /// A usage event's `details`.
@@ -2474,11 +2570,21 @@ func members(_ body: Data?) throws -> [String: String] {
 @MainActor @Test func appModelListsRowsAndSwitches() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
-    let (backend, ay, by) = try codexPair(w)
+    let (backend, ay, by) = try codexPair(w, [
+        answer(Status.ok, codexUsage(session: 20, week: 45)), answer(Status.ok, codexUsage(session: 15, week: 25)),
+        answer(Status.ok, codexUsage(session: 15, week: 25)), answer(Status.ok, codexUsage(session: 20, week: 45)),
+        answer(Status.ok, codexUsage(session: 15, week: 25)), answer(Status.ok, codexUsage(session: 20, week: 45)),
+    ])
     let model = AppModel(connect: { backend })
+    func events() throws -> [String] {
+        try w.history().map { "\($0.kind) \($0.name)" }
+    }
 
     model.start()
     try await settle(model)
+    model.refresh(force: true)
+    try await settle(model)
+    #expect(try w.history().isEmpty)
     #expect(model.availability == .ready)
     let before = model.sections.first { $0.id == .codex }
     #expect(before?.accounts.map(\.name) == [ay, by])
@@ -2496,6 +2602,19 @@ func members(_ body: Data?) throws -> [String: String] {
         Account(name: ay, plan: "plus", active: false, usage: probed(windows(session: 15, week: 25))),
         Account(name: by, plan: "pro", active: true, usage: probed(windows(session: 20, week: 45))),
     ])
+    let switched = ["switch b@y", "usage b@y", "usage a@y"]
+    #expect(try events() == switched)
+
+    // The probe opening the panel starts and a requested one each record
+    // every account; the status reads around them record nothing.
+    model.opened()
+    try await settle(model)
+    model.closed()
+    model.probeUsage()
+    try await settle(model)
+    model.refresh(force: true)
+    try await settle(model)
+    #expect(try events() == switched + ["usage a@y", "usage b@y", "usage a@y", "usage b@y"])
 }
 
 /// Clicking the account a switch left would do nothing while the rows still

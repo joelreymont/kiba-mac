@@ -42,10 +42,12 @@ public final class Switcher: Sendable {
     /// as installed, since the live files hold its login: a crash inside the
     /// install then leaves a pending install whose installed name still owns
     /// the live tokens, which `probeAll` never refreshes. That note keeps the
-    /// time of the last install; installing `n` notes the clock's. Then
-    /// probes `n` as the live login and records its usage. A live login that
-    /// cannot be read or saved stops the switch before anything is written,
-    /// so no login is overwritten unsaved. The login saved back is then
+    /// time of the last install; installing `n` appends its switch event and
+    /// notes the clock's time, committed before any probe, so a later probe
+    /// failure leaves the switch recorded. Then probes `n` as the live login
+    /// and records its usage. A live login that cannot be read or saved
+    /// stops the switch before anything is written, so no login is
+    /// overwritten unsaved. The login saved back is then
     /// probed as saved: its usage came from a live probe, which never
     /// refreshes, so an expired token would leave it looking dead.
     public func use(_ p: Provider, _ n: SlotName) async throws {
@@ -58,7 +60,7 @@ public final class Switcher: Sendable {
             old = nil
         }
         if let old { try store.write { try $0.noteInstalled(p, old, at: nil) } }
-        try live(p).install(n, at: epochSeconds(clock()))
+        try live(p).install(n, clock: clock)
         try await probeInTurn(p, n, live: true)
         if let old, old != n { try await probeInTurn(p, old, live: false) }
     }
@@ -286,8 +288,9 @@ public final class Switcher: Sendable {
 protocol LiveFiles {
     func identity() throws -> Identity?
     func login() throws -> LoginRead?
-    /// Makes `n`'s login live, noting it installed at `at` (epoch seconds).
-    func install(_ n: SlotName, at: Int) throws
+    /// Makes `n`'s login live, recording the switch and noting it installed
+    /// at the date `clock` gives once the live files are written.
+    func install(_ n: SlotName, clock: Clock) throws
 }
 
 /// A login as one read of its files: what `put` saves, less the name.

@@ -19,12 +19,28 @@ extension Tx {
              .text(identity.email), .text(identity.org), .text(identity.plan),
              .text(historyJSON(UsageDetails(usage, live: live)))])
     }
+
+    /// Appends the completed installation of the saved login `n`, whose row
+    /// holds `identity`, at `at`: the date its install notes.
+    func appendSwitch(_ p: Provider, _ n: SlotName, identity: Identity, at: Date) throws {
+        try run(
+            """
+            INSERT INTO history (provider, kind, at_us, name, email, org, plan, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, "append switch",
+            [.text(p.rawValue), .text(EventKind.switch.rawValue), .int(epochMicros(at)), .text(n.raw),
+             .text(identity.email), .text(identity.org), .text(identity.plan), .text(historyJSON(SwitchDetails()))])
+    }
 }
 
 /// What a history row records.
 enum EventKind: String {
     case usage
+    case `switch`
 }
+
+/// A switch event's `details`: empty, since its common columns name the destination.
+struct SwitchDetails: Encodable {}
 
 /// A usage event's `details`.
 struct UsageDetails: Encodable {

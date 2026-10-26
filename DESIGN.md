@@ -389,6 +389,8 @@ public final class Tx {                             // only inside `write`: clos
   public func clearAdding(_ p: Provider) throws                  // no-op when absent
   func appendUsage(_ p: Provider, _ n: SlotName, identity: Identity,
                    usage: UsageRecord, live: Bool, at: Date) throws   // History.swift
+  func appendSwitch(_ p: Provider, _ n: SlotName, identity: Identity,
+                    at: Date) throws                                    // History.swift
 }
 ```
 
@@ -497,6 +499,25 @@ with cached usage. It is the plan Kiba knows, which may lag an external
 subscription change. Older events are never rewritten when a later
 probe reports another plan.
 
+A `switch` event's `details` is `{}`: its common columns name the
+destination, as its row stood when installed.
+
+The installer samples its clock after the durable live writes return.
+That date supplies both history's `at_us` and, rounded down to seconds,
+`live.installed_at`. Appending the switch, noting the installed name
+and time, and clearing Claude's pending claim commit together.
+
+Every completed installation is recorded, including a reinstall of
+the same account. A same-identity reinstall does not start a different
+account's live interval. Save-back's `noteInstalled(..., at: nil)` is
+bookkeeping and appends nothing.
+
+The shared ID orders committed usage and switch events, including
+events with equal timestamps. Provider turns ensure a switch's
+surrounding probes cannot be overtaken by another Kiba operation for
+that provider. Wall-clock changes remain visible; IDs order events
+but cannot repair their wall times.
+
 #### Recording boundaries
 
 `Switcher.record` is the only usage-recording path. In one transaction
@@ -518,6 +539,41 @@ remain storage-free. StatusReader, the app's periodic status refresh,
 and `kiba status --json` append no events and make no new requests.
 No polling, reset timer or background fetch is added.
 
+A switch event commits before post-install usage probing. A later
+probe or history-write failure does not erase a completed switch.
+
+SQLite cannot atomically commit together with credential files or a
+Keychain item. A crash or database failure after the physical writes
+but before commit can leave an unconfirmed installation without a
+committed switch event. Claude retains its pending claim; Codex has
+no equivalent recovery marker today. History does not invent a
+successful event for that gap. A later repair records its own
+completion time, not a guessed time for the earlier installation.
+
+#### Python report interface
+
+The report opens the existing database through SQLite's read-only URI
+mode. It does not construct Store, create or migrate the database,
+invoke `kiba usage`, change journal mode, or use `immutable=1` on the
+live WAL database.
+
+The version 5 read interface is the documented history columns and
+JSON shapes. Select columns explicitly and stream rows in ID order:
+
+```sql
+SELECT id, provider, kind, at_us, name, email, org, plan, details
+FROM history
+WHERE provider = ?
+ORDER BY id;
+```
+
+No query imposes a fixed history limit. Python decodes `details` with
+`json.loads`; the interface does not require SQLite's JSON extension.
+Missing databases and unsupported schema versions are explicit report
+errors. Unknown event kinds or incompatible payloads are errors, not
+events to silently skip. Finish the read before rendering the report
+so a reader does not unnecessarily retain the WAL.
+
 ### Claude live login
 
 ```swift
@@ -526,7 +582,7 @@ public struct ClaudeLive {
   public func identity() throws -> Identity?     // nil when no creds; orphanLive when creds exist without a config
   func login() throws -> LoginRead?              // one read of live(), then decode; nil as identity
   static func decode(_ config: Data, _ creds: Data) throws -> LoginRead   // identity, login = creds bytes, profile = exact oauthAccount object bytes
-  public func install(_ n: SlotName, at: Int) throws   // at: epoch seconds, noted with the name
+  public func install(_ n: SlotName, clock: Clock) throws   // clock read once the live files are written: the switch event's date and the installed time
   public func isMixed() throws -> Bool
 }
 ```
@@ -542,9 +598,10 @@ exist. The checks, the read of the previous config and credential bytes and
 of whether an install was pending, and the splice run in one `store.write`
 that ends with `claim = tx.notePending(n)`, committed before either live
 file changes. Then, in a second `store.write`: `tx.owns(claim)` else
-`superseded` (another install noted its own marker since; this one writes
-nothing and its preparation is dropped) → write config →
-`secrets.write(login)` → `tx.noteInstalled(n, at)` → `tx.clearPending(claim)`.
+`superseded` → write config → `secrets.write(login)` → sample the clock →
+append the switch with the installed row's identity → `tx.noteInstalled`
+with that date's epoch seconds → `tx.clearPending(claim)`. A superseded
+install writes nothing and drops its preparation.
 Each file write returns only once it is on permanent storage (`PrivateFS`),
 so the marker is never cleared ahead of the files it vouches for. When
 either live write fails, the previous config bytes go back (the file is
@@ -588,9 +645,14 @@ public struct CodexLive {
   public init(paths: Paths, store: Store, root: URL? = nil)
   public func identity() throws -> Identity?     // nil when auth.json missing
   func login() throws -> LoginRead?              // one read: identity, login = live auth.json bytes, profile nil; nil as identity
-  public func install(_ n: SlotName, at: Int) throws   // fetch (noAccount); email must belong to n else mismatch; inside store.write: write live auth.json, noteInstalled(n, at)
+  public func install(_ n: SlotName, clock: Clock) throws   // fetch (noAccount); email must belong to n else mismatch; inside store.write: write live auth.json, appendSwitch, noteInstalled
 }
 ```
+
+Codex installation fetches and validates the destination, writes
+`auth.json`, samples the clock, appends the switch and notes the
+installed name and time inside its existing `store.write`. The
+destination identity comes from the row actually installed.
 
 ### Usage records
 
@@ -886,10 +948,11 @@ changes between an operation's read and its write.
   hold, so a crash between the install's two live writes leaves a pending
   install whose installed name owns the live tokens (`probeAll` treats it
   as live); that note keeps the time noted, so a failed install never
-  moves it; then install `n` at the clock's epoch seconds, noted with the
-  name; then probe `n` as live and `write` its
-  usage; then, when the save-back named an account other than `n`, probe
-  that one as saved and `write` it like `probeAll` does. Its usage came
+  moves it; then install `n` with the clock, which appends its switch
+  event and notes the name at that time; then probe `n` as live and
+  `write` its usage and usage event; then, when the save-back named an
+  account other than `n`, probe that one as saved and `write` it and its
+  usage event like `probeAll` does. Its usage came
   from a live probe, which never refreshes, so an expired token would
   otherwise leave it dead once inactive.
 - `probeAll`: save-back (an error becomes `saveBackError`), `list`. Live
@@ -1482,10 +1545,18 @@ item stays `unrestored` until the app next starts.
 - `kiba usage <provider>`: `probeAll`. Nothing on stdout; its
   `saveBackError` and `providerError`, when set, one line each on stderr;
   exit 1 when either is set, else 0.
-- `kiba use <provider> <name>`: `use`; exit 0.
+- `kiba use <provider> <name>`: `use`, including its usage observations
+  and completed-switch event; exit 0 on return. A post-install
+  persistence failure exits 1 even though the login has changed;
+  the committed switch event remains.
 - Anything else, an unknown provider, or a name `SlotName` refuses: the
   synopsis on stderr, exit 64 (`EX_USAGE`). Any thrown error: its `reason`
   on stderr, exit 1.
+
+The CLI adds no history writes of its own and exposes no history
+command. Both CLI and app use the same core recording boundaries.
+The Python report's public interface is the versioned SQLite history
+schema documented above.
 
 `Switcher` gets `turnWait` = 2 minutes: a command waits at most that long
 for the app or another `kiba` to leave the provider's turn, then exits 1

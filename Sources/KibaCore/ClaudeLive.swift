@@ -56,12 +56,13 @@ public struct ClaudeLive {
     /// transaction first checks the marker is still this install's
     /// (`superseded`, nothing written, when another install has noted its
     /// own since), then gives the config the profile and the credentials the
-    /// login, notes `n` as installed at `at` (epoch seconds) and clears its
-    /// own marker. When a live write fails, the previous config goes back and
+    /// login; once both are on disk it reads `clock`, appends the switch
+    /// event at that date, notes `n` as installed then and clears its own
+    /// marker. When a live write fails, the previous config goes back and
     /// the write's error is thrown; the marker stays unless the live files
     /// are known to be the pair from before, which no install had left
     /// pending.
-    public func install(_ n: SlotName, at: Int) throws {
+    public func install(_ n: SlotName, clock: Clock) throws {
         let (change, claim) = try store.write { tx in
             let change = try prepare(n)
             let claim = try tx.notePending(.claude, n)
@@ -76,7 +77,9 @@ public struct ClaudeLive {
                 if restored(change) { try tx.clearPending(.claude, claim) }
                 return error
             }
-            try tx.noteInstalled(.claude, n, at: at)
+            let at = clock()
+            try tx.appendSwitch(.claude, n, identity: change.identity, at: at)
+            try tx.noteInstalled(.claude, n, at: epochSeconds(at))
             try tx.clearPending(.claude, claim)
             return nil
         }
@@ -138,6 +141,8 @@ public struct ClaudeLive {
         /// The config with the row's profile spliced in, and the row's login.
         let after: Data
         let login: Data
+        /// The row's identity, which its switch event names.
+        let identity: Identity
     }
 
     /// What installing `n` writes, checked, and the live state it replaces.
@@ -152,7 +157,7 @@ public struct ClaudeLive {
         let config = try PrivateFS.read(configFile)
         return Change(
             config: config, creds: try secrets.read(), settled: try store.pending(.claude) == nil,
-            after: try spliced(config, profile), login: row.login)
+            after: try spliced(config, profile), login: row.login, identity: row.identity)
     }
 
     /// Makes the live config `doc`; nil removes the file a write would replace.

@@ -30,15 +30,18 @@ public struct CodexLive {
 
     /// kiba `CODEX-INSTALL`, in one transaction so the row read is the row
     /// installed: the row must exist (`noAccount`) and name an email `n`
-    /// belongs to (`mismatch`); its login becomes the live `auth.json`, noted
-    /// installed at `at` (epoch seconds).
-    public func install(_ n: SlotName, at: Int) throws {
+    /// belongs to (`mismatch`); its login becomes the live `auth.json`. Once
+    /// that is on disk it reads `clock`, appends the switch event at that
+    /// date and notes `n` as installed then.
+    public func install(_ n: SlotName, clock: Clock) throws {
         try store.write { tx in
             guard let row = try store.fetch(.codex, n) else { throw KibaError.noAccount(.codex, n.raw) }
             guard n.belongs(to: try CodexIdentity.fromAuth(row.login).email) else { throw KibaError.mismatch(.codex, n.raw) }
             try PrivateFS.ensurePrivateDir(authFile.deletingLastPathComponent())
             try PrivateFS.writePrivate(row.login, to: authFile)
-            try tx.noteInstalled(.codex, n, at: at)
+            let at = clock()
+            try tx.appendSwitch(.codex, n, identity: row.identity, at: at)
+            try tx.noteInstalled(.codex, n, at: epochSeconds(at))
         }
     }
 }
