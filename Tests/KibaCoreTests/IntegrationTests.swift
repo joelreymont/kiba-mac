@@ -252,6 +252,7 @@ import os
             INSERT INTO pending VALUES ('claude', 'b@x');
             """)
         let store = try Store(paths: w.paths)
+        #expect(try w.history().isEmpty)
         let sw = Switcher(paths: w.paths, store: store, http: StubHTTP([answer(Status.ok, claudeUsage(session: 10, week: 20))]),
                           clock: w.clock, turnWait: nil)
 
@@ -260,6 +261,56 @@ import os
         #expect(try sw.save(.claude) == bx)
         #expect(try store.list(.claude).map(\.login) == [credsA, credsB])
         #expect(w.read(w.paths.claudeCredsFile(root: nil)) == credsB)
+        #expect(try w.history().map(\.name) == ["b@x"])
+    }
+}
+
+/// A version 4 store gains history but no invented events: its logins,
+/// cached usage, install and recovery records stay, reopening it adds
+/// nothing, and its first event is the next probe. A newer store is refused.
+@Test func storeFromVersion4StartsEmptyHistory() async throws {
+    try await scratch { w in
+        let (ax, sy) = (try slot("a@x"), try slot("s@y"))
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        let authS = codexAuth("s@y", plan: "plus", account: "acct-s", tag: "s")
+        let installedAt = Fixed.now - Fixed.day
+        try w.oldStore(Fixed.storeV4 + """
+            INSERT INTO account VALUES ('claude', 'a@x', 'a@x', 'org-a', 'max', \(sqlBlob(credsA)), \(sqlBlob(profile("a@x", org: "org-a"))), NULL);
+            INSERT INTO account VALUES ('codex', 's@y', 's@y', 'acct-s', 'plus', \(sqlBlob(authS)), NULL, '\(Fixed.preResetUsage)');
+            INSERT INTO live VALUES ('codex', 's@y', \(installedAt));
+            INSERT INTO pending VALUES ('claude', 'a@x', 'owner-a');
+            INSERT INTO adding VALUES ('claude', \(sqlBlob(credsA)), '\(w.paths.keychainService)');
+            """)
+        try w.writeCodex(authS)
+        _ = try Store(paths: w.paths)
+        let store = try Store(paths: w.paths)
+
+        #expect(try w.storeRows("PRAGMA user_version") == [["5"]])
+        #expect(try w.history().isEmpty)
+        #expect(try store.list(.claude).map(\.login) == [credsA])
+        #expect(try store.list(.codex).map(\.login) == [authS])
+        #expect(try store.installed(.codex) == sy)
+        #expect(try store.installedAt(.codex) == installedAt)
+        #expect(try store.pending(.claude) == ax)
+        #expect(try store.adding(.claude) == LiveItem(bytes: credsA, service: w.paths.keychainService))
+        let reader = StatusReader(paths: w.paths, store: store)
+        #expect(reader.read().providers.first { $0.provider == .codex }?.accounts.map(\.usage?.fetchedAt) == [Fixed.now - Fixed.day])
+
+        let report = await Switcher(paths: w.paths, store: store, http: StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45))]),
+                                    clock: w.clock, turnWait: nil).probeAll(.codex)
+
+        #expect(report.accounts.map(\.name) == [sy])
+        _ = try Store(paths: w.paths)
+        let events = try w.history()
+        #expect(events.map(\.name) == ["s@y"])
+        #expect(events.map(\.usage.live) == [true])
+        #expect(events.map(\.atUs) == [Fixed.now * Fixed.usPerSecond])
+        #expect(reader.read().providers.first { $0.provider == .codex }?.accounts.map(\.usage)
+            == [probed(windows(session: 20, week: 45))])
+
+        try w.storeSQL("PRAGMA user_version = \(Fixed.newerVersion)")
+        #expect(throws: KibaError.db("schema: unsupported version \(Fixed.newerVersion)")) { try Store(paths: w.paths) }
+        #expect(try w.history().count == 1)
     }
 }
 
@@ -370,6 +421,21 @@ import os
         #expect(rows[2].usage?.state == .expired)
         #expect(Rows.state(rows[2].usage, active: false) == .dead)
         #expect(w.read(w.paths.claudeCredsFile(root: nil)) == liveCreds)
+        let events = try w.history()
+        #expect(events.map(\.provider) == ["claude", "claude", "claude"])
+        #expect(events.map(\.kind) == ["usage", "usage", "usage"])
+        #expect(events.map(\.name) == ["a@x", "b@x", "c@x"])
+        #expect(events.map(\.email) == ["a@x", "b@x", "c@x"])
+        #expect(events.map(\.org) == ["org-a", "org-b", "org-c"])
+        #expect(events.map(\.plan) == ["max", "pro", "pro"])
+        #expect(events.map(\.atUs) == Array(repeating: Fixed.now * Fixed.usPerSecond, count: 3))
+        #expect(events.map(\.usage.live) == [true, false, false])
+        #expect(events.map(\.usage.state) == [.expired, .ok, .expired])
+        #expect(events.map(\.usage.limits.isEmpty) == [true, false, true])
+        #expect(events.dropFirst().first?.details == #"{"fetchedAt":\#(Fixed.now),"limits":["#
+            + #"{"label":"Session (5-hour)","left":70,"percent":30,"resetsAt":"\#(Fixed.sessionReset)"},"#
+            + #"{"label":"Weekly (7-day)","left":40,"percent":60,"resetsAt":"\#(Fixed.weekReset)"}],"#
+            + #""live":false,"note":"","state":"ok"}"#)
     }
 }
 
@@ -459,6 +525,8 @@ import os
             name: name, plan: "pro", active: false,
             usage: UsageRecord(fetchedAt: Fixed.now, state: c.state, note: c.note, limits: []))])
         #expect(try w.store.fetch(c.provider, name)?.login == c.login)
+        #expect(try w.history().map(\.usage) == [
+            Reading(fetchedAt: Fixed.now, state: c.state, note: c.note, live: false, limits: [], resets: nil)])
     }
 }
 
@@ -570,7 +638,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let http = StubHTTP([
             answer(Status.ok, claudeUsage(session: 100, week: 60, resets: cedarBlock(left: 2))),
             answer(Status.ok, claudeUsage(session: 100, week: 60, resets: juniperBlock(available: true))),
-            answer(Status.ok, claudeUsage(session: 30, week: 60)),
+            answer(Status.ok, claudeUsage(session: 30, week: 100, opus: 40)),
         ])
 
         _ = await w.switcher(http).probeAll(.claude)
@@ -582,6 +650,15 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
             ResetOffer(count: 1, program: "juniper_tide", grant: ""),
             nil,
         ])
+        // History keeps each window's own figure: the session is not spent with its week.
+        let events = try w.history()
+        #expect(events.map(\.usage.resets) == status?.accounts.map(\.usage?.resets))
+        #expect(events.last?.usage.limits == [
+            Window(label: "Session (5-hour)", percent: 30, left: 70, resetsAt: Fixed.sessionReset),
+            Window(label: "Weekly (7-day)", percent: 100, left: 0, resetsAt: Fixed.weekReset),
+            Window(label: "Opus Weekly", percent: 40, left: 60, resetsAt: Fixed.weekReset),
+        ])
+        #expect(events.last.map { $0.details.contains(#""resets":"#) } == false)
     }
 }
 
@@ -589,14 +666,25 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     try await scratch { w in
         try w.seed(.codex, try slot("s@y"), Identity(email: "s@y", plan: "plus", org: "acct-s"),
                    login: codexAuth("s@y", plan: "plus", account: "acct-s", tag: "s"), profile: nil)
-        let http = StubHTTP([answer(Status.ok, codexUsage(session: 100, week: 40, credits: 3))])
+        let usage = answer(Status.ok, codexUsage(session: 100, week: 40, credits: 3, plan: "pro"))
+        let sw = w.switcher(StubHTTP([usage, usage]))
 
-        _ = await w.switcher(http).probeAll(.codex)
+        _ = await sw.probeAll(.codex)
+        _ = await sw.probeAll(.codex)
 
         let status = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .codex }
         #expect(status?.accounts.first?.usage == UsageRecord(
             fetchedAt: Fixed.now, state: .ok, note: "", limits: windows(session: 100, week: 40),
             resets: ResetOffer(count: 3, program: "", grant: "")))
+        // The same reading at the same frozen time is two events, in order,
+        // under the plan the answer named.
+        let events = try w.history()
+        try #require(events.count == 2)
+        #expect(events[0].id < events[1].id)
+        #expect(events[0].atUs == events[1].atUs)
+        #expect(events[0].details == events[1].details)
+        #expect(events.map(\.plan) == ["pro", "pro"])
+        #expect(events[0].usage.resets == ResetOffer(count: 3, program: "", grant: ""))
     }
 }
 
@@ -628,6 +716,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(status?.accounts.first?.usage == UsageRecord(
             fetchedAt: Fixed.now, state: .ok, note: "", limits: windows(session: 0, week: 40),
             resets: ResetOffer(count: 2, program: "", grant: "")))
+        #expect(try w.history().map(\.usage.resets?.count) == [3, 2])
     }
 }
 
@@ -662,6 +751,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         let row = try w.store.fetch(.claude, name)
         #expect(row?.login == claudeCreds("b2", plan: "max", expires: Fixed.now + Fixed.tokenLife))
         #expect(row?.usage == probed(windows(session: 30, week: 60), resets: offer))
+        #expect(try w.history().map(\.usage.live) == [false])
     }
 }
 
@@ -962,6 +1052,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(w.read(w.paths.codexAuthFile(root: nil)) == liveAuth)
         #expect(!FileManager.default.fileExists(atPath: w.paths.loginRoot(.codex).path))
         #expect(w.calls() == ["codex login"])
+        #expect(try w.history().map(\.name) == ["new@y"])
     }
 }
 
@@ -1015,6 +1106,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(w.calls() == [
             "claude auth login --email x@y", "claude auth login --email k@y", "claude auth login --email f@y",
         ])
+        #expect(try w.history().map(\.name) == ["other@y", "k@y", "f@y"])
     }
 }
 
@@ -1447,7 +1539,12 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 @Test func saveNamesForgetRemovesMixedRefuses() async throws {
     try await scratch { w in
-        let sw = w.switcher(StubHTTP([]))
+        let sw = w.switcher(StubHTTP([
+            answer(Status.ok, codexUsage(session: 20, week: 45)),
+            answer(Status.ok, codexUsage(session: 30, week: 50)),
+            answer(Status.ok, codexUsage(session: 20, week: 45)),
+            answer(Status.ok, codexUsage(session: 10, week: 15, plan: "pro")),
+        ]))
         let first = codexAuth("s@z", plan: "plus", account: "org-1", tag: "s1")
         try w.writeCodex(first)
         #expect(try sw.save(.codex) == slot("s@z"))
@@ -1456,9 +1553,21 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         #expect(try sw.save(.codex) == second)
         #expect(try w.store.list(.codex).map(\.name.raw) == ["s@z", "s@z #2"])
         #expect(try w.store.fetch(.codex, slot("s@z"))?.login == first)
+        _ = await sw.probeAll(.codex)
         try sw.forget(.codex, second)
         #expect(try w.store.list(.codex).map(\.name.raw) == ["s@z"])
         #expect(throws: KibaError.noAccount(.codex, "s@z #2")) { try sw.forget(.codex, second) }
+
+        // The forgotten name comes back for another organization, whose probe
+        // names a new plan; the events before keep what they saw.
+        try w.writeCodex(codexAuth("s@z", plan: "plus", account: "org-3", tag: "s3"))
+        _ = await sw.probeAll(.codex)
+        #expect(try w.store.fetch(.codex, second)?.identity == Identity(email: "s@z", plan: "pro", org: "org-3"))
+        let events = try w.history()
+        #expect(events.map(\.name) == ["s@z", "s@z #2", "s@z", "s@z #2"])
+        #expect(events.map(\.org) == ["org-1", "org-2", "org-1", "org-3"])
+        #expect(events.map(\.plan) == ["plus", "team", "plus", "pro"])
+        #expect(events.map(\.usage.live) == [false, true, false, true])
 
         // Claude Code swapped the account but the tokens are still m@x's.
         let m = try slot("m@x")
@@ -1573,6 +1682,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         _ = await w.switcher(http).probeAll(.claude)
 
         #expect(try w.store.fetch(.claude, slot("a@x"))?.usage == probed(windows(session: 0, week: 1)))
+        let limits = try w.history().map(\.usage.limits)
+        #expect(limits.map { $0.map(\.percent) } == [[0, 1]])
+        #expect(limits.map { $0.map(\.left) } == [[100, 99]])
     }
 }
 
@@ -1820,6 +1932,14 @@ enum Fixed {
     static let frozen = "usage is frozen"
     static let freezeB =
         "CREATE TRIGGER freeze BEFORE UPDATE OF usage ON account WHEN NEW.name = 'b@y' BEGIN SELECT RAISE(ABORT, '\(frozen)'); END;"
+    /// Why the store refuses b@y's usage event once `unloggedB` has run.
+    static let unlogged = "history is frozen"
+    static let unloggedB =
+        "CREATE TRIGGER unlogged BEFORE INSERT ON history WHEN NEW.name = 'b@y' BEGIN SELECT RAISE(ABORT, '\(unlogged)'); END;"
+    /// A history event's `at_us` per second of the frozen clock.
+    static let usPerSecond = 1_000_000
+    /// A store version newer than this build knows.
+    static let newerVersion = 6
     /// The `kiba` CLI's product, which `swift test` builds beside the test bundle.
     static let cli = "KibaCLI"
     /// The store layout before pending installs had owners.
@@ -1832,6 +1952,18 @@ enum Fixed {
         CREATE TABLE live (provider TEXT PRIMARY KEY, installed TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE pending (provider TEXT PRIMARY KEY, name TEXT NOT NULL) WITHOUT ROWID;
         CREATE TABLE adding (provider TEXT PRIMARY KEY, live BLOB) WITHOUT ROWID;
+
+        """
+    /// The store layout before history.
+    static let storeV4 = """
+        PRAGMA user_version = 4;
+        CREATE TABLE account (
+          provider TEXT NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL, org TEXT NOT NULL, plan TEXT NOT NULL,
+          login BLOB NOT NULL, profile BLOB, usage TEXT, PRIMARY KEY (provider, name)
+        ) WITHOUT ROWID;
+        CREATE TABLE live (provider TEXT PRIMARY KEY, installed TEXT NOT NULL, installed_at INTEGER) WITHOUT ROWID;
+        CREATE TABLE pending (provider TEXT PRIMARY KEY, name TEXT NOT NULL, owner TEXT) WITHOUT ROWID;
+        CREATE TABLE adding (provider TEXT PRIMARY KEY, live BLOB, service TEXT NOT NULL) WITHOUT ROWID;
 
         """
     /// A usage column as kiba stored it before limit resets were read.
@@ -1998,6 +2130,39 @@ struct World: Sendable {
         guard sqlite3_open(paths.db.path, &db) == SQLITE_OK, sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
             throw KibaError.db("store sql: \(String(cString: sqlite3_errmsg(db)))")
         }
+    }
+
+    /// Every row `sql` selects, each column as text (nil for NULL), read as
+    /// the usage report reads the store: a read-only URI connection.
+    func storeRows(_ sql: String) throws -> [[String?]] {
+        var db: OpaquePointer?
+        defer { sqlite3_close(db) }
+        let uri = paths.db.absoluteString + "?mode=ro"
+        guard sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+            throw KibaError.db("open \(uri): \(String(cString: sqlite3_errmsg(db)))")
+        }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw KibaError.db("store rows: \(String(cString: sqlite3_errmsg(db)))")
+        }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [[String?]] = []
+        while true {
+            switch sqlite3_step(stmt) {
+            case SQLITE_ROW:
+                rows.append((0 ..< sqlite3_column_count(stmt)).map { col in
+                    sqlite3_column_text(stmt, col).map { String(cString: $0) }
+                })
+            case SQLITE_DONE: return rows
+            default: throw KibaError.db("store rows: \(String(cString: sqlite3_errmsg(db)))")
+            }
+        }
+    }
+
+    /// The store's history, oldest first, through the report's documented query.
+    func history() throws -> [Event] {
+        try storeRows("SELECT id, provider, kind, at_us, name, email, org, plan, details FROM history ORDER BY id")
+            .map(Event.init)
     }
 
     /// The file's bytes; nil when it does not exist.
@@ -2243,6 +2408,51 @@ func windows(session: Int, week: Int) -> [Limit] {
 
 func probed(_ limits: [Limit], resets: ResetOffer? = nil) -> UsageRecord {
     UsageRecord(fetchedAt: Fixed.now, state: .ok, note: "", limits: limits, resets: resets)
+}
+
+/// One history row, its `details` decoded as the report decodes a usage event.
+struct Event {
+    let id: Int
+    let provider: String
+    let kind: String
+    let atUs: Int
+    let name: String
+    let email: String
+    let org: String
+    let plan: String
+    /// The `details` JSON as stored.
+    let details: String
+    let usage: Reading
+
+    init(_ row: [String?]) throws {
+        let cols = row.compactMap { $0 }
+        guard cols.count == Self.columns, let id = Int(cols[0]), let atUs = Int(cols[3]) else {
+            throw KibaError.db("history row: \(row)")
+        }
+        (self.id, provider, kind, self.atUs, name, email, org, plan, details) =
+            (id, cols[1], cols[2], atUs, cols[4], cols[5], cols[6], cols[7], cols[8])
+        usage = try JSONDecoder().decode(Reading.self, from: Data(details.utf8))
+    }
+
+    static let columns = 9
+}
+
+/// A usage event's `details`.
+struct Reading: Decodable, Equatable {
+    let fetchedAt: Int
+    let state: UsageState
+    let note: String
+    let live: Bool
+    let limits: [Window]
+    let resets: ResetOffer?
+}
+
+/// One limit of a usage event: `left` is nil for JSON null.
+struct Window: Decodable, Equatable {
+    let label: String
+    let percent: Int
+    let left: Int?
+    let resetsAt: String
 }
 
 /// Each limit of an account in `kiba status --json`, as `"<label> <left>"`.
@@ -2621,20 +2831,24 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(try w.store.fetch(.claude, cx)?.login == credsC)
 }
 
-/// A usage record the store refused to write: the probe names it as not
-/// recorded and counts the account as not probed.
-@MainActor @Test func appModelCountsOnlyRecordedOutcomes() async throws {
+/// A usage record or usage event the store refused to write: neither is
+/// kept, and the probe names the outcome as not recorded and counts the
+/// account as not probed.
+@MainActor @Test(arguments: [false, true]) func appModelCountsOnlyRecordedOutcomes(history: Bool) async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
     let usage = answer(Status.ok, codexUsage(session: 20, week: 45))
     let (core, ay, by) = try codexPair(w, [usage, usage, usage, usage])
-    try w.storeSQL(Fixed.freezeB)
-    let unrecorded = "\(by.raw): usage not recorded: \(KibaError.db("set usage: \(Fixed.frozen)").reason)"
+    try w.storeSQL(history ? Fixed.unloggedB : Fixed.freezeB)
+    let refusal = history ? "append usage: \(Fixed.unlogged)" : "set usage: \(Fixed.frozen)"
+    let unrecorded = "\(by.raw): usage not recorded: \(KibaError.db(refusal).reason)"
 
     let report = await core.probeAll(.codex)
     #expect(report.accounts.map(\.name) == [ay])
     #expect(report.providerError == unrecorded)
     #expect(try w.store.list(.codex).map(\.name) == [ay, by])
+    #expect(try w.store.list(.codex).map { $0.usage == nil } == [false, true])
+    #expect(try w.history().map(\.name) == ["a@y"])
 
     let model = AppModel(connect: { core })
     model.start()

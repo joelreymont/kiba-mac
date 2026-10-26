@@ -110,7 +110,7 @@ public final class Switcher: Sendable {
             let isLive = live.contains(row.name)
             let outcome = await run(p, row, live: isLive)
             do {
-                try record(p, row, outcome)
+                try record(p, row, outcome, live: isLive)
                 accounts.append(Probed(name: row.name, outcome: outcome, live: isLive))
             } catch {
                 unrecorded.append("\(row.name.raw): usage not recorded: \(StatusReader.reason(error))")
@@ -166,7 +166,7 @@ public final class Switcher: Sendable {
     func probeInTurn(_ p: Provider, _ n: SlotName, live: Bool) async throws -> ProbeOutcome {
         guard let row = try store.fetch(p, n) else { throw KibaError.noAccount(p, n.raw) }
         let outcome = await run(p, row, live: live)
-        try record(p, row, outcome)
+        try record(p, row, outcome, live: live)
         return outcome
     }
 
@@ -260,13 +260,20 @@ public final class Switcher: Sendable {
         }
     }
 
-    /// Writes a probe's outcome: the usage record, the plan the provider
-    /// named, and any refreshed login. A login the provider revoked keeps its
-    /// row, dead, so the account stays listed until the user forgets it.
-    func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome) throws {
+    /// Writes a probe's outcome in one transaction: the usage record, the
+    /// plan the provider named, any refreshed login, and the usage event,
+    /// stamped when the outcome came back and under the plan committed with
+    /// it. `live` is whether the probe treated the login as live. A login the
+    /// provider revoked keeps its row, dead, so the account stays listed
+    /// until the user forgets it.
+    func record(_ p: Provider, _ row: SavedLogin, _ outcome: ProbeOutcome, live: Bool) throws {
+        let at = clock()
+        var identity = row.identity
+        if let plan = outcome.plan { identity.plan = plan }
         try store.write { tx in
             try tx.setUsage(p, row.name, outcome.usage, plan: outcome.plan)
             if outcome.doc != row.login { try tx.setLogin(p, row.name, outcome.doc) }
+            try tx.appendUsage(p, row.name, identity: identity, usage: outcome.usage, live: live, at: at)
         }
     }
 

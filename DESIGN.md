@@ -299,14 +299,19 @@ posix_spawn with pipes; drains stdout/stderr concurrently; `setsid` sets
 
 ### Store
 
-One SQLite database, `paths.db`, holds every saved account. No slot
-directories, no markers: a write transaction is the row mutex and every row
-is whole or absent. The turn files beside it (`paths.turn(p)`) anchor the
-provider turns and hold no data; a transaction is still the row mutex and
-never spans a turn.
+One SQLite database, `paths.db`, holds every saved account and its usage
+and switch history. `account` holds the latest state; `history` retains
+observations and completed installations independently of saved rows.
+Forgetting an account removes its saved login and cached usage, never its
+history.
+
+No slot directories, no markers: a write transaction is the row mutex
+and every row is whole or absent. The turn files beside it
+(`paths.turn(p)`) anchor the provider turns and hold no data; a
+transaction never spans a network wait.
 
 ```sql
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 CREATE TABLE IF NOT EXISTS account (
   provider TEXT NOT NULL,          -- "claude" | "codex"
   name     TEXT NOT NULL,          -- SlotName.raw
@@ -333,6 +338,19 @@ CREATE TABLE IF NOT EXISTS adding (
   live     BLOB,                   -- the live Keychain item before the add's login; NULL: there was none
   service  TEXT NOT NULL           -- the Keychain service that item is filed under (paths.keychainService then)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS history (
+  id       INTEGER PRIMARY KEY,   -- shared committed insertion order
+  provider TEXT NOT NULL,          -- "claude" | "codex"
+  kind     TEXT NOT NULL,          -- "usage" | "switch"
+  at_us    INTEGER NOT NULL,       -- Unix epoch microseconds; see History
+  name     TEXT NOT NULL,          -- observed account, or switch destination
+  email    TEXT NOT NULL,
+  org      TEXT NOT NULL,          -- "" when unknown
+  plan     TEXT NOT NULL,          -- plan known at this event; "" when unknown
+  details  TEXT NOT NULL           -- kind-specific JSON documented below
+);
+CREATE INDEX IF NOT EXISTS history_provider
+  ON history(provider, id);
 ```
 
 ```swift
@@ -369,6 +387,8 @@ public final class Tx {                             // only inside `write`: clos
   public func clearPending(_ p: Provider, _ c: Claim) throws     // deletes c's marker; no-op once another replaced it
   public func noteAdding(_ p: Provider, _ i: LiveItem) throws    // upsert into adding
   public func clearAdding(_ p: Provider) throws                  // no-op when absent
+  func appendUsage(_ p: Provider, _ n: SlotName, identity: Identity,
+                   usage: UsageRecord, live: Bool, at: Date) throws   // History.swift
 }
 ```
 
@@ -400,10 +420,103 @@ item back there, so that is what its record meant. A version 1 to 3 store
 `ALTER TABLE live ADD COLUMN installed_at INTEGER`; its row keeps NULL until
 the next install notes a time.
 
+Version 5 adds `history` and its index. `init` reads `user_version`
+before applying schema changes and refuses a version greater than 5
+with `db("schema: unsupported version <n>")`. Creation, the existing
+version 1–3 column migrations, creation of history, and setting
+`user_version = 5` happen in one transaction. Reopening a version 5
+store preserves every row.
+
+Migration creates no history events. Cached usage may have an old
+fetch time but no reliable historical plan, and `live.installed_at`
+supplies neither the preceding account nor a complete switch log.
+Existing accounts, cached usage, installed names and times, pending
+claims and adding records remain unchanged.
+
+History has no foreign key to `account`, no update or delete operation,
+no retention policy, no deduplication and no row or time limit. An
+identical reading fetched twice is two events. `INTEGER PRIMARY KEY`
+supplies increasing committed IDs because history rows are never
+deleted; `AUTOINCREMENT` is unnecessary. Rolled-back inserts are not
+events.
+
 `liveName` (kiba `LIVE-NAME`): candidates `email`, `email #2` … `email #9`.
 For each: no row → first free candidate remembered; row exists and its org
 equals the live org (both empty counts as equal; one empty does not) →
 return that row's name. Return the first free; none → `capacity`.
+
+### History
+
+`History.swift` owns the history payload encoding and the append
+operations. It stores identity and usage metadata, never login bytes,
+profile documents, tokens or HTTP headers. JSON keys are sorted.
+There is no Swift history reader: the Python report reads SQLite.
+
+Common columns name the account being observed for `usage`, and the
+destination account for `switch`. They are snapshots, never joins
+against the present account table. The account identity is the
+provider, email and organization, using their exact spelling;
+`name` preserves the saved-slot spelling at the event. A reused name
+does not merge different organizations. An empty organization is
+unknown identity information, not proof that two logins belong to the
+same real account. Plan is an attribute of each observation, not part
+of account identity.
+
+A `usage` event's `details` is an object with these members:
+
+- `fetchedAt`: the UsageRecord's integer Unix epoch seconds, taken at
+  the start of the probe.
+- `state`, `note`: the UsageRecord's values.
+- `live`: whether this probe treated the account as live and therefore
+  prohibited refreshing its token.
+- `limits`: every limit in its original order, including duplicate
+  labels. Each object has `label`, `percent`, `left`, `resetsAt`.
+- `resets`: the UsageRecord's ResetOffer when present; absent otherwise.
+
+`percent` retains Kiba's existing whole-percent rounding and is percent
+used. `left` is max(0, 100 - percent), or JSON null for a negative
+unavailable reading. It is the remaining capacity of that particular
+window. Unlike the panel and `status --json`, history does not force
+Claude's session left to zero when its weekly allowance is exhausted.
+`resetsAt` retains the limit's string, including "" when unknown.
+
+Every completed ProbeOutcome is appended, including an error or a
+locally detected expired or missing token with no limits. Such events
+explain missing readings; they do not constitute zero consumption or
+zero remaining capacity. Token-refresh responses and intermediate
+rejected requests are not additional usage readings.
+
+For a usage event, `at_us` is sampled from Switcher's clock immediately
+after the outcome returns, before waiting for the database write.
+`fetchedAt` and `at_us` bound the local probe operation; neither is a
+provider-supplied measurement timestamp.
+
+The event's plan is `outcome.plan` when present, otherwise the saved
+identity's plan used by that probe. This is the same plan committed
+with cached usage. It is the plan Kiba knows, which may lag an external
+subscription change. Older events are never rewritten when a later
+probe reports another plan.
+
+#### Recording boundaries
+
+`Switcher.record` is the only usage-recording path. In one transaction
+it updates cached usage and plan, stores any refreshed login, and
+appends the usage event. Failure rolls back that transaction and
+propagates through the existing error path. `probeAll` excludes the
+outcome from `accounts` and reports "usage not recorded"; individual
+operations throw. There is no best-effort history write.
+
+`Tx.put`, `setUsage` and `noteInstalled` do not implicitly append
+history. They also serve save-back, imports and fixture setup, which
+are not new observations. The caller that possesses the new
+observation explicitly invokes the append operation.
+
+This records `probeAll`, `kiba usage`, the app's opening and requested
+usage probes, LoginRunner's post-import probe, redeem's existing
+post-result probe, and use's switch-boundary probes. Provider probes
+remain storage-free. StatusReader, the app's periodic status refresh,
+and `kiba status --json` append no events and make no new requests.
+No polling, reset timer or background fetch is added.
 
 ### Claude live login
 
@@ -549,11 +662,11 @@ public struct ClaudeProbe { init(http: HTTPClient, clock: Clock); func run(_ i: 
 public struct CodexProbe  { same }
 ```
 
-A probe never writes: a refreshed document comes back in `.record(_, doc:)`
-and the Switcher persists it. The Switcher runs one operation per provider
-at a time, so a refresh is never overtaken by a switch that makes the login
-live; every writer of a saved row holds that turn, so the row a probe read
-is the row its outcome is written to.
+A probe never writes: its UsageRecord, possibly refreshed document and
+optional plan come back in ProbeOutcome. Switcher persists the outcome
+and its history event together. Every saved-row writer holds the
+provider's turn, so the row a probe read is the row its outcome is
+written to.
 
 A pending Claude repair stops all Claude probes and refreshes until `use`
 completes it: a failed install can leave one saved login's credentials
@@ -686,7 +799,8 @@ Codex:
    it off (`features.daemon_auto_start = false`; a running one stops with
    `codex app-server daemon stop`); a running session is restarted by hand.
 
-`fetchedAt` = now for every record.
+`fetchedAt` is the clock's epoch seconds at the start of each probe.
+History separately records when Switcher receives its outcome.
 
 Both probes share one token step with redeem: Claude's `fresh` (the expiry
 check of step 1) and each provider's `renewed` (spend the grant, splice the

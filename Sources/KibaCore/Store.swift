@@ -45,8 +45,10 @@ public struct Store: Sendable {
     static let firstSuffix = 2
     static let suffixMark = " #"
     static let columns = "name, email, org, plan, login, profile, usage"
+    /// The schema version this build writes; a store from a newer one is refused.
+    static let version = 5
     static let schema = """
-        PRAGMA user_version = 4;
+        PRAGMA user_version = \(version);
         CREATE TABLE IF NOT EXISTS account (
           provider TEXT NOT NULL,
           name     TEXT NOT NULL,
@@ -73,7 +75,21 @@ public struct Store: Sendable {
           live     BLOB,
           service  TEXT NOT NULL
         ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS history (
+          id       INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL,
+          kind     TEXT NOT NULL,
+          at_us    INTEGER NOT NULL,
+          name     TEXT NOT NULL,
+          email    TEXT NOT NULL,
+          org      TEXT NOT NULL,
+          plan     TEXT NOT NULL,
+          details  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS history_provider
+          ON history(provider, id);
         """
+    static let versionQuery = "PRAGMA user_version"
     /// A version 1 store's `pending` table lacks the owner column. Its marker
     /// is owned by no install, so it stays until an install replaces it.
     static let ownerColumn = "SELECT 1 FROM pragma_table_info('pending') WHERE name = 'owner'"
@@ -90,11 +106,15 @@ public struct Store: Sendable {
     static let addInstalledAt = "ALTER TABLE live ADD COLUMN installed_at INTEGER"
 
     /// Creates the store directory (0700) and the database (0600) when missing,
-    /// and applies the schema in one transaction, adding what an older store lacks.
+    /// and applies the schema in one transaction, adding what an older store
+    /// lacks; a store a newer build wrote is refused untouched.
     public init(paths: Paths) throws {
         db = paths.db
         try PrivateFS.ensurePrivateDir(paths.store)
         try write { tx in
+            try tx.query(Self.versionQuery, "schema", []) {
+                if let found = $0.int(0), found > Self.version { throw KibaError.db("schema: unsupported version \(found)") }
+            }
             try tx.conn.exec(Self.schema, "schema")
             if try !Self.found(tx, Self.ownerColumn) { try tx.conn.exec(Self.addOwner, "schema") }
             if try !Self.found(tx, Self.serviceColumn) {
