@@ -955,7 +955,13 @@ changes between an operation's read and its write.
   usage event like `probeAll` does. Its usage came
   from a live probe, which never refreshes, so an expired token would
   otherwise leave it dead once inactive.
-- `probeAll`: save-back (an error becomes `saveBackError`), `list`. Live
+- `probeAll`: notes the clock's epoch second before it waits for the turn.
+  Once held, when every saved account's `usage.fetchedAt` is later than that
+  second, another holder probed them all while it waited: it reports those
+  records as its `accounts` (`live` as `liveNames` decides; `doc` the saved
+  login) and makes no save-back and no request. Sessions that hit a limit
+  together queue on the turn, and only the first asks Anthropic. Otherwise:
+  save-back (an error becomes `saveBackError`), `list`. Live
   Claude credentials without a config stop it here: `orphanLive` is both
   `saveBackError` and `providerError`, no account is probed. Then
   for every saved account: probe (`live` = name == live name, or, while

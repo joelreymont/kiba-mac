@@ -82,7 +82,11 @@ public final class Switcher: Sendable {
     /// waits to go back is not probed at all. The live login is probed as
     /// live, so its tokens are never refreshed. No outcome removes a login.
     /// An outcome whose write failed is named in the provider error only.
+    /// When every saved login was probed after the second this call began,
+    /// another holder's probe answered it while it waited for the turn: it
+    /// reports those recorded outcomes and probes nothing.
     public func probeAll(_ p: Provider) async -> ProbeReport {
+        let asked = Int(clock().timeIntervalSince1970)
         let held: Int32
         do {
             held = try await ops(p).enter()
@@ -90,6 +94,11 @@ public final class Switcher: Sendable {
             return ProbeReport(saveBackError: nil, providerError: StatusReader.reason(error), accounts: [])
         }
         defer { ops(p).leave(held) }
+        do {
+            if let report = try probed(p, after: asked) { return report }
+        } catch {
+            return ProbeReport(saveBackError: nil, providerError: StatusReader.reason(error), accounts: [])
+        }
         var backError: String?
         var mixed = false
         do {
@@ -217,6 +226,19 @@ public final class Switcher: Sendable {
         case .claude: return try claude().isMixed()
         case .codex: return false
         }
+    }
+
+    /// The recorded outcomes of `p`'s saved logins when each was probed after
+    /// epoch second `asked`; nil when any was not, or none is saved.
+    func probed(_ p: Provider, after asked: Int) throws -> ProbeReport? {
+        let rows = try store.list(p)
+        let records = rows.compactMap { row in row.usage.flatMap { $0.fetchedAt > asked ? $0 : nil } }
+        guard !rows.isEmpty, records.count == rows.count else { return nil }
+        let live = try liveNames(p, mixed: isMixed(p))
+        let accounts = zip(rows, records).map { row, usage in
+            Probed(name: row.name, outcome: ProbeOutcome(usage: usage, doc: row.login), live: live.contains(row.name))
+        }
+        return ProbeReport(saveBackError: nil, providerError: nil, accounts: accounts)
     }
 
     /// The saved names whose tokens the CLI is using: the live identity's

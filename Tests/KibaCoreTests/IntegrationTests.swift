@@ -401,6 +401,36 @@ import os
     }
 }
 
+@Test func probeAfterAnotherBeganTakesItsOutcomes() async throws {
+    try await scratch { w in
+        let (ax, bx) = (try slot("a@x"), try slot("b@x"))
+        let profA = profile("a@x", org: "org-a"), profB = profile("b@x", org: "org-b")
+        let credsA = claudeCreds("xa", plan: "max", expires: Fixed.now + Fixed.day)
+        try w.writeClaude(config: claudeConfig(profA), creds: credsA)
+        try w.seed(.claude, ax, Identity(email: "a@x", plan: "max", org: "org-a"), login: credsA, profile: profA)
+        try w.seed(.claude, bx, Identity(email: "b@x", plan: "pro", org: "org-b"),
+                   login: claudeCreds("xb", plan: "pro", expires: Fixed.now + Fixed.day), profile: profB)
+        let http = StubHTTP([
+            answer(Status.ok, claudeUsage(session: 10, week: 20)),
+            answer(Status.ok, claudeUsage(session: 30, week: 40)),
+        ])
+        _ = await Switcher(paths: w.paths, store: w.store, http: http, clock: {
+            Date(timeIntervalSince1970: TimeInterval(Fixed.now + 1))
+        }, turnWait: nil).probeAll(.claude)
+
+        // A probe that began a second before that one probed every account,
+        // as one waiting for the turn while it ran: it asks Anthropic nothing.
+        let idle = StubHTTP([])
+        let report = await w.switcher(idle).probeAll(.claude)
+
+        #expect(idle.requests.isEmpty)
+        #expect(report.providerError == nil)
+        #expect(report.accounts.map(\.name) == [ax, bx])
+        #expect(report.accounts.map(\.live) == [true, false])
+        #expect(report.accounts.map(\.outcome.usage) == (try w.store.list(.claude)).compactMap(\.usage))
+    }
+}
+
 @Test func switchMovesKeychainLiveLogin() async throws {
     try ensureKeychain()
     let service = "\(Fixed.keychainPrefix)\(UUID().uuidString)"
