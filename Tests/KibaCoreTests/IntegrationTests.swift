@@ -879,8 +879,9 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
 
 /// Only the session and weekly windows decide: c's used-up model window
 /// leaves it usable, after the rows with Fable left, its figures shown and
-/// no reset in its plan text. Then the session used up (b), the week (f)
-/// though it reopens sooner, the dead login (a).
+/// no reset in its plan text. Then the session used up (g, b, f), the
+/// week (i, h) though i reopens before b, each soonest reset first and an
+/// unparseable one last, then the dead login (a).
 @Test func rowsSortRoomTightUsedUpThenDead() async throws {
     try await scratch { w in
         for name in ["b@x", "c@x", "d@x", "e@x"] {
@@ -899,20 +900,32 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
         try w.seed(.claude, try slot("a@x"), Identity(email: "a@x", plan: "pro", org: "org-a"),
                    login: claudeCreds("a", plan: "pro", expires: Fixed.now + Fixed.day), profile: profile("a@x", org: "org-a"),
                    usage: UsageRecord(fetchedAt: Fixed.now, state: .revoked, note: "login revoked", limits: []))
-        try w.seed(.claude, try slot("f@x"), Identity(email: "f@x", plan: "pro", org: "org-f"),
-                   login: claudeCreds("f", plan: "pro", expires: Fixed.now + Fixed.day), profile: profile("f@x", org: "org-f"),
-                   usage: probed([Limit(label: "Session (5-hour)", percent: 30, resetsAt: Fixed.sessionReset),
-                                  Limit(label: "Weekly (7-day)", percent: 100, resetsAt: Fixed.soonReset)]))
+        let limited: [(name: String, session: Limit, week: Limit)] = [
+            ("f@x", Limit(label: "Session (5-hour)", percent: 100, resetsAt: ""),
+             Limit(label: "Weekly (7-day)", percent: 30, resetsAt: Fixed.weekReset)),
+            ("g@x", Limit(label: "Session (5-hour)", percent: 100, resetsAt: Fixed.soonReset),
+             Limit(label: "Weekly (7-day)", percent: 30, resetsAt: Fixed.weekReset)),
+            ("h@x", Limit(label: "Session (5-hour)", percent: 30, resetsAt: Fixed.sessionReset),
+             Limit(label: "Weekly (7-day)", percent: 100, resetsAt: Fixed.weekReset)),
+            ("i@x", Limit(label: "Session (5-hour)", percent: 30, resetsAt: Fixed.sessionReset),
+             Limit(label: "Weekly (7-day)", percent: 100, resetsAt: Fixed.soonReset)),
+        ]
+        for l in limited {
+            try w.seed(.claude, try slot(l.name), Identity(email: l.name, plan: "pro", org: "org-\(l.name)"),
+                       login: claudeCreds(l.name, plan: "pro", expires: Fixed.now + Fixed.day),
+                       profile: profile(l.name, org: "org-\(l.name)"), usage: probed([l.session, l.week]))
+        }
 
         let claude = StatusReader(paths: w.paths, store: w.store).read().providers.first { $0.provider == .claude }
         let accounts = try #require(claude).accounts
-        try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x", "e@x", "f@x"])
-        #expect(accounts.map { Rows.state($0.usage, active: $0.active) } == [.dead, .blocked, .tight, .ok, .tight, .blocked])
-        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true, false, false, false, false, false])
+        try #require(accounts.map(\.name.raw) == ["a@x", "b@x", "c@x", "d@x", "e@x", "f@x", "g@x", "h@x", "i@x"])
+        #expect(accounts.map { Rows.state($0.usage, active: $0.active) }
+            == [.dead, .blocked, .tight, .ok, .tight, .blocked, .blocked, .blocked, .blocked])
+        #expect(accounts.map { Rows.drained(Rows.state($0.usage, active: $0.active)) } == [true] + Array(repeating: false, count: 8))
         #expect(Rows.figures(.claude, accounts[1].usage) == [
             Figure(label: "Session (5-hour)", left: 0), Figure(label: "Weekly (7-day)", left: 40),
         ])
-        #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "e@x", "c@x", "b@x", "f@x", "a@x"])
+        #expect(Rows.sorted(accounts).map(\.name.raw) == ["d@x", "e@x", "c@x", "g@x", "b@x", "f@x", "i@x", "h@x", "a@x"])
         #expect(Rows.figuresText(.claude, accounts[2].usage) == "90% · 80% · 0%")
         #expect(Rows.planText(.claude, accounts[2], now: Date(timeIntervalSince1970: TimeInterval(Fixed.now))) == "(pro)")
         #expect(Rows.figures(.claude, accounts[3].usage) == [
