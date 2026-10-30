@@ -1035,13 +1035,13 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     #expect(Rows.tooltip(.claude, a, now: now) == ["a@x · no plan · current", ProbeCase.noPlan, "Probed just now"])
 }
 
-/// Anthropic refused a saved login's refresh and says nothing of why: the
-/// row reads "free?" where it read the plan and "log in again", and the
-/// probe counts it as answered, not failed. Its hover lines keep the plan,
-/// Anthropic's answer and the offer to log in again. The live login's tokens
+/// Anthropic refused a saved login's refresh, which says nothing of its
+/// plan: the row reads its plan and "log in again", and the probe counts it
+/// as answered, not failed, so the notice lists no line for it. Its hover
+/// lines keep the plan, Anthropic's answer and the offer to log in again. The live login's tokens
 /// are blank: nothing was sent and Claude Code has nothing to refresh, so it
 /// reads its plan and "log in again" and fails.
-@MainActor @Test func rowsShowRefusedClaudeLoginAsFree() async throws {
+@MainActor @Test func rowsAskRefusedClaudeLoginQuietly() async throws {
     let w = try World(keychainService: Fixed.noKeychain)
     defer { #expect(throws: Never.self) { try w.remove() } }
     let (ax, bx, cx) = (try slot("a@x"), try slot("b@x"), try slot("c@x"))
@@ -1073,7 +1073,7 @@ struct ProbeCase: Sendable, CustomTestStringConvertible {
     try #require(rows.map(\.name) == [ax, bx, cx])
     try #require(rows.map(\.active) == [false, false, true])
     let now = Date(timeIntervalSince1970: TimeInterval(Fixed.now))
-    #expect(rows.map { Rows.planText(.claude, $0, now: now) } == ["(max)", "(free?)", "(pro, log in again)"])
+    #expect(rows.map { Rows.planText(.claude, $0, now: now) } == ["(max)", "(max, log in again)", "(pro, log in again)"])
     #expect(Rows.tooltip(.claude, rows[1], now: now) == [
         "b@x · max", ProbeCase.refused("400 invalid_grant: Refresh token not found or invalid"),
         "Probed just now", "Click to log in to this account again",

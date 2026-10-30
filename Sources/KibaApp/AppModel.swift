@@ -763,7 +763,7 @@ final class AppModel {
 
     /// What probing every provider came to, counted per account: refreshed
     /// (the provider answered, or Anthropic turned a saved Claude login away:
-    /// its row reads "free?"), failed (no fresh usage), waiting (the live
+    /// its row asks to log in again), failed (no fresh usage), waiting (the live
     /// login's token has expired; its CLI refreshes it on its next run, kiba
     /// never does), and skipped (a row shown that no outcome covers: its
     /// provider could not be probed, or its login changed before its usage
@@ -798,7 +798,7 @@ final class AppModel {
                         refreshed += 1
                     case .expired where a.live:
                         waiting += 1
-                    case _ where Rows.maybeFree(p, u, active: a.live):
+                    case _ where Rows.refused(p, u, active: a.live):
                         refreshed += 1
                     case .expired, .error, .revoked, .throttled, .missing:
                         failed += 1

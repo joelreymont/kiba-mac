@@ -78,10 +78,10 @@ public enum Rows {
         dead(u, active: active) || (u?.state == .throttled && !active)
     }
 
-    /// A saved Claude login Anthropic turned away: it reads "free?", a guess
-    /// that the plan lapsed, and a probe counts it as answered. Every other
-    /// dead row asks to log in again.
-    public static func maybeFree(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool {
+    /// A saved Claude login Anthropic turned away: its row asks to log in
+    /// again like every dead row, but a probe counts it as answered and
+    /// lists no failure for it.
+    public static func refused(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool {
         p == .claude && u?.state == .expired && !active
     }
 
@@ -195,10 +195,8 @@ public enum Rows {
     }
 
     /// `"(pro)"`, `"(pro, 5d)"` while blocked, `"(pro, log in again)"` when
-    /// dead, `"(free?)"` in its place when `maybeFree`, `"(no plan)"` when
-    /// unsubscribed, `"(free)"` on the free plan, or "".
+    /// dead, `"(no plan)"` when unsubscribed, `"(free)"` on the free plan, or "".
     public static func planText(_ p: Provider, _ a: Account, now: Date) -> String {
-        if maybeFree(p, a.usage, active: a.active) { return "(" + Copy.free + ")" }
         var parts: [String] = []
         let label = plan(a)
         if !label.isEmpty { parts.append(label) }
@@ -340,7 +338,6 @@ public enum Rows {
     private enum Copy {
         static let limit = "limit"
         static let again = "log in again"
-        static let free = "free?"
         static let noPlan = "no plan"
         static let freePlan = "free"
         static let current = "current"
