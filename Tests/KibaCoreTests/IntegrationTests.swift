@@ -390,7 +390,11 @@ import os
         async let report = sw.probeAll(.claude)
         try await http.arrival()
         async let switched: Void = sw.use(.claude, bx)
-        try await Task.sleep(for: Fixed.overtake)
+        let queue = w.paths.turnQueue(.claude).path
+        // The probe's entry and the switch's: the switch waits in line.
+        try await until("the switch to queue") {
+            try FileManager.default.contentsOfDirectory(atPath: queue).count == 2
+        }
         http.release()
         _ = await report
         try await switched
@@ -428,6 +432,61 @@ import os
         #expect(report.accounts.map(\.name) == [ax, bx])
         #expect(report.accounts.map(\.live) == [true, false])
         #expect(report.accounts.map(\.outcome.usage) == (try w.store.list(.claude)).compactMap(\.usage))
+    }
+}
+
+/// Waiters take a provider's turn in the order they began waiting: a probe
+/// that asks as the turn comes free goes after the switch that waited for
+/// it, and that switch's probes answer it.
+@MainActor @Test func turnGoesToWaitersInArrivalOrder() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (_, _, by) = try codexPair(w)
+    let busy = StubHTTP([answer(Status.ok, codexUsage(session: 20, week: 45)),
+                         answer(Status.ok, codexUsage(session: 15, week: 25))])
+    let first = Switcher(paths: w.paths, store: w.store, http: busy, clock: {
+        Date(timeIntervalSince1970: TimeInterval(Fixed.now + 1))
+    }, turnWait: nil)
+    // Another process holds the Codex turn while a switch waits for it.
+    let held = open(w.paths.turn(.codex).path, O_RDONLY | O_CREAT | O_CLOEXEC, Fixed.fileMode)
+    try #require(held >= 0)
+    try #require(flock(held, LOCK_EX) == 0)
+    let switched = Task { try await first.use(.codex, by) }
+    let queue = w.paths.turnQueue(.codex).path
+    try await poll("the switch to queue") {
+        (try? FileManager.default.contentsOfDirectory(atPath: queue).count) == 1
+    }
+    close(held)
+    let idle = StubHTTP([])
+    let report = await w.switcher(idle).probeAll(.codex)
+    try await switched.value
+
+    #expect(idle.requests.isEmpty)
+    #expect(report.providerError == nil)
+    #expect(try w.history().map { "\($0.kind) \($0.name)" } == ["switch b@y", "usage b@y", "usage a@y"])
+    #expect(try FileManager.default.contentsOfDirectory(atPath: queue).isEmpty)
+}
+
+/// A waiter that gave up or died holds no one up: one that gives up leaves
+/// the queue, and the next operation removes a dead one's entry and takes
+/// the turn.
+@Test func goneWaiterNeverHoldsUpTheQueue() async throws {
+    try await scratch { w in
+        let (_, ay, by) = try codexPair(w)
+        let queue = w.paths.turnQueue(.codex)
+        // Another process holds the Codex turn: a switch and a save give up.
+        let held = open(w.paths.turn(.codex).path, O_RDONLY | O_CREAT | O_CLOEXEC, Fixed.fileMode)
+        try #require(held >= 0)
+        try #require(flock(held, LOCK_EX) == 0)
+        let hasty = Switcher(paths: w.paths, store: w.store, http: StubHTTP([]), clock: w.clock, turnWait: Fixed.giveUp)
+        await #expect(throws: KibaError.turnBusy(.codex)) { try await hasty.use(.codex, by) }
+        #expect(throws: KibaError.turnBusy(.codex)) { try hasty.save(.codex) }
+        close(held)
+        try Data().write(to: queue.appending(component: Fixed.deadWaiter))
+        let sw = Switcher(paths: w.paths, store: w.store, http: StubHTTP([]), clock: w.clock, turnWait: Fixed.settleLimit)
+
+        #expect(try sw.save(.codex) == ay)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: queue.path).isEmpty)
     }
 }
 
@@ -2069,6 +2128,8 @@ enum Fixed {
     /// A directory that lists and reads but takes no new file.
     static let lockedMode = 0o500
     static let openMode = 0o700
+    /// A private file, as the store's are.
+    static let fileMode: mode_t = 0o600
     /// A directory that cannot even be searched.
     static let shutMode = 0o000
     /// `Fixed.now + hour` and `Fixed.now + 4 days` in ISO 8601.
@@ -2081,8 +2142,10 @@ enum Fixed {
     static let org = "5f1c2a9e-8d3b-4c7a-9e21-0b6d4f3a7c58"
     /// A directory that takes new files but cannot be opened to list or flush.
     static let writeOnlyMode = 0o300
-    /// How long a test leaves an operation to overtake one in flight, were it allowed to.
-    static let overtake = Duration.milliseconds(200)
+    /// How long a waiter that gives up waits for the turn.
+    static let giveUp = Duration.milliseconds(100)
+    /// A queue entry name that sorts before any a waiter makes.
+    static let deadWaiter = "0"
     /// The database and the files SQLite keeps beside it in WAL mode.
     static let dbFiles = ["", "-wal", "-shm"]
     /// Why the store refuses to write b@y's usage once `freezeB` has run.

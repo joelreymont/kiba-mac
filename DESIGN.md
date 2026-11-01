@@ -94,6 +94,7 @@ public struct Paths: Sendable {
   public var probe: URL             // store/probe
   public func loginRoot(_ p: Provider) -> URL            // store/probe/login-<provider>
   public func turn(_ p: Provider) -> URL                 // store/turn-<provider>: the provider's turn (see Switcher)
+  public func turnQueue(_ p: Provider) -> URL            // store/turn-<provider>.queue/: its waiters, in arrival order
   // HOME, CLAUDE_CONFIG_DIR, CODEX_HOME must be absolute when set:
   // a relative or `~` value throws io("<VAR> is not an absolute path: <value>");
   // nothing ever expands `~`.
@@ -307,7 +308,8 @@ history.
 
 No slot directories, no markers: a write transaction is the row mutex
 and every row is whole or absent. The turn files beside it
-(`paths.turn(p)`) anchor the provider turns and hold no data; a
+(`paths.turn(p)`) and their queues (`paths.turnQueue(p)`) anchor the
+provider turns and hold no data; a
 transaction never spans a network wait.
 
 ```sql
@@ -925,10 +927,24 @@ The turn is an exclusive `flock` on `paths.turn(p)`, which each holder opens
 afresh (0600, `O_NOFOLLOW`, `O_CLOEXEC`) and closes to leave. A `flock` lock
 belongs to the open file, so two holders in one process exclude each other
 as two processes do, and the kernel releases the lock of a holder that
-dies. A waiter tries the lock every 100 ms (`LOCK_NB`): the async
-operations suspend between tries, the synchronous ones block their thread,
-and which waiter goes next is whichever tries first. `turnWait` bounds the
-wait: past it the operation throws `turnBusy`, which `probeAll` reports as
+dies. Waiters go in the order they began waiting. Each first adds an
+entry to `paths.turnQueue(p)` (0700), created then locked by one `open`
+(0600, `O_EXCL`, `O_EXLOCK`) and named by its `CLOCK_UPTIME_RAW` nanosecond,
+pid and a per-process count, zero-padded so names sort in that order. The
+name appears before its lock, so a waiter behind can find it unlocked and
+unlink it; the joiner sees that as `EWOULDBLOCK` from the `open` or no link
+left on its locked entry, and joins again under a fresh name. Every
+100 ms it tries the entries sorting before its own in order (`LOCK_NB`): the
+first locked one is a live waiter ahead and ends this try; an unlocked one's
+owner is gone, so it unlinks it. A live waiter ahead holds the queue until
+it gets the turn, gives up or dies, so a stopped waiter holds everyone
+behind it. With none ahead it tries the turn file (`LOCK_NB`). The
+async operations suspend between tries, the synchronous ones block their
+thread. The queue only orders who tries: the turn file alone excludes, so
+a kiba without the queue still excludes and is excluded. The holder keeps
+its entry until it leaves; leaving or giving up closes the turn file and
+removes its entry. `turnWait` bounds the wait: past it the operation
+throws `turnBusy`, which `probeAll` reports as
 its `providerError`; nil, as the app passes, waits as long as it takes.
 Once held, a turn is never given up before its operation ends. A waiter
 reads its rows only once it holds the turn, so it sees every write of the
@@ -1599,6 +1615,7 @@ lose the rotated token and leave the login dead.
 ~/Library/Application Support/Kiba/     0700
   kiba.db                               0600, plus SQLite's -wal and -shm
   turn-claude, turn-codex               0600, empty: each provider's turn (flock)
+  turn-claude.queue/, turn-codex.queue/ 0700: one empty 0600 entry per waiter (flock)
   probe/                                scratch: login-claude/, login-codex/
 ```
 

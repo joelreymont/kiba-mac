@@ -9,6 +9,9 @@ What stands now. Edit or remove an entry when it is reversed or stops holding.
   notice line for it ("wait, no notice. don't pollute my nice list").
 - 2026-11-01, a click on an account row while usage refreshes: "Queue the
   switch"; it runs once the refresh ends.
+- 2026-11-01, waiters for a provider's turn go in arrival order through a
+  new public `Paths.turnQueue(_:)` and a `turn-<provider>.queue/` lock
+  folder beside each turn file in the store: "Approve both".
 
 ## Lessons
 

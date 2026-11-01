@@ -47,6 +47,11 @@ public struct Paths: Sendable {
 
     /// The empty file whose lock is a provider's turn, shared by every process.
     public func turn(_ p: Provider) -> URL { Self.child(store, Name.turnPrefix + p.rawValue) }
+    /// The directory of a provider's turn queue: one entry per waiter, named
+    /// by when it began waiting.
+    public func turnQueue(_ p: Provider) -> URL {
+        store.appending(component: Name.turnPrefix + p.rawValue + Name.queueSuffix, directoryHint: .isDirectory)
+    }
 
     /// Keychain service of the Claude login `add` runs, which exports this
     /// config dir as `CLAUDE_CONFIG_DIR`.
@@ -127,6 +132,7 @@ public struct Paths: Sendable {
         static let probe = "probe"
         static let loginPrefix = "login-"
         static let turnPrefix = "turn-"
+        static let queueSuffix = ".queue"
         static let claudeDir = ".claude"
         static let claudeConfig = ".claude.json"
         static let claudeCreds = ".credentials.json"

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Saves, installs, forgets and probes saved logins (kiba `save`, `use`,
 /// `forget`, `usage`), and spends their limit resets. Every store change runs in a `Store.write`
@@ -23,8 +24,8 @@ public final class Switcher: Sendable {
         self.store = store
         self.http = http
         self.clock = clock
-        claudeOps = Turn(file: paths.turn(.claude), provider: .claude, wait: turnWait)
-        codexOps = Turn(file: paths.turn(.codex), provider: .codex, wait: turnWait)
+        claudeOps = Turn(file: paths.turn(.claude), queue: paths.turnQueue(.claude), provider: .claude, wait: turnWait)
+        codexOps = Turn(file: paths.turn(.codex), queue: paths.turnQueue(.codex), provider: .codex, wait: turnWait)
     }
 
     /// Saves the live login under the name it belongs to; nil when there is
@@ -87,7 +88,7 @@ public final class Switcher: Sendable {
     /// reports those recorded outcomes and probes nothing.
     public func probeAll(_ p: Provider) async -> ProbeReport {
         let asked = Int(clock().timeIntervalSince1970)
-        let held: Int32
+        let held: Ticket
         do {
             held = try await ops(p).enter()
         } catch {
@@ -330,10 +331,16 @@ extension CodexLive: LiveFiles {}
 /// Each holder opens the file afresh, and a `flock` lock belongs to the open
 /// file, so two holders in one process exclude each other as two processes
 /// do. A turn lasts across suspension points until `leave`, never given up
-/// early; the kernel releases the lock of a holder that dies. Which waiter
-/// goes next is whichever polls first.
+/// early; the kernel releases the lock of a holder that dies. Waiters take
+/// it in the order they began waiting: each first creates and locks an entry
+/// in the queue directory, named by its uptime nanosecond, pid and a
+/// per-process count, and tries the turn file only while no entry sorting
+/// before its own is locked. An unlocked entry's owner is gone, so the
+/// waiter that finds it removes it. The name appears before its lock, so a
+/// waiter behind can take it first; the joiner then joins again.
 struct Turn: Sendable {
     let file: URL
+    let queue: URL
     let provider: Provider
     /// How long `enter` waits before `turnBusy`; nil: as long as it takes.
     let wait: Duration?
@@ -343,45 +350,63 @@ struct Turn: Sendable {
     /// The file holds no data: created 0600, never through a link, never
     /// inherited by a child.
     static let flags = O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
+    /// A queue entry holds no data; `open` creates its name, then locks it.
+    static let entryFlags = O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_EXLOCK | O_NONBLOCK
+    /// An entry ahead is opened only to try its lock.
+    static let peekFlags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+    /// Digits of an entry name's parts, enough for any value, so names sort
+    /// as their numbers do.
+    static let stampDigits = 20
+    static let pidDigits = 10
+    static let countDigits = 20
+    static let separator = "-"
+    /// Entries this process has created.
+    private static let created = OSAllocatedUnfairLock(initialState: UInt64(0))
 
-    init(file: URL, provider: Provider, wait: Duration?) {
+    init(file: URL, queue: URL, provider: Provider, wait: Duration?) {
         self.file = file
+        self.queue = queue
         self.provider = provider
         self.wait = wait
     }
 
-    /// Suspends until the caller holds the turn; the descriptor it returns
-    /// goes back to `leave`. A cancelled wait is `io`.
-    func enter() async throws -> Int32 {
-        let fd = try openFile()
+    /// Suspends until the caller holds the turn; the ticket it returns goes
+    /// back to `leave`. A cancelled wait is `io`.
+    func enter() async throws -> Ticket {
+        let ticket = try join()
         do {
             let deadline = deadline()
-            while try !take(fd, by: deadline) { try await Task.sleep(for: Self.poll) }
+            while try !take(ticket, by: deadline) { try await Task.sleep(for: Self.poll) }
         } catch {
-            close(fd)
+            leave(ticket)
             throw error is CancellationError ? KibaError.io("wait for \(file.path) cancelled") : error
         }
-        return fd
+        return ticket
     }
 
-    /// Blocks the thread until the caller holds the turn; the descriptor it
+    /// Blocks the thread until the caller holds the turn; the ticket it
     /// returns goes back to `leave`.
-    func enterBlocking() throws -> Int32 {
-        let fd = try openFile()
+    func enterBlocking() throws -> Ticket {
+        let ticket = try join()
         do {
             let deadline = deadline()
-            while try !take(fd, by: deadline) { Thread.sleep(forTimeInterval: Self.poll / .seconds(1)) }
+            while try !take(ticket, by: deadline) { Thread.sleep(forTimeInterval: Self.poll / .seconds(1)) }
         } catch {
-            close(fd)
+            leave(ticket)
             throw error
         }
-        return fd
+        return ticket
     }
 
-    /// Ends the turn `enter` gave: closing the descriptor releases the lock.
-    func leave(_ fd: Int32) {
-        // The descriptor holds no data, so closing it cannot fail in a way that matters.
-        close(fd)
+    /// Ends the turn `enter` gave, or a wait that gave up: closing the turn
+    /// file releases its lock, then the queue entry goes.
+    func leave(_ ticket: Ticket) {
+        // Neither descriptor holds data, so closing one cannot fail in a way
+        // that matters; an entry whose unlink fails is unlocked once closed,
+        // so the next waiter removes it.
+        close(ticket.turn)
+        unlink(ticket.path)
+        close(ticket.entry)
     }
 
     /// When a wait that starts now ends; nil when it never does.
@@ -389,25 +414,121 @@ struct Turn: Sendable {
         wait.map { ContinuousClock.now + $0 }
     }
 
-    /// The turn file, opened afresh.
-    private func openFile() throws -> Int32 {
+    /// Joins the queue, then opens the turn file afresh.
+    private func join() throws -> Ticket {
+        try PrivateFS.ensurePrivateDir(queue)
         while true {
-            let fd = open(file.path, Self.flags, PrivateFS.fileMode)
-            if fd >= 0 { return fd }
-            guard errno == EINTR else { throw KibaError.io(PrivateFS.failure("open", file.path)) }
+            let count = Self.created.withLock { count in
+                defer { count += 1 }
+                return count
+            }
+            let name = [
+                Self.padded(clock_gettime_nsec_np(CLOCK_UPTIME_RAW), Self.stampDigits),
+                Self.padded(UInt64(getpid()), Self.pidDigits),
+                Self.padded(count, Self.countDigits),
+            ].joined(separator: Self.separator)
+            let path = queue.appending(component: name, directoryHint: .notDirectory).path
+            guard let entry = try Self.entry(path) else { continue }
+            do {
+                return Ticket(turn: try Self.open(file.path, Self.flags), entry: entry, name: name, path: path)
+            } catch {
+                unlink(path)
+                close(entry)
+                throw error
+            }
         }
     }
 
-    /// Locks `fd` when the turn is free (true); false while another holder
-    /// has it, until `deadline` has passed: then `turnBusy`.
-    private func take(_ fd: Int32, by deadline: ContinuousClock.Instant?) throws -> Bool {
+    /// Locks the turn file when no live waiter is ahead and the turn is free
+    /// (true); false otherwise, until `deadline` has passed: then `turnBusy`.
+    private func take(_ ticket: Ticket, by deadline: ContinuousClock.Instant?) throws -> Bool {
+        if try !waiterAhead(ticket), try lock(ticket.turn, file.path) { return true }
+        if let deadline, ContinuousClock.now >= deadline { throw KibaError.turnBusy(provider) }
+        return false
+    }
+
+    /// Whether a live waiter's entry sorts before `ticket`'s; removes each
+    /// one ahead whose owner is gone.
+    private func waiterAhead(_ ticket: Ticket) throws -> Bool {
+        let own = Array(ticket.name.utf8)
+        for raw in try PrivateFS.list(queue) where raw.lexicographicallyPrecedes(own) {
+            let path = queue.appending(component: String(decoding: raw, as: UTF8.self), directoryHint: .notDirectory).path
+            guard let fd = try Self.openIfThere(path, Self.peekFlags) else { continue }
+            // The entry holds no data, so closing it cannot fail in a way that matters.
+            defer { close(fd) }
+            guard try lock(fd, path) else { return true }
+            guard unlink(path) == 0 || errno == ENOENT else { throw KibaError.io(PrivateFS.failure("unlink", path)) }
+        }
+        return false
+    }
+
+    /// Locks `fd`, opened from `path`, when no one else holds it (true); false
+    /// while another does.
+    private func lock(_ fd: Int32, _ path: String) throws -> Bool {
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
             let code = errno
             if code == EINTR { continue }
-            guard code == EWOULDBLOCK else { throw KibaError.io(PrivateFS.failure("flock", file.path, code)) }
-            if let deadline, ContinuousClock.now >= deadline { throw KibaError.turnBusy(provider) }
+            guard code == EWOULDBLOCK else { throw KibaError.io(PrivateFS.failure("flock", path, code)) }
             return false
         }
         return true
     }
+
+    /// A new entry at `path`, created 0600 and locked; nil when a waiter
+    /// behind took the name between its creation and its lock. Such a waiter
+    /// unlinks the entry before it unlocks it, so a locked entry with no link
+    /// left was taken.
+    private static func entry(_ path: String) throws -> Int32? {
+        var fd: Int32
+        repeat {
+            fd = Darwin.open(path, entryFlags, PrivateFS.fileMode)
+        } while fd < 0 && errno == EINTR
+        if fd < 0 {
+            let code = errno
+            if code == EWOULDBLOCK { return nil }
+            throw KibaError.io(PrivateFS.failure("open", path, code))
+        }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            let code = errno
+            close(fd)
+            throw KibaError.io(PrivateFS.failure("fstat", path, code))
+        }
+        if info.st_nlink > 0 { return fd }
+        // The entry holds no data, so closing it cannot fail in a way that matters.
+        close(fd)
+        return nil
+    }
+
+    /// `path` opened with `flags`, created 0600.
+    private static func open(_ path: String, _ flags: Int32) throws -> Int32 {
+        guard let fd = try openIfThere(path, flags) else { throw KibaError.io(PrivateFS.failure("open", path, ENOENT)) }
+        return fd
+    }
+
+    /// `path` opened with `flags`, created 0600; nil when it is not there.
+    private static func openIfThere(_ path: String, _ flags: Int32) throws -> Int32? {
+        while true {
+            let fd = Darwin.open(path, flags, PrivateFS.fileMode)
+            if fd >= 0 { return fd }
+            let code = errno
+            if code == ENOENT { return nil }
+            guard code == EINTR else { throw KibaError.io(PrivateFS.failure("open", path, code)) }
+        }
+    }
+
+    /// `value` in decimal, zero-padded to `digits`.
+    private static func padded(_ value: UInt64, _ digits: Int) -> String {
+        let text = String(value)
+        return String(repeating: "0", count: digits - text.count) + text
+    }
+}
+
+/// A place in a provider's turn: the turn file and the waiter's locked queue
+/// entry, both open until `leave`.
+struct Ticket: Sendable {
+    let turn: Int32
+    let entry: Int32
+    let name: String
+    let path: String
 }

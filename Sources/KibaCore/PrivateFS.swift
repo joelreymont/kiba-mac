@@ -258,6 +258,37 @@ public enum PrivateFS {
         }
     }
 
+    /// The raw names of the entries in the directory `url`, without `.` and `..`,
+    /// never following a link to it.
+    static func list(_ url: URL) throws -> [[UInt8]] {
+        let path = url.path
+        let fd = open(path, dirFlags)
+        guard fd >= 0 else { throw KibaError.io(failure("open", path)) }
+        guard let dir = fdopendir(fd) else {
+            let err = failure("opendir", path)
+            close(fd)
+            throw KibaError.io(err)
+        }
+        // A read-only directory handle holds no data, so closing it cannot fail in a way that matters.
+        defer { closedir(dir) }
+        return try names(dir, path)
+    }
+
+    /// The raw names `dir` lists, without `.` and `..`.
+    private static func names(_ dir: UnsafeMutablePointer<DIR>, _ shown: String) throws -> [[UInt8]] {
+        var names: [[UInt8]] = []
+        while true {
+            errno = 0
+            guard let ent = readdir(dir) else {
+                guard errno == 0 else { throw KibaError.io(failure("readdir", shown)) }
+                return names
+            }
+            let len = Int(ent.pointee.d_namlen)
+            let entry = withUnsafeBytes(of: &ent.pointee.d_name) { Array($0.prefix(len)) }
+            if entry != dotName && entry != dotDotName { names.append(entry) }
+        }
+    }
+
     /// Removes everything inside the directory `name` under `at`, never following a link.
     /// Entries are removed by their raw name bytes.
     static func empty(_ at: Int32, _ name: UnsafePointer<CChar>, _ shown: String) throws {
@@ -270,18 +301,7 @@ public enum PrivateFS {
         }
         // A read-only directory handle holds no data, so closing it cannot fail in a way that matters.
         defer { closedir(dir) }
-        var names: [[UInt8]] = []
-        while true {
-            errno = 0
-            guard let ent = readdir(dir) else {
-                guard errno == 0 else { throw KibaError.io(failure("readdir", shown)) }
-                break
-            }
-            let len = Int(ent.pointee.d_namlen)
-            let entry = withUnsafeBytes(of: &ent.pointee.d_name) { Array($0.prefix(len)) }
-            if entry != dotName && entry != dotDotName { names.append(entry + [0]) }
-        }
-        for entry in names {
+        for entry in try names(dir, shown).map({ $0 + [0] }) {
             let shownEntry = shown + "/" + String(decoding: entry.dropLast(), as: UTF8.self)
             try entry.withUnsafeBytes { raw in
                 try remove(fd, raw.baseAddress!.assumingMemoryBound(to: CChar.self), shownEntry)
