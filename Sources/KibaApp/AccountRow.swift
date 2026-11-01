@@ -53,7 +53,7 @@ struct AccountRow: View {
             .modifier(Slab(fill: fill))
         }
         .buttonStyle(.plain)
-        .disabled(model.busy)
+        .disabled(model.busy && !model.probing)
         .help(Rows.tooltip(provider, account, now: model.now).joined(separator: "\n"))
         .contextMenu {
             Button("Forget…") { model.ask(.forget, provider, account.name) }

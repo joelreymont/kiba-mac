@@ -123,6 +123,9 @@ final class AppModel {
     private(set) var availability = Availability.checking
     private(set) var refreshing = false
     private(set) var busy = false
+    /// True while a usage probe's run is busy: account rows stay live and
+    /// queue a switch for when it ends.
+    private(set) var probing = false
     /// The running action's label, then its plain confirmation, which fades.
     private(set) var message = ""
     /// A result that needs attention, kept until dismissed or superseded:
@@ -156,6 +159,8 @@ final class AppModel {
     /// the providers those concern: a probe the user starts replaces them,
     /// the one opening the panel starts adds to them.
     private var probeNote = ""
+    /// The switch a row click queued while a probe ran; the latest wins.
+    private var pendingUse: (provider: Provider, name: SlotName)?
     private var probeError = ""
     private var probeFaults: Set<Provider> = []
 
@@ -476,9 +481,10 @@ final class AppModel {
 
     // MARK: Actions
 
-    /// Runs the control `k` names. Each action refuses while one runs;
-    /// Keep (it only ends a confirmation), Dismiss (it only clears the
-    /// notice) and Retry (it only rereads) always run.
+    /// Runs the control `k` names. Each action refuses while one runs,
+    /// but a row click during a probe queues instead; Keep (it only ends a
+    /// confirmation), Dismiss (it only clears the notice) and Retry (it
+    /// only rereads) always run.
     func trigger(_ k: ActionKey) {
         switch k {
         case .use(let p, let n): use(p, n)
@@ -496,21 +502,32 @@ final class AppModel {
     /// Acknowledges the held notice: its result and the action error go.
     func dismiss() {
         let old = actions
-        actionNote = ""
-        actionError = ""
-        clearProbe()
+        supersede()
         retain(old)
     }
 
     /// Switches to a saved account; a dead or rate-limited one is logged in
-    /// again instead.
-    func use(_ p: Provider, _ n: SlotName) {
-        guard let a = account(p, n), !a.active else { return }
-        if Rows.relogin(a.usage, active: a.active) {
-            add(p, expected: n)
+    /// again instead. While a probe runs, the switch waits for it to end;
+    /// the latest click wins, and one on the active row drops it.
+    func use(_ p: Provider, _ n: SlotName, scope: Scope = .action) {
+        guard let a = account(p, n) else { return }
+        if probing {
+            if !a.active {
+                supersede()
+                pendingUse = (p, n)
+                message = Copy.queued(p, n, relogin: Rows.relogin(a.usage, active: a.active))
+            } else if pendingUse != nil {
+                pendingUse = nil
+                message = Copy.probing
+            }
             return
         }
-        run("Switching \(p.title) to \(n.raw)…") { b in
+        guard !a.active else { return }
+        if Rows.relogin(a.usage, active: a.active) {
+            add(p, expected: n, scope: scope)
+            return
+        }
+        run("Switching \(p.title) to \(n.raw)…", scope: scope) { b in
             try await b.use(p, n)
             return Outcome(text: "\(p.title): now \(n.raw)")
         }
@@ -524,13 +541,13 @@ final class AppModel {
     }
 
     /// Runs the provider's login in Terminal; the panel closes first.
-    func add(_ p: Provider, expected: SlotName?) {
+    func add(_ p: Provider, expected: SlotName?, scope: Scope = .action) {
         guard !busy else { return }
         if panelOpen {
             closePanel()
             closed()
         }
-        run("Adding a \(p.title) account…") { b in
+        run("Adding a \(p.title) account…", scope: scope) { b in
             let r = try await b.add(p, expected: expected)
             if r.differs, let e = r.expected { return Outcome(text: "Added \(r.saved.raw), not \(e.raw)", held: true) }
             return Outcome(text: "Added \(r.saved.raw)")
@@ -626,12 +643,11 @@ final class AppModel {
     ) {
         guard !busy, let b = backend else { return }
         busy = true
+        probing = scope == .probe || scope == .autoProbe
         clearer?.cancel()
         message = label
-        if scope != .autoProbe {
-            actionNote = ""
-            actionError = ""
-            clearProbe()
+        if scope == .action || scope == .probe {
+            supersede()
         }
         Task {
             do {
@@ -642,6 +658,11 @@ final class AppModel {
             }
             await reread()
             busy = false
+            probing = false
+            if let q = pendingUse {
+                pendingUse = nil
+                use(q.provider, q.name, scope: .queued)
+            }
             maybeAutoProbe()
         }
     }
@@ -653,7 +674,7 @@ final class AppModel {
         let held = o.held ? o.text : ""
         var said = [o.text] + o.errors
         switch scope {
-        case .action:
+        case .action, .queued:
             actionNote = held
             // A failure reported while the action ran stays beside its result.
             actionError = Self.merge(actionError, o.errors)
@@ -680,7 +701,10 @@ final class AppModel {
         if !said.isEmpty { announce(said.joined(separator: Copy.lineBreak)) }
     }
 
-    private func clearProbe() {
+    /// Clears what is held, on Dismiss or for what the user starts.
+    private func supersede() {
+        actionNote = ""
+        actionError = ""
         probeNote = ""
         probeError = ""
         probeFaults = []
@@ -693,7 +717,13 @@ final class AppModel {
 
     /// What a result supersedes: the user's action or probe, everything
     /// held; the probe the panel starts on opening, nothing.
-    private enum Scope { case action, probe, autoProbe }
+    enum Scope {
+        case action, probe, autoProbe
+        /// A click's switch that waited for a probe; its click superseded
+        /// what was held, so its start clears nothing, and its result shows
+        /// as `.action`'s.
+        case queued
+    }
 
     private func fail(_ reason: String) {
         actionError = Self.merge(actionError, Self.split(reason))
@@ -860,6 +890,12 @@ final class AppModel {
         static let lineBreak = "\n"
         static let listSep = ", "
         static let partSep = "; "
+
+        /// What a click queued during a probe will start once it ends.
+        static func queued(_ p: Provider, _ n: SlotName, relogin: Bool) -> String {
+            let act = relogin ? "Adding a \(p.title) account" : "Switching \(p.title) to \(n.raw)"
+            return act + " once usage is refreshed…"
+        }
 
         static func accounts(_ n: Int) -> String {
             "\(n) account" + (n == 1 ? "" : "s")

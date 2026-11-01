@@ -3230,6 +3230,52 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(spoken == [failure.reason, "Codex: now b@y"])
 }
 
+/// A row clicked while usage refreshes queues its switch, which runs once
+/// the probe has ended and keeps what was held since the click.
+@MainActor @Test func appModelQueuesASwitchWhileUsageRefreshes() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, http, ay, by) = try heldCodexPair(w)
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await http.arrival()
+    model.use(.codex, by)
+    #expect(model.message == "Switching Codex to b@y once usage is refreshed…")
+    #expect(activeRow(model, .codex) == ay)
+    let failure = KibaError.loginItem(Fixed.offline)
+    model.report(failure)
+    http.release()
+    try await settle(model)
+    #expect(model.message == "Codex: now b@y")
+    #expect(model.error == failure.reason)
+    #expect(activeRow(model, .codex) == by)
+    let events = try w.history().map { "\($0.kind) \($0.name)" }
+    #expect(events == ["usage a@y", "usage b@y", "switch b@y", "usage b@y", "usage a@y"])
+}
+
+/// A click on the active row while usage refreshes drops the queued switch.
+@MainActor @Test func appModelDropsAQueuedSwitchOnTheActiveRow() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, http, ay, by) = try heldCodexPair(w)
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await http.arrival()
+    model.use(.codex, by)
+    model.use(.codex, ay)
+    #expect(model.message == "Refreshing usage for every saved account…")
+    http.release()
+    try await settle(model)
+    #expect(activeRow(model, .codex) == ay)
+    #expect(try !w.history().contains { $0.kind == Event.switchKind })
+}
+
 /// A Codex world where a@y is live and saved and b@y is saved, and the
 /// `CoreBackend` over it; a switch probes both accounts once, and so does
 /// a probe, which reaches a@y first. `answers` are the usage answers, in turn.

@@ -1237,7 +1237,7 @@ the same `CoreBackend`, wrapped to hold its status reads at a gate when a
 test needs a read in flight.
 
 State: `snapshot: Snapshot`, `availability: .ready | .failed(String)`,
-`refreshing`, `busy`, `message`, `note`, `error`, `lastProbe: ProbeRun?`
+`refreshing`, `busy`, `probing` (a probe's run is busy), `message`, `note`, `error`, `lastProbe: ProbeRun?`
 (epoch the latest probe of every account started, `clean`: nothing failed
 or waited and every provider was probed, and the usage it recorded per
 account; `complete(snapshot)`: clean, and every row the snapshot shows
@@ -1271,7 +1271,13 @@ default 120, min 15).
   opening probe speaks only the lines it adds, so a held note is spoken
   once and an open does not repeat it. The status error is separate: set
   by a failed read, cleared by the next good one.
-- Actions (`busy` guards all):
+- Actions (`busy` guards all, but while `probing` account rows stay
+  live: a click on a row not active supersedes what is held and queues
+  its `use`, a later click replacing it and one on the active row
+  dropping it; the line reads "Adding a <Provider> account once usage is
+  refreshed…" for a `Rows.relogin` row, else "Switching <Provider> to
+  <name> once usage is refreshed…"; the queued `use` runs after the
+  probe's reread and clears nothing):
   `use(p, name)` — a `Rows.relogin` row starts `add(p, name.email)` instead;
   `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
   probes every provider and counts accounts per outcome: refreshed (the
@@ -1312,7 +1318,9 @@ line and the Refresh usage row keep the latest actual probe's age.
   read that shows its row gone or, for a reset, its offer spent. Each
   action ends with a forced status read and stays `busy` until that read,
   and any queued behind it, has applied its snapshot or failed: controls
-  re-enable only over rows that show the action's result.
+  re-enable only over rows that show the action's result, except that
+  during a probe account rows stay live over the rows from before it,
+  and a click there acts only after the probe's reread.
 - `actions: [ActionKey]`, every control a click can reach, in panel
   order: `dismiss` while a result or a shown action error is held; `retry`
   while the status read has failed and no read runs; per
