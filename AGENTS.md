@@ -50,10 +50,7 @@ layout, UI spec. Read it before changing anything.
 - Every error is a `KibaError` with a one-line `reason`; nothing is logged
   and swallowed. Isolation happens only in `StatusReader` and
   `Switcher.probeAll`.
-- Short names (2–3 words), no stubs, no TODOs, no dead code, no magic
-  numbers: named constants.
-- VCS is `jj`. One commit per feature or fix, 50-char imperative subject.
-  Workers edit only inside their `.jj-ws/<dot>` workspace and never push.
+- No stubs, no TODOs, no dead code, no magic numbers: named constants.
 - Track work as dots (`dot ready`, `dot show <id>`); close only when landed.
 - Agents never launch the app, never run `open`, `osascript`, or
   `screencapture`, and never activate windows: every such call steals the
@@ -62,7 +59,7 @@ layout, UI spec. Read it before changing anything.
 
 ## Verify
 
-- `swift build` warning-free is every lane's gate; `swift test` runs the
+- `swift build` warning-free is every lane's first check; `swift test` runs the
   integration suite once it exists and must be green before any commit. If
   `TMPDIR` points at a missing directory (this machine can inherit a Linux
   path), `swiftc` fails with `couldNotFindTmpDir`: export a fresh one
