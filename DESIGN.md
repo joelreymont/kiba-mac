@@ -1039,7 +1039,7 @@ public enum Rows {
   static func blocking(_ u: UsageRecord?) -> Limit?  // among session and weekly at percent ≥ 100: latest parseable reset, else the first
   static func headline(_ u: UsageRecord?) -> Limit?  // session ?? weekly
   static func dead(_ u: UsageRecord?, active: Bool) -> Bool   // revoked, missing, or expired && !active
-  static func relogin(_ u: UsageRecord?, active: Bool) -> Bool // dead, or throttled && !active: a click logs in again
+  static func relogin(_ u: UsageRecord?, active: Bool) -> Bool // !active && (dead or throttled): a click logs in again
   static func refused(_ p: Provider, _ u: UsageRecord?, active: Bool) -> Bool // claude && expired && !active
   static func state(_ u: UsageRecord?, active: Bool) -> RowState
   static func rank(_ u: UsageRecord?, active: Bool) -> Int // ok 0, tight 1, tight with a model window used up 2, blocked by the session 3, by the weekly 4, dead/unsubscribed 5, unknown 6
@@ -1524,8 +1524,8 @@ plan (none while unsubscribed), the verdict ("has room"; "limit reached, resets 
 "login required, log in again"; "usage not probed yet", the record's note,
 or "no limits reported"), each window "<label>: 72% left", and "probed 12
 min ago"; hint "Switches <Provider> to this account" with "Command-L logs
-in to it again" (none on the active row) or "Logs in to this account
-again", then "Delete asks to forget it", joined with ". ". The dot and reservoir are hidden from it: the value says
+in to it again" (none on the active row) or, on a `Rows.relogin` row,
+"Logs in to this account again", then "Delete asks to forget it", joined with ". ". The dot and reservoir are hidden from it: the value says
 what they show. Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
 Keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor (scrolling it into view), ⏎ and

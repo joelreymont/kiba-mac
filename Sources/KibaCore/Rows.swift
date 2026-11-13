@@ -73,9 +73,10 @@ public enum Rows {
 
     /// A click logs the account in again instead of switching to it: the
     /// saved login is dead, or its usage checks are rate limited and a
-    /// fresh login replaces the throttled token.
+    /// fresh login replaces the throttled token. A click on the live row
+    /// does nothing: its login is its CLI's.
     public static func relogin(_ u: UsageRecord?, active: Bool) -> Bool {
-        dead(u, active: active) || (u?.state == .throttled && !active)
+        !active && (dead(u, active: active) || u?.state == .throttled)
     }
 
     /// A saved Claude login Anthropic turned away: its row asks to log in

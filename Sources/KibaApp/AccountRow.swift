@@ -70,7 +70,7 @@ struct AccountRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(speechLabel)
         .accessibilityValue(speechValue(state))
-        .accessibilityHint(speechHint(state))
+        .accessibilityHint(speechHint)
         .cursorTarget(model, key)
         .overlayPreferenceValue(BadgeSpot.self) { spot in
             if let spot {
@@ -160,9 +160,9 @@ struct AccountRow: View {
 
     /// What a press does, then ⌘L's log in again where a press switches,
     /// then the Delete key's Forget.
-    private func speechHint(_ state: RowState) -> String {
+    private var speechHint: String {
         var parts: [String] = []
-        if state == .dead {
+        if Rows.relogin(account.usage, active: account.active) {
             parts.append(Copy.loginHint)
         } else if !account.active {
             parts.append("Switches \(provider.title) to this account")
