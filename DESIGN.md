@@ -1287,15 +1287,20 @@ default 120, min 15).
   opening probe speaks only the lines it adds, so a held note is spoken
   once and an open does not repeat it. The status error is separate: set
   by a failed read, cleared by the next good one.
-- Actions (`busy` guards all, but while `probing` account rows stay
-  live: a click on a row not active supersedes what is held and queues
-  its `use`, a later click replacing it and one on the active row
-  dropping it; the line reads "Adding a <Provider> account once usage is
-  refreshed…" for a `Rows.relogin` row, else "Switching <Provider> to
-  <name> once usage is refreshed…"; the queued `use` runs after the
-  probe's reread and clears nothing):
-  `use(p, name)` — a `Rows.relogin` row starts `add(p, name.email)` instead;
-  `save(p)`; `add(p, email?)` closes the panel first; `probeUsage()`
+- Actions (`busy` guards all, but while `probing` account rows and their
+  Log In Again… stay live: a click on a row not active, or a `relogin`,
+  supersedes what is held and queues its action, a later one replacing
+  it and a click on the active row dropping it; the line reads "Adding a
+  <Provider> account once usage is refreshed…" for a `relogin` or a
+  `Rows.relogin` row, else "Switching <Provider> to <name> once usage is
+  refreshed…"; the queued action runs after the probe's reread, on the
+  row as it reads then, and clears nothing):
+  `use(p, name)` — a `Rows.relogin` row starts `add(p, expected: name)`
+  instead; `relogin(p, name)` starts it for any row but the live one
+  (whose login is its CLI's; the row is read when it runs), from "Log In
+  Again…", first in the row's context menu above a divider and Forget, or
+  from ⌘L on the row (`reloginCursor()`);
+  `save(p)`; `add(p, expected?)` closes the panel first; `probeUsage()`
   probes every provider and counts accounts per outcome: refreshed (the
   provider answered: record `ok`, `unknown`, `unsubscribed` or `free`, or
   a saved Claude row Anthropic turned away, `Rows.refused`), waiting
@@ -1335,8 +1340,9 @@ line and the Refresh usage row keep the latest actual probe's age.
   action ends with a forced status read and stays `busy` until that read,
   and any queued behind it, has applied its snapshot or failed: controls
   re-enable only over rows that show the action's result, except that
-  during a probe account rows stay live over the rows from before it,
-  and a click there acts only after the probe's reread.
+  during a probe account rows and their Log In Again… stay live over the
+  rows from before it, and a click there acts only after the probe's
+  reread.
 - `actions: [ActionKey]`, every control a click can reach, in panel
   order: `dismiss` while a result or a shown action error is held; `retry`
   while the status read has failed and no read runs; per
@@ -1517,15 +1523,17 @@ one button: label "<Provider>: <name>" plus ", current account"; value the
 plan (none while unsubscribed), the verdict ("has room"; "limit reached, resets in 5 h 12 min";
 "login required, log in again"; "usage not probed yet", the record's note,
 or "no limits reported"), each window "<label>: 72% left", and "probed 12
-min ago"; hint "Switches <Provider> to this account" (none on the active
-row) or "Logs in to this account again", then "Delete asks to forget it",
-joined with ". ". The dot and reservoir are hidden from it: the value says
+min ago"; hint "Switches <Provider> to this account" with "Command-L logs
+in to it again" (none on the active row) or "Logs in to this account
+again", then "Delete asks to forget it", joined with ". ". The dot and reservoir are hidden from it: the value says
 what they show. Motion: reservoir fills animate `easeOut(0.35)` on data change,
 disabled under Reduce Motion. Hover shows the tooltip lines via `.help`.
 Keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor (scrolling it into view), ⏎ and
 Space activate the cursor's control, ⌫ or ⌦ on an account row asks to
 forget it (the same confirmation as its context menu; the row's VoiceOver
-hint names it), ⎋ backs out of a confirmation, else closes; hover moves the
+hint names it), ⌘L on an account row but the live one logs in to it again
+(its context menu's Log In Again…; named in the hint of a row a press
+switches), ⎋ backs out of a confirmation, else closes; hover moves the
 cursor without scrolling. On a confirming row
 the cursor stops on its go button (Forget or Reset) and on Keep, each lit
 with the row fill behind its label. The control under the cursor is the accessibility focus, and a

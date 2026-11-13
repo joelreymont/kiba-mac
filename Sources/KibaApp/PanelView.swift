@@ -23,7 +23,8 @@ struct PanelView: View {
         .frame(width: Theme.width)
         .background(Backdrop())
         .background(KeyCatcher(
-            move: model.move, activate: model.activate, escape: model.escape, forget: model.forgetCursor))
+            move: model.move, activate: model.activate, escape: model.escape, forget: model.forgetCursor,
+            relogin: model.reloginCursor))
     }
 
     private var content: some View {

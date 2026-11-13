@@ -123,8 +123,8 @@ final class AppModel {
     private(set) var availability = Availability.checking
     private(set) var refreshing = false
     private(set) var busy = false
-    /// True while a usage probe's run is busy: account rows stay live and
-    /// queue a switch for when it ends.
+    /// True while a usage probe's run is busy: account rows and their Log
+    /// In Again… stay live and queue their action for when it ends.
     private(set) var probing = false
     /// The running action's label, then its plain confirmation, which fades.
     private(set) var message = ""
@@ -159,8 +159,8 @@ final class AppModel {
     /// the providers those concern: a probe the user starts replaces them,
     /// the one opening the panel starts adds to them.
     private var probeNote = ""
-    /// The switch a row click queued while a probe ran; the latest wins.
-    private var pendingUse: (provider: Provider, name: SlotName)?
+    /// The row action queued while a probe ran; the latest wins.
+    private var pending: RowAct?
     private var probeError = ""
     private var probeFaults: Set<Provider> = []
 
@@ -470,6 +470,12 @@ final class AppModel {
         ask(.forget, p, n)
     }
 
+    /// ⌘L on an account row: logs it in again, as its context menu does.
+    func reloginCursor() {
+        guard case .use(let p, let n)? = cursor else { return }
+        relogin(p, n)
+    }
+
     /// Escape: backs out of a confirmation, else closes the panel.
     func escape() {
         if confirming != nil {
@@ -507,29 +513,46 @@ final class AppModel {
     }
 
     /// Switches to a saved account; a dead or rate-limited one is logged in
-    /// again instead. While a probe runs, the switch waits for it to end;
-    /// the latest click wins, and one on the active row drops it.
-    func use(_ p: Provider, _ n: SlotName, scope: Scope = .action) {
-        guard let a = account(p, n) else { return }
+    /// again instead.
+    func use(_ p: Provider, _ n: SlotName) {
+        act(RowAct(kind: .click, provider: p, name: n), .action)
+    }
+
+    /// Logs a saved account in again, as a click on a `Rows.relogin` row
+    /// does. The live login is its CLI's to log in again, so the live row
+    /// does nothing: ⌘L reaches every row, and a menu drawn before the
+    /// account went live still offers it.
+    func relogin(_ p: Provider, _ n: SlotName) {
+        guard let a = account(p, n), !a.active else { return }
+        act(RowAct(kind: .relogin, provider: p, name: n), .action)
+    }
+
+    /// Runs a row action on the row as it reads now: the account may have
+    /// gone live since the action was asked for. While a probe runs, the
+    /// action waits for it to end; the latest wins, and a click on the
+    /// active row drops it.
+    private func act(_ r: RowAct, _ scope: Scope) {
+        guard let a = account(r.provider, r.name) else { return }
+        let login = r.kind == .relogin || Rows.relogin(a.usage, active: a.active)
         if probing {
             if !a.active {
                 supersede()
-                pendingUse = (p, n)
-                message = Copy.queued(p, n, relogin: Rows.relogin(a.usage, active: a.active))
-            } else if pendingUse != nil {
-                pendingUse = nil
+                pending = r
+                message = Copy.queued(r.provider, r.name, relogin: login)
+            } else if pending != nil {
+                pending = nil
                 message = Copy.probing
             }
             return
         }
         guard !a.active else { return }
-        if Rows.relogin(a.usage, active: a.active) {
-            add(p, expected: n, scope: scope)
+        if login {
+            add(r.provider, expected: r.name, scope: scope)
             return
         }
-        run("Switching \(p.title) to \(n.raw)…", scope: scope) { b in
-            try await b.use(p, n)
-            return Outcome(text: "\(p.title): now \(n.raw)")
+        run("Switching \(r.provider.title) to \(r.name.raw)…", scope: scope) { b in
+            try await b.use(r.provider, r.name)
+            return Outcome(text: "\(r.provider.title): now \(r.name.raw)")
         }
     }
 
@@ -659,9 +682,9 @@ final class AppModel {
             await reread()
             busy = false
             probing = false
-            if let q = pendingUse {
-                pendingUse = nil
-                use(q.provider, q.name, scope: .queued)
+            if let q = pending {
+                pending = nil
+                act(q, .queued)
             }
             maybeAutoProbe()
         }
@@ -715,11 +738,20 @@ final class AppModel {
         [a, b].filter { !$0.isEmpty }.joined(separator: Copy.lineBreak)
     }
 
+    /// What a row asked for: a click switches, or logs in again on a
+    /// `Rows.relogin` row; Log In Again always logs in again.
+    private struct RowAct {
+        enum Kind { case click, relogin }
+        let kind: Kind
+        let provider: Provider
+        let name: SlotName
+    }
+
     /// What a result supersedes: the user's action or probe, everything
     /// held; the probe the panel starts on opening, nothing.
     enum Scope {
         case action, probe, autoProbe
-        /// A click's switch that waited for a probe; its click superseded
+        /// A row action that waited for a probe; asking for it superseded
         /// what was held, so its start clears nothing, and its result shows
         /// as `.action`'s.
         case queued
@@ -891,7 +923,7 @@ final class AppModel {
         static let listSep = ", "
         static let partSep = "; "
 
-        /// What a click queued during a probe will start once it ends.
+        /// What a row action queued during a probe will start once it ends.
         static func queued(_ p: Provider, _ n: SlotName, relogin: Bool) -> String {
             let act = relogin ? "Adding a \(p.title) account" : "Switching \(p.title) to \(n.raw)"
             return act + " once usage is refreshed…"

@@ -3339,6 +3339,40 @@ func members(_ body: Data?) throws -> [String: String] {
     #expect(try !w.history().contains { $0.kind == Event.switchKind })
 }
 
+/// Log In Again on a row while usage refreshes, here from ⌘L, replaces the
+/// queued click and runs once the probe has ended, leaving the live login
+/// where it was; ⌘L off the account rows or on the live row does nothing.
+@MainActor @Test func appModelQueuesALoginAgainWhileUsageRefreshes() async throws {
+    let w = try World(keychainService: Fixed.noKeychain)
+    defer { #expect(throws: Never.self) { try w.remove() } }
+    let (core, http, ay, by) = try heldCodexPair(w)
+    let fresh = codexAuth("b@y", plan: "pro", account: "acct-b", tag: "yb2")
+    try w.fakeCLI("codex", "printf '%s' '\(text(fresh))' > \"$CODEX_HOME/auth.json\"")
+    let model = AppModel(connect: { core })
+    model.start()
+    try await settle(model)
+
+    model.probeUsage()
+    try await http.arrival()
+    model.use(.codex, by)
+    let queued = "Switching Codex to b@y once usage is refreshed…"
+    model.point(.usage)
+    model.reloginCursor()
+    #expect(model.message == queued)
+    model.point(.use(.codex, ay))
+    model.reloginCursor()
+    #expect(model.message == queued)
+    model.point(.use(.codex, by))
+    model.reloginCursor()
+    #expect(model.message == "Adding a Codex account once usage is refreshed…")
+    http.release()
+    try await settle(model)
+    #expect(model.message == "Added b@y")
+    #expect(activeRow(model, .codex) == ay)
+    #expect(try w.store.fetch(.codex, by)?.login == fresh)
+    #expect(try !w.history().contains { $0.kind == Event.switchKind })
+}
+
 /// A Codex world where a@y is live and saved and b@y is saved, and the
 /// `CoreBackend` over it; a switch probes both accounts once, and so does
 /// a probe, which reaches a@y first. `answers` are the usage answers, in turn.

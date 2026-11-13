@@ -56,6 +56,12 @@ struct AccountRow: View {
         .disabled(model.busy && !model.probing)
         .help(Rows.tooltip(provider, account, now: model.now).joined(separator: "\n"))
         .contextMenu {
+            // The live login is its CLI's to log in again.
+            if !account.active {
+                Button("Log In Again…") { model.relogin(provider, account.name) }
+                    .disabled(model.busy && !model.probing)
+                Divider()
+            }
             Button("Forget…") { model.ask(.forget, provider, account.name) }
                 .disabled(model.busy)
         }
@@ -152,13 +158,15 @@ struct AccountRow: View {
         }
     }
 
-    /// What a press does, then the Delete key's Forget.
+    /// What a press does, then ⌘L's log in again where a press switches,
+    /// then the Delete key's Forget.
     private func speechHint(_ state: RowState) -> String {
         var parts: [String] = []
         if state == .dead {
             parts.append(Copy.loginHint)
         } else if !account.active {
             parts.append("Switches \(provider.title) to this account")
+            parts.append(Copy.reloginHint)
         }
         parts.append(Copy.forgetHint)
         return parts.joined(separator: Copy.hintSep)
@@ -234,6 +242,7 @@ struct AccountRow: View {
         static let left = "% left"
         static let probed = "probed "
         static let loginHint = "Logs in to this account again"
+        static let reloginHint = "Command-L logs in to it again"
         static let forgetHint = "Delete asks to forget it"
         static let hintSep = ". "
 

@@ -2,18 +2,20 @@ import AppKit
 import SwiftUI
 
 /// Panel keyboard: ↑/↓ and ⇥/⇧⇥ move the cursor, ⏎ and Space activate,
-/// ⌫ and ⌦ ask to forget the cursor's account, ⎋ backs out or closes; any
-/// other key keeps AppKit's default. An invisible AppKit view that takes
-/// first responder whenever the panel's window becomes key, and reads keys
-/// through the standard key bindings. Holding first responder is safe
-/// because the panel has no text field or other control that reads keys,
-/// and the cursor reaches every control a click can, so it replaces the
-/// key-view loop rather than hiding a control from it.
+/// ⌫ and ⌦ ask to forget the cursor's account, ⌘L logs it in again, ⎋
+/// backs out or closes; any other key keeps AppKit's default. An invisible
+/// AppKit view that takes first responder whenever the panel's window
+/// becomes key and reads keys through the standard key bindings; ⌘L comes
+/// as a key equivalent. Holding first responder is safe because the panel
+/// has no text field or other control that reads keys, and the cursor
+/// reaches every control a click can, so it replaces the key-view loop
+/// rather than hiding a control from it.
 struct KeyCatcher: NSViewRepresentable {
     let move: (Int) -> Void
     let activate: () -> Void
     let escape: () -> Void
     let forget: () -> Void
+    let relogin: () -> Void
 
     func makeNSView(context: Context) -> KeyView {
         let v = KeyView()
@@ -30,6 +32,7 @@ struct KeyCatcher: NSViewRepresentable {
         v.activate = activate
         v.escape = escape
         v.forget = forget
+        v.relogin = relogin
     }
 }
 
@@ -38,6 +41,7 @@ final class KeyView: NSView {
     var activate: () -> Void = {}
     var escape: () -> Void = {}
     var forget: () -> Void = {}
+    var relogin: () -> Void = {}
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -109,7 +113,20 @@ final class KeyView: NSView {
         forget()
     }
 
+    /// ⌘L arrives as a key equivalent, not through `keyDown`.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection(Key.modifiers) == .command,
+              event.charactersIgnoringModifiers?.lowercased() == Key.relogin else {
+            return super.performKeyEquivalent(with: event)
+        }
+        relogin()
+        return true
+    }
+
     private enum Key {
         static let space = " "
+        static let relogin = "l"
+        /// Caps Lock and the function key do not count against ⌘L.
+        static let modifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
     }
 }
